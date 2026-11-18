@@ -1,0 +1,332 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated user streaming preferences, profile display info, and activity timestamps.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "photoURL": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "preferredAudio": {
+          "type": "string",
+          "enum": ["sub", "dub", "hindi"]
+        },
+        "autoNext": {
+          "type": "boolean"
+        },
+        "lastActiveDay": {
+          "type": "string",
+          "maxLength": 10,
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+        },
+        "lastActiveAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "theme": {
+          "type": "string",
+          "enum": ["midnight-purple", "deep-black", "ocean-blue", "crimson-red", "emerald-green", "rose-pink", "amoled-black"]
+        },
+        "streakCurrent": {
+          "type": "number",
+          "minimum": 0
+        },
+        "streakLongest": {
+          "type": "number",
+          "minimum": 0
+        },
+        "streakLastWatchedDate": {
+          "type": "string",
+          "maxLength": 10,
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+        },
+        "streakWatchedDays": {
+          "type": "array",
+          "items": { "type": "string", "maxLength": 10 },
+          "maxItems": 60
+        },
+        "totalEpisodesCompleted": {
+          "type": "number",
+          "minimum": 0
+        },
+        "todayEpisodesCompleted": {
+          "type": "number",
+          "minimum": 0
+        },
+        "todayCompletedDate": {
+          "type": "string",
+          "maxLength": 10,
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+        },
+        "unlockedAchievements": {
+          "type": "array",
+          "items": { "type": "string", "maxLength": 40 },
+          "maxItems": 30
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "displayName", "preferredAudio", "autoNext", "createdAt", "updatedAt"]
+    },
+    "PopupBanner": {
+      "title": "PopupBanner",
+      "description": "Admin-managed promotional or announcement popup banner shown on KuroStream.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 1000
+        },
+        "imageUrl": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "buttonText": {
+          "type": "string",
+          "maxLength": 60
+        },
+        "destinationUrl": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "openInNewTab": {
+          "type": "boolean"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "startAt": {
+          "type": "string",
+          "maxLength": 40
+        },
+        "expiresAt": {
+          "type": "string",
+          "maxLength": 40
+        },
+        "frequency": {
+          "type": "string",
+          "enum": ["once_per_session", "once_per_day", "once_per_user", "always_on_launch"]
+        },
+        "createdBy": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "description",
+        "imageUrl",
+        "openInNewTab",
+        "enabled",
+        "frequency",
+        "createdBy",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "WatchlistItem": {
+      "title": "WatchlistItem",
+      "description": "Anime saved to a user watchlist.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "animeId": {
+          "type": "number"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "coverImage": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "format": {
+          "type": "string",
+          "maxLength": 40
+        },
+        "episodes": {
+          "type": "number"
+        },
+        "averageScore": {
+          "type": "number"
+        },
+        "addedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["ownerId", "animeId", "title", "coverImage", "addedAt"]
+    },
+    "FavoriteItem": {
+      "title": "FavoriteItem",
+      "description": "Anime marked as favorite by a user.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "animeId": {
+          "type": "number"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "coverImage": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "format": {
+          "type": "string",
+          "maxLength": 40
+        },
+        "averageScore": {
+          "type": "number"
+        },
+        "addedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["ownerId", "animeId", "title", "coverImage", "addedAt"]
+    },
+    "HistoryItem": {
+      "title": "HistoryItem",
+      "description": "User watch history and episode playback progress.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "animeId": {
+          "type": "number"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "coverImage": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "episodeId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "episodeNumber": {
+          "type": "number"
+        },
+        "episodeTitle": {
+          "type": "string",
+          "maxLength": 240
+        },
+        "progressSeconds": {
+          "type": "number"
+        },
+        "durationSeconds": {
+          "type": "number"
+        },
+        "audioMode": {
+          "type": "string",
+          "enum": ["sub", "dub", "hindi"]
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "ownerId",
+        "animeId",
+        "title",
+        "coverImage",
+        "episodeId",
+        "episodeNumber",
+        "progressSeconds",
+        "durationSeconds",
+        "audioMode",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "User streaming profile, playback preferences, and real activity timestamps."
+    },
+    "/users/{userId}/watchlist/{animeId}": {
+      "schema": { "$ref": "#/entities/WatchlistItem" },
+      "description": "User saved anime watchlist subcollection."
+    },
+    "/users/{userId}/favorites/{animeId}": {
+      "schema": { "$ref": "#/entities/FavoriteItem" },
+      "description": "User favorite anime subcollection."
+    },
+    "/users/{userId}/history/{animeId}": {
+      "schema": { "$ref": "#/entities/HistoryItem" },
+      "description": "User watch history and continue-watching progress subcollection."
+    },
+    "/banners/{bannerId}": {
+      "schema": { "$ref": "#/entities/PopupBanner" },
+      "description": "Admin-managed popup banners."
+    }
+  }
+}
