@@ -1,4 +1,10 @@
 import { parseWatchResponse } from '@/src/services/streamingApi';
+import {
+  extractErrorDetails,
+  extractErrorMessage,
+  isPlayableStreamUrl,
+  parseSafeJsonResponse,
+} from '@/src/utils/errorUtils';
 import type {
   AnimeWorldEpisode,
   AnimeWorldItem,
@@ -72,60 +78,88 @@ export interface AnimeWorldEpisodesResponse {
 }
 
 export async function fetchAnimeWorldHome(): Promise<AnimeWorldHomeResponse> {
-  const res = await fetch(`${AW_BASE}/home.php`, { headers: { Accept: 'application/json' } });
-  return (await res.json()) as AnimeWorldHomeResponse;
+  const endpoint = `${AW_BASE}/home.php`;
+  const res = await fetch(endpoint, { headers: { Accept: 'application/json' } });
+  const parsed = await parseSafeJsonResponse<AnimeWorldHomeResponse>(res);
+  if (!parsed.ok || !parsed.data) {
+    throw new Error(
+      extractErrorMessage(
+        parsed.data || parsed.rawText,
+        `AnimeWorld India homepage returned HTTP ${parsed.status}`
+      )
+    );
+  }
+  return parsed.data;
 }
 
 export async function fetchAnimeWorldSeries(page = 1): Promise<AnimeWorldSeriesListResponse> {
-  const res = await fetch(`${AW_BASE}/series.php?p=${encodeURIComponent(String(page))}`, {
-    headers: { Accept: 'application/json' },
-  });
-  return (await res.json()) as AnimeWorldSeriesListResponse;
+  const endpoint = `${AW_BASE}/series.php?p=${encodeURIComponent(String(page))}`;
+  const res = await fetch(endpoint, { headers: { Accept: 'application/json' } });
+  const parsed = await parseSafeJsonResponse<AnimeWorldSeriesListResponse>(res);
+  if (!parsed.ok || !parsed.data) {
+    throw new Error(
+      extractErrorMessage(
+        parsed.data || parsed.rawText,
+        `AnimeWorld India series list returned HTTP ${parsed.status}`
+      )
+    );
+  }
+  return parsed.data;
 }
 
 export async function searchAnimeWorld(query: string, page = 1): Promise<AnimeWorldSearchResponse> {
   const endpoint = `${AW_BASE}/search.php?query=${encodeURIComponent(query)}&p=${encodeURIComponent(String(page))}`;
   const res = await fetch(endpoint, { headers: { Accept: 'application/json' } });
-  const data = (await res.json().catch(() => null)) as AnimeWorldSearchResponse | null;
-  if (!res.ok || !data) {
-    const err = new Error(data?.error || `AnimeWorld India search returned HTTP ${res.status}`) as Error & {
+  const parsed = await parseSafeJsonResponse<AnimeWorldSearchResponse>(res);
+  if (!parsed.ok || !parsed.data) {
+    const details = extractErrorDetails(
+      parsed.data || parsed.rawText,
+      endpoint,
+      parsed.status,
+      `AnimeWorld India search returned HTTP ${parsed.status}`
+    );
+    const err = new Error(details.message) as Error & {
       statusCode?: number;
+      detail?: string;
+      response?: { status: number; data: unknown };
     };
-    err.statusCode = res.status || 502;
+    err.statusCode = details.statusCode || parsed.status || 502;
+    err.detail = details.detail;
+    err.response = { status: parsed.status, data: parsed.data || parsed.rawText };
     throw err;
   }
-  return data;
+  return parsed.data;
 }
 
 export async function fetchAnimeWorldSeasons(
   seriesID: string
-): Promise<{ status: number; data: AnimeWorldSeasonsResponse | null; endpointUrl: string }> {
+): Promise<{ status: number; data: AnimeWorldSeasonsResponse | null; rawText?: string; endpointUrl: string }> {
   const endpointUrl = `${AW_BASE}/seasons.php?seriesID=${encodeURIComponent(seriesID)}`;
   const res = await fetch(endpointUrl, { headers: { Accept: 'application/json' } });
-  const data = (await res.json().catch(() => null)) as AnimeWorldSeasonsResponse | null;
-  return { status: res.status, data, endpointUrl };
+  const parsed = await parseSafeJsonResponse<AnimeWorldSeasonsResponse>(res);
+  return { status: parsed.status, data: parsed.data, rawText: parsed.rawText, endpointUrl };
 }
 
 export async function fetchAnimeWorldEpisodes(
   seasonId: string
-): Promise<{ status: number; data: AnimeWorldEpisodesResponse | null; endpointUrl: string }> {
+): Promise<{ status: number; data: AnimeWorldEpisodesResponse | null; rawText?: string; endpointUrl: string }> {
   const endpointUrl = `${AW_BASE}/episodes.php?seasonId=${encodeURIComponent(seasonId)}`;
   const res = await fetch(endpointUrl, { headers: { Accept: 'application/json' } });
-  const data = (await res.json().catch(() => null)) as AnimeWorldEpisodesResponse | null;
-  return { status: res.status, data, endpointUrl };
+  const parsed = await parseSafeJsonResponse<AnimeWorldEpisodesResponse>(res);
+  return { status: parsed.status, data: parsed.data, rawText: parsed.rawText, endpointUrl };
 }
 
 export async function fetchAnimeWorldStream(params: {
   episodeId?: string;
   movieId?: string;
-}): Promise<{ status: number; data: AnimeWorldStreamResponse | null; endpointUrl: string }> {
+}): Promise<{ status: number; data: AnimeWorldStreamResponse | null; rawText?: string; endpointUrl: string }> {
   const qs = params.episodeId
     ? `episodeId=${encodeURIComponent(params.episodeId)}`
     : `movieId=${encodeURIComponent(params.movieId || '')}`;
   const endpointUrl = `${AW_BASE}/stream.php?${qs}`;
   const res = await fetch(endpointUrl, { headers: { Accept: 'application/json' } });
-  const data = (await res.json().catch(() => null)) as AnimeWorldStreamResponse | null;
-  return { status: res.status, data, endpointUrl };
+  const parsed = await parseSafeJsonResponse<AnimeWorldStreamResponse>(res);
+  return { status: parsed.status, data: parsed.data, rawText: parsed.rawText, endpointUrl };
 }
 
 function normalizeText(raw: string): string {
@@ -388,18 +422,21 @@ export async function resolveAnimeWorldStreamForAnime(options: {
       if (bestScore >= 95) break;
     }
   } catch (err) {
-    const statusCode =
-      typeof (err as { statusCode?: number } | null)?.statusCode === 'number'
-        ? (err as { statusCode: number }).statusCode
-        : 502;
+    const extracted = extractErrorDetails(
+      err,
+      lastSearchUrl,
+      undefined,
+      'Unable to reach AnimeWorld India search API.'
+    );
+    const msg = extracted.message.toLowerCase().includes('animeworld')
+      ? extracted.message
+      : `AnimeWorld India search failed: ${extracted.message}`;
     return {
       error: {
-        statusCode,
+        statusCode: extracted.statusCode || 502,
         endpointUrl: lastSearchUrl,
-        message:
-          err instanceof Error
-            ? `AnimeWorld India search failed: ${err.message}`
-            : 'Unable to reach AnimeWorld India search API.',
+        message: msg,
+        detail: extracted.detail,
       },
     };
   }
@@ -417,23 +454,24 @@ export async function resolveAnimeWorldStreamForAnime(options: {
   let streamStatus = 404;
   let streamEndpoint = '';
   let streamPayload: AnimeWorldStreamResponse | null = null;
+  let streamRawText = '';
 
   if (bestItem.movieId && (isMovie || !bestItem.seriesId)) {
     const res = await fetchAnimeWorldStream({ movieId: bestItem.movieId });
     streamStatus = res.status;
     streamEndpoint = res.endpointUrl;
     streamPayload = res.data;
+    streamRawText = res.rawText || '';
   } else if (bestItem.seriesId) {
     const seasonsRes = await fetchAnimeWorldSeasons(bestItem.seriesId);
     if (seasonsRes.status >= 400 || !seasonsRes.data?.success || seasonsRes.data.seasons.length === 0) {
       return {
-        error: {
-          statusCode: seasonsRes.status || 404,
-          endpointUrl: seasonsRes.endpointUrl,
-          message:
-            seasonsRes.data?.error ||
-            `AnimeWorld India seasons API returned HTTP ${seasonsRes.status || 404} for "${bestItem.title}".`,
-        },
+        error: extractErrorDetails(
+          seasonsRes.data || seasonsRes.rawText,
+          seasonsRes.endpointUrl,
+          seasonsRes.status || 404,
+          `AnimeWorld India seasons API returned HTTP ${seasonsRes.status || 404} for "${bestItem.title}".`
+        ),
       };
     }
 
@@ -458,13 +496,12 @@ export async function resolveAnimeWorldStreamForAnime(options: {
     const episodesRes = await fetchAnimeWorldEpisodes(matchedSeason.seasonId);
     if (episodesRes.status >= 400 || !episodesRes.data?.success) {
       return {
-        error: {
-          statusCode: episodesRes.status || 404,
-          endpointUrl: episodesRes.endpointUrl,
-          message:
-            episodesRes.data?.error ||
-            `AnimeWorld India episodes API returned HTTP ${episodesRes.status || 404}.`,
-        },
+        error: extractErrorDetails(
+          episodesRes.data || episodesRes.rawText,
+          episodesRes.endpointUrl,
+          episodesRes.status || 404,
+          `AnimeWorld India episodes API returned HTTP ${episodesRes.status || 404}.`
+        ),
       };
     }
 
@@ -483,6 +520,7 @@ export async function resolveAnimeWorldStreamForAnime(options: {
     streamStatus = res.status;
     streamEndpoint = res.endpointUrl;
     streamPayload = res.data;
+    streamRawText = res.rawText || '';
   } else {
     return {
       error: {
@@ -495,20 +533,19 @@ export async function resolveAnimeWorldStreamForAnime(options: {
 
   if (streamStatus >= 400 || !streamPayload?.success) {
     return {
-      error: {
-        statusCode: streamStatus || 404,
-        endpointUrl: streamEndpoint,
-        message:
-          streamPayload?.error ||
-          `AnimeWorld India API returned HTTP ${streamStatus || 404}`,
-      },
+      error: extractErrorDetails(
+        streamPayload || streamRawText,
+        streamEndpoint,
+        streamStatus || 404,
+        `AnimeWorld India API returned HTTP ${streamStatus || 404}`
+      ),
     };
   }
 
   const parsed = parseWatchResponse(streamPayload);
 
-  // Ensure streams from AnimeWorld India have clean labels & embed classification
-  const mappedSources: StreamSource[] =
+  // Ensure streams from AnimeWorld India have clean labels, valid URLs & embed classification
+  const candidateSources: StreamSource[] =
     parsed.sources.length > 0
       ? parsed.sources
       : streamPayload.stream?.streamLink
@@ -524,6 +561,8 @@ export async function resolveAnimeWorldStreamForAnime(options: {
             },
           ]
         : [];
+
+  const mappedSources = candidateSources.filter((src) => isPlayableStreamUrl(src.url));
 
   if (mappedSources.length === 0) {
     return {

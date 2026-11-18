@@ -4,12 +4,16 @@
   "buildCommand": "npm run build",
   "outputDirectory": "dist",
   "functions": {
-    "api/**/*.ts": {
+    "api/index.ts": {
       "includeFiles": "firebase-applet-config.json",
       "maxDuration": 30
     }
   },
   "rewrites": [
+    {
+      "source": "/api/(.*)",
+      "destination": "/api/index?__kuro_path=$1"
+    },
     {
       "source": "/((?!api/).*)",
       "destination": "/index.html"

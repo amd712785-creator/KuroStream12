@@ -1,6 +1,11 @@
 import { getDefaultStreamingApiBase, getStreamingApiBase } from '@/src/config/env';
 import { getDisplayTitle, slugifyTitle } from '@/src/services/anilistApi';
 import { fetchAniZipMetadata } from '@/src/services/extensionsApi';
+import {
+  extractErrorDetails,
+  isPlayableStreamUrl,
+  parseSafeJsonResponse,
+} from '@/src/utils/errorUtils';
 import type {
   AnimeDetail,
   AniZipResponse,
@@ -362,7 +367,14 @@ export async function fetchAnimeEpisodes(
         episodes: buildMetadataEpisodes(anime, aniZip),
         source: 'metadata-fallback',
         aniZipMalId,
-        providerError: json.upstreamError as StreamFetchError | undefined,
+        providerError: json.upstreamError
+          ? extractErrorDetails(
+              json.upstreamError,
+              endpointUrl,
+              undefined,
+              'External streaming info endpoint returned no episodes.'
+            )
+          : undefined,
       };
     }
 
@@ -485,44 +497,53 @@ export async function fetchEpisodeStream(
       headers: { Accept: 'application/json' },
     });
 
-    const json = (await response.json().catch(() => null)) as Record<string, unknown> | null;
+    const parsedResp = await parseSafeJsonResponse<Record<string, unknown>>(response);
+    const json = parsedResp.data;
 
-    if (!response.ok) {
+    if (!parsedResp.ok) {
       return {
-        error: {
-          statusCode: response.status,
+        error: extractErrorDetails(
+          json || parsedResp.rawText,
           endpointUrl,
-          message:
-            (json && typeof json.message === 'string' && json.message) ||
-            `Streaming server returned HTTP ${response.status}.`,
-          detail: json ? JSON.stringify(json).slice(0, 300) : undefined,
-        },
+          parsedResp.status,
+          `Streaming server returned HTTP ${parsedResp.status}.`
+        ),
       };
     }
 
     const parsed = parseWatchResponse(json);
+    const validSources = parsed.sources.filter((s) => isPlayableStreamUrl(s.url));
 
-    if (parsed.sources.length === 0) {
+    if (validSources.length === 0) {
       return {
-        error: {
+        error: extractErrorDetails(
+          json || parsedResp.rawText,
           endpointUrl,
-          message:
-            (json && typeof json.message === 'string' && json.message) ||
-            'The streaming provider returned no playable stream sources for this episode.',
-          detail: json ? JSON.stringify(json).slice(0, 300) : undefined,
-        },
+          parsedResp.status,
+          'The streaming provider returned no playable stream sources for this episode.'
+        ),
       };
     }
 
-    return { data: parsed };
+    return {
+      data: {
+        ...parsed,
+        sources: validSources,
+      },
+    };
   } catch (err) {
+    const extracted = extractErrorDetails(
+      err,
+      endpointUrl,
+      undefined,
+      'Network error while contacting streaming backend.'
+    );
     return {
       error: {
-        endpointUrl,
-        message:
-          err instanceof Error
-            ? `Failed to fetch episode stream: ${err.message}`
-            : 'Network error while contacting streaming backend.',
+        ...extracted,
+        message: extracted.message.startsWith('Failed to fetch')
+          ? extracted.message
+          : `Failed to fetch episode stream: ${extracted.message}`,
       },
     };
   }

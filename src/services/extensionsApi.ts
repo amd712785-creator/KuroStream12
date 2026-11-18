@@ -1,3 +1,4 @@
+import { extractErrorMessage, parseSafeJsonResponse } from '@/src/utils/errorUtils';
 import type {
   AniSkipResponse,
   AniZipResponse,
@@ -18,10 +19,16 @@ export async function fetchExtensionsCatalog(): Promise<ExtensionsCatalogRespons
   const res = await fetch('/api/extensions/repos', {
     headers: { Accept: 'application/json' },
   });
-  if (!res.ok) {
-    throw new Error(`Extension repository request failed (HTTP ${res.status}).`);
+  const parsed = await parseSafeJsonResponse<ExtensionsCatalogResponse>(res);
+  if (!parsed.ok || !parsed.data) {
+    throw new Error(
+      extractErrorMessage(
+        parsed.data || parsed.rawText,
+        `Extension repository request failed (HTTP ${parsed.status}).`
+      )
+    );
   }
-  return (await res.json()) as ExtensionsCatalogResponse;
+  return parsed.data;
 }
 
 export function getEnabledExtensionIds(): string[] {

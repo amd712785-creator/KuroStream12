@@ -20,6 +20,7 @@ import {
   VolumeX,
 } from 'lucide-react';
 import { getStreamingApiBase, setStreamingApiOverride } from '@/src/config/env';
+import { extractErrorMessage } from '@/src/utils/errorUtils';
 import type {
   ParsedStreamResult,
   SkipInterval,
@@ -546,10 +547,20 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               Stream Currently Unavailable
             </h3>
             <p className="mt-1.5 max-w-lg text-xs sm:text-sm text-slate-300">
-              {mediaError || streamError?.message}
+              {extractErrorMessage(
+                mediaError || streamError?.message || streamError,
+                'Unable to load stream from this server.'
+              )}
             </p>
+            {(streamError?.statusCode || streamError?.detail) && (
+              <p className="mt-1.5 max-w-xl truncate font-mono text-[11px] text-rose-300/80">
+                {streamError?.statusCode ? `HTTP ${streamError.statusCode}` : ''}
+                {streamError?.statusCode && streamError?.detail ? ' · ' : ''}
+                {streamError?.detail ? extractErrorMessage(streamError.detail, '') : ''}
+              </p>
+            )}
             {streamError?.endpointUrl && (
-              <p className="mt-2 max-w-xl truncate font-mono text-[11px] text-slate-500">
+              <p className="mt-1 max-w-xl truncate font-mono text-[11px] text-slate-500">
                 Endpoint: {streamError.endpointUrl}
               </p>
             )}

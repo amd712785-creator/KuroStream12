@@ -1111,6 +1111,30 @@ async function verifyRavokAudioLanguages(ravokUrl: string): Promise<string[]> {
   return [];
 }
 
+function isValidHttpUrl(raw: unknown): raw is string {
+  if (typeof raw !== 'string') return false;
+  const trimmed = raw.trim();
+  if (!trimmed) return false;
+  try {
+    const parsed = new URL(trimmed);
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:';
+  } catch {
+    return false;
+  }
+}
+
+function logProviderDiagnostic(
+  provider: string,
+  stage: string,
+  meta: Record<string, unknown>
+): void {
+  const safeParts = Object.entries(meta)
+    .filter(([, v]) => v !== undefined)
+    .map(([k, v]) => `${k}=${typeof v === 'string' ? v : JSON.stringify(v)}`)
+    .join(' ');
+  console.info(`[ProviderDiag] provider=${provider} stage=${stage} ${safeParts}`);
+}
+
 async function resolveFromMegavid(
   malId: number,
   episodeNumber: number,
@@ -1152,6 +1176,7 @@ async function resolveFromMegavid(
   let lastStatus = 404;
 
   for (const candidate of candidateQueries) {
+    const started = Date.now();
     try {
       const targetUrl = `${baseSourceUrl}?${candidate.qs}`;
       const res = await fetchWithTimeout(
@@ -1169,6 +1194,13 @@ async function resolveFromMegavid(
       if (!res.ok) {
         lastStatus = res.status;
         lastMessage = `Upstream stream endpoint returned HTTP ${res.status}.`;
+        logProviderDiagnostic('megavid', 'source', {
+          server: requestedServer,
+          candidate: candidate.qs,
+          status: res.status,
+          latencyMs: Date.now() - started,
+          working: false,
+        });
         continue;
       }
 
@@ -1184,14 +1216,46 @@ async function resolveFromMegavid(
 
       if (data.status !== 'ok' || !data.source) {
         lastStatus = typeof data.code === 'number' ? data.code : 404;
-        lastMessage = data.message || 'Episode stream not found on provider.';
+        lastMessage =
+          typeof data.message === 'string' && data.message.trim()
+            ? data.message.trim()
+            : 'Episode stream not found on provider.';
+        logProviderDiagnostic('megavid', 'source', {
+          server: requestedServer,
+          candidate: candidate.qs,
+          status: lastStatus,
+          apiStatus: data.status || 'missing',
+          latencyMs: Date.now() - started,
+          working: false,
+        });
         continue;
       }
 
       const cleanSourceUrl = normalizeUrl(data.source);
+      if (!isValidHttpUrl(cleanSourceUrl)) {
+        lastStatus = 502;
+        lastMessage = 'Provider returned a malformed stream URL.';
+        continue;
+      }
+
       const isReachable = await verifyStreamPlaylistReachable(cleanSourceUrl, 'https://megavid.buzz/', 3000);
+      let sourceHost = '';
+      try {
+        sourceHost = new URL(cleanSourceUrl).hostname;
+      } catch {
+        // ignore
+      }
+      logProviderDiagnostic('megavid', 'playlist-verify', {
+        server: requestedServer,
+        candidate: candidate.qs,
+        host: sourceHost,
+        reachable: isReachable,
+        latencyMs: Date.now() - started,
+        working: isReachable,
+      });
       if (!isReachable) {
-        // Try next candidate (for example noax=1 when axsv CDN host fails DNS)
+        lastStatus = 502;
+        lastMessage = `Stream CDN host (${sourceHost || 'unknown'}) is unreachable or returned invalid HLS manifest.`;
         continue;
       }
 
@@ -1494,67 +1558,139 @@ export function createExpressApp() {
       ),
     ]);
 
-    const inspectMegavid = async (probe: typeof megavidPrimaryRes) => {
-      if (!probe.response || !probe.ok) {
-        return {
-          status: probe.status,
-          ok: false,
-          latencyMs: probe.latencyMs,
-          error: probe.error || `HTTP ${probe.status}`,
-        };
-      }
+    const [vidstreamingResolved, megacloudResolved, streamsbResolved] = await Promise.all([
+      resolveFromMegavid(malId, ep, 'sub', 'vidstreaming'),
+      resolveFromMegavid(malId, ep, 'sub', 'megacloud'),
+      resolveFromMegavid(malId, ep, 'sub', 'streamsb'),
+    ]);
+
+    const inspectMegavid = async (
+      probe: typeof megavidPrimaryRes,
+      resolved: Awaited<ReturnType<typeof resolveFromMegavid>>
+    ) => {
+      const primaryPayload = resolved.payload as
+        | { sources?: Array<{ url: string; quality: string; type: string }> }
+        | undefined;
+      const firstSource = primaryPayload?.sources?.[0];
+      let resolvedHost = '';
       try {
-        const json = (await probe.response.json()) as { status?: string; source?: string; type?: string };
-        const sourceUrl = json.source ? normalizeUrl(json.source) : '';
-        const hlsReachable = sourceUrl
-          ? await verifyStreamPlaylistReachable(sourceUrl, 'https://megavid.buzz/', 2500)
-          : false;
-        let sourceHost = '';
-        try {
-          if (sourceUrl) sourceHost = new URL(sourceUrl).hostname;
-        } catch {
-          // ignore
-        }
-        return {
-          status: probe.status,
-          ok: json.status === 'ok' && Boolean(sourceUrl) && hlsReachable,
-          apiStatus: json.status || 'unknown',
-          sourceHost,
-          playlistReachable: hlsReachable,
-          latencyMs: probe.latencyMs,
-          note:
-            json.status === 'ok' && !hlsReachable
-              ? 'Primary candidate CDN host unreachable; server falls back automatically to noax=1.'
-              : undefined,
-        };
-      } catch (err) {
-        return {
-          status: probe.status,
-          ok: false,
-          latencyMs: probe.latencyMs,
-          error: err instanceof Error ? err.message : 'Invalid JSON',
-        };
+        if (firstSource?.url) resolvedHost = new URL(firstSource.url).hostname;
+      } catch {
+        // ignore
       }
+
+      let primaryCandidateHost = '';
+      let primaryCandidateReachable = false;
+      if (probe.response && probe.ok) {
+        try {
+          const json = (await probe.response.json()) as { source?: string };
+          const candidateUrl = json.source ? normalizeUrl(json.source) : '';
+          if (candidateUrl) {
+            primaryCandidateHost = new URL(candidateUrl).hostname;
+            primaryCandidateReachable =
+              candidateUrl === firstSource?.url
+                ? Boolean(resolved.ok)
+                : await verifyStreamPlaylistReachable(candidateUrl, 'https://megavid.buzz/', 2000);
+          }
+        } catch {
+          // ignore probe parse error
+        }
+      }
+
+      return {
+        status: resolved.ok ? 200 : resolved.statusCode || probe.status || 502,
+        ok: Boolean(resolved.ok && firstSource?.url),
+        working: Boolean(resolved.ok && firstSource?.url),
+        latencyMs: probe.latencyMs,
+        primaryCandidateHost: primaryCandidateHost || undefined,
+        primaryCandidateReachable,
+        resolvedHost: resolvedHost || undefined,
+        verifiedStreamType: firstSource?.type || undefined,
+        verifiedQualities: primaryPayload?.sources?.map((s) => s.quality) || [],
+        error: resolved.ok ? undefined : resolved.message || probe.error || `HTTP ${probe.status}`,
+        note:
+          resolved.ok && primaryCandidateHost && !primaryCandidateReachable
+            ? `Primary CDN (${primaryCandidateHost}) unreachable; automatically fell back to verified HLS (${resolvedHost}).`
+            : undefined,
+      };
     };
 
     const [vidstreamingDiag, streamsbDiag, megacloudDiag] = await Promise.all([
-      inspectMegavid(megavidPrimaryRes),
-      inspectMegavid(megavidSoraRes),
-      inspectMegavid(megavidNeroRes),
+      inspectMegavid(megavidPrimaryRes, vidstreamingResolved),
+      inspectMegavid(megavidSoraRes, streamsbResolved),
+      inspectMegavid(megavidNeroRes, megacloudResolved),
     ]);
 
     const consumetVercelErr = consumetRes.response?.headers.get('x-vercel-error') || undefined;
     const awCfMitigated = animeWorldRes.response?.headers.get('cf-mitigated') || undefined;
     let awResultCount = 0;
+    let awPlayableVerified = false;
+    let awSampleStreamType: string | undefined;
+    let awSampleError: string | undefined;
+
     if (animeWorldRes.response && animeWorldRes.ok) {
       try {
         const html = await animeWorldRes.response.text();
         const $ = cheerio.load(html);
-        awResultCount = parseAnimeWorldCards($).length;
-      } catch {
-        // ignore parse count error
+        const cards = parseAnimeWorldCards($);
+        awResultCount = cards.length;
+
+        const firstSeries = cards.find((c) => typeof c.seriesId === 'string' && c.seriesId);
+        if (firstSeries?.seriesId) {
+          const seriesHtmlRes = await fetchAnimeWorldHtml(
+            `${ANIMEWORLD_UPSTREAM}/series/${encodeURIComponent(String(firstSeries.seriesId))}/`
+          );
+          if (seriesHtmlRes.ok && seriesHtmlRes.html) {
+            const $s = cheerio.load(seriesHtmlRes.html);
+            const epHref = $s('article.tr-episode-card a.tr-episode-link').first().attr('href') || '';
+            const epSlug = extractSlugFromHref(epHref, 'episode');
+            if (epSlug) {
+              const epHtmlRes = await fetchAnimeWorldHtml(
+                `${ANIMEWORLD_UPSTREAM}/episode/${encodeURIComponent(epSlug)}/`
+              );
+              if (epHtmlRes.ok && epHtmlRes.html) {
+                const $e = cheerio.load(epHtmlRes.html);
+                const iframeSrc = (
+                  $e('#aa-options iframe, .video-player iframe, .video-embed iframe')
+                    .first()
+                    .attr('src') || ''
+                ).trim();
+                if (isValidHttpUrl(iframeSrc)) {
+                  awPlayableVerified = true;
+                  awSampleStreamType = classifyAnimeWorldStreamType(iframeSrc);
+                } else {
+                  awSampleError = 'Episode page had no valid stream/embed URL.';
+                }
+              } else {
+                awSampleError = `Episode fetch returned HTTP ${epHtmlRes.status}`;
+              }
+            } else {
+              awSampleError = 'No episode link found on sample series page.';
+            }
+          } else {
+            awSampleError = `Series page returned HTTP ${seriesHtmlRes.status}`;
+          }
+        }
+      } catch (err) {
+        awSampleError = err instanceof Error ? err.message : 'Failed to verify AnimeWorld sample stream.';
       }
+    } else {
+      awSampleError =
+        animeWorldRes.status === 403
+          ? 'Upstream Cloudflare WAF blocks server/datacenter IPs with HTTP 403.'
+          : animeWorldRes.error || `Upstream returned HTTP ${animeWorldRes.status}`;
     }
+
+    const awWorking = Boolean(animeWorldRes.ok && awResultCount > 0 && awPlayableVerified);
+
+    logProviderDiagnostic('diagnostics', 'summary', {
+      consumetStatus: consumetRes.status,
+      vidstreamingWorking: vidstreamingDiag.working,
+      megacloudWorking: megacloudDiag.working,
+      streamsbWorking: streamsbDiag.working,
+      animeWorldWorking: awWorking,
+      animeWorldStatus: animeWorldRes.status,
+    });
 
     res.json({
       timestamp: new Date().toISOString(),
@@ -1565,6 +1701,7 @@ export function createExpressApp() {
           baseUrl: DEFAULT_STREAMING_API,
           status: consumetRes.status,
           ok: consumetRes.ok,
+          working: consumetRes.ok,
           latencyMs: consumetRes.latencyMs,
           upstreamHeaderError: consumetVercelErr,
           note: !consumetRes.ok
@@ -1577,10 +1714,14 @@ export function createExpressApp() {
         animeWorldIndia: {
           upstream: ANIMEWORLD_UPSTREAM,
           status: animeWorldRes.status,
-          ok: animeWorldRes.ok,
+          ok: awWorking,
+          working: awWorking,
           latencyMs: animeWorldRes.latencyMs,
           parsedCards: awResultCount,
+          playableStreamVerified: awPlayableVerified,
+          sampleStreamType: awSampleStreamType,
           blockedByCloudflare: animeWorldRes.status === 403 || Boolean(awCfMitigated),
+          error: awWorking ? undefined : awSampleError,
           note:
             animeWorldRes.status === 403
               ? 'Upstream Cloudflare WAF blocks server/datacenter IPs with HTTP 403. Other providers remain operational.'
@@ -2310,14 +2451,26 @@ export function createExpressApp() {
         }
       }
 
-      // Order verified Hindi stream FIRST so it never defaults to English/Japanese when Hindi exists
-      streams.sort((a, b) => {
+      // Keep only verified HTTP(S) URLs and order Hindi stream FIRST
+      const validStreams = streams.filter((s) => isValidHttpUrl(s.url));
+      validStreams.sort((a, b) => {
         const aHindi = a.language.toLowerCase() === 'hindi' ? 0 : 1;
         const bHindi = b.language.toLowerCase() === 'hindi' ? 0 : 1;
         return aHindi - bHindi;
       });
 
-      const primaryLink = hindiStreamLink || (hasHindiAudio && ravokUrl) || streams[0]?.url || downloadLink || null;
+      const primaryCandidate =
+        hindiStreamLink || (hasHindiAudio && ravokUrl) || validStreams[0]?.url || downloadLink || null;
+      const primaryLink = isValidHttpUrl(primaryCandidate) ? primaryCandidate : validStreams[0]?.url || null;
+
+      logProviderDiagnostic('animeworld-india', 'stream', {
+        id: episodeId || movieId,
+        type,
+        streamCount: validStreams.length,
+        hasHindiAudio,
+        hasPrimaryLink: Boolean(primaryLink),
+      });
+
       if (!primaryLink) {
         res.status(404).json({
           success: false,
@@ -2343,12 +2496,17 @@ export function createExpressApp() {
           file: downloadLink,
           type: classifyAnimeWorldStreamType(primaryLink),
         },
-        streams,
+        streams: validStreams,
       });
     } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to load AnimeWorld India stream.';
+      logProviderDiagnostic('animeworld-india', 'stream-error', {
+        id: episodeId || movieId,
+        error: msg,
+      });
       res.status(502).json({
         success: false,
-        error: err instanceof Error ? err.message : 'Failed to load AnimeWorld India stream.',
+        error: msg,
       });
     }
   });
@@ -2767,6 +2925,29 @@ export function createExpressApp() {
       if (!res.headersSent) {
         res.status(502).send(err instanceof Error ? err.message : 'Proxy fetch failed.');
       }
+    }
+  });
+
+  // Ensure unknown /api/* paths always return structured JSON (never HTML)
+  app.all('/api/*', (req: Request, res: Response) => {
+    res.status(404).json({
+      success: false,
+      error: `API endpoint not found: ${req.method} ${req.originalUrl}`,
+      message: `API endpoint not found: ${req.method} ${req.originalUrl}`,
+    });
+  });
+
+  // Global Express /api JSON error boundary
+  app.use('/api', (err: unknown, req: Request, res: Response, _next: NextFunction) => {
+    const message =
+      err instanceof Error ? err.message : typeof err === 'string' ? err : 'Internal API server error.';
+    console.error(`[API Error] ${req.method} ${req.originalUrl}: ${message}`);
+    if (!res.headersSent) {
+      res.status(500).json({
+        success: false,
+        error: message,
+        message,
+      });
     }
   });
 

@@ -12,6 +12,7 @@ import {
   where,
 } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from '@/src/lib/firebase';
+import { extractErrorMessage, parseSafeJsonResponse } from '@/src/utils/errorUtils';
 import type {
   AdminServerStats,
   BannerFrequency,
@@ -112,11 +113,16 @@ export async function fetchAdminServerStats(idToken: string): Promise<AdminServe
       Accept: 'application/json',
     },
   });
-  const data = (await res.json()) as AdminServerStats & { error?: string };
-  if (!res.ok) {
-    throw new Error(data.error || `Failed to load admin statistics (HTTP ${res.status})`);
+  const parsed = await parseSafeJsonResponse<AdminServerStats & { error?: unknown }>(res);
+  if (!parsed.ok || !parsed.data) {
+    throw new Error(
+      extractErrorMessage(
+        parsed.data || parsed.rawText,
+        `Failed to load admin statistics (HTTP ${parsed.status})`
+      )
+    );
   }
-  return data;
+  return parsed.data;
 }
 
 function toMillis(val: unknown): number {
@@ -203,14 +209,20 @@ export async function uploadBannerImage(
     }),
   });
 
-  const data = (await res.json()) as {
+  const parsed = await parseSafeJsonResponse<{
     imageUrl?: string;
     mimeType?: string;
     size?: number;
-    error?: string;
-  };
-  if (!res.ok || !data.imageUrl) {
-    throw new Error(data.error || `Failed to upload image (HTTP ${res.status})`);
+    error?: unknown;
+  }>(res);
+  const data = parsed.data;
+  if (!parsed.ok || !data?.imageUrl) {
+    throw new Error(
+      extractErrorMessage(
+        data || parsed.rawText,
+        `Failed to upload image (HTTP ${parsed.status})`
+      )
+    );
   }
   return {
     imageUrl: data.imageUrl,
