@@ -1,4 +1,4 @@
-import { getDefaultStreamingApiBase, getStreamingApiBase } from '@/src/config/env';
+import { getDefaultStreamingApiBase, getStreamingApiBase, resolveApiUrl } from '@/src/config/env';
 import { getDisplayTitle, slugifyTitle } from '@/src/services/anilistApi';
 import { fetchAniZipMetadata } from '@/src/services/extensionsApi';
 import {
@@ -146,7 +146,7 @@ export function parseWatchResponse(payload: unknown): ParsedStreamResult {
     const t = sub as Record<string, unknown>;
     const rawUrl = typeof t.url === 'string' ? t.url : typeof t.file === 'string' ? t.file : '';
     if (!rawUrl) continue;
-    const url = rawUrl.startsWith('/') ? rawUrl : normalizeTrackUrl(rawUrl);
+    const url = rawUrl.startsWith('/') ? resolveApiUrl(rawUrl) : normalizeTrackUrl(rawUrl);
     const lang =
       typeof t.lang === 'string'
         ? t.lang
@@ -335,7 +335,7 @@ export async function fetchAnimeEpisodes(
   const endpointUrl = `/api/anime/info/${anilistId}${queryStr ? `?${queryStr}` : ''}`;
 
   const [infoRes, aniZip] = await Promise.all([
-    fetch(endpointUrl, { headers: { Accept: 'application/json' } }).catch(() => null),
+    fetch(resolveApiUrl(endpointUrl), { headers: { Accept: 'application/json' } }).catch(() => null),
     fetchAniZipMetadata(anilistId),
   ]);
 
@@ -430,7 +430,7 @@ export async function fetchEpisodeServers(episodeId: string): Promise<StreamServ
   }`;
 
   try {
-    const res = await fetch(endpointUrl, { headers: { Accept: 'application/json' } });
+    const res = await fetch(resolveApiUrl(endpointUrl), { headers: { Accept: 'application/json' } });
     if (!res.ok) return [];
     const data = await res.json();
     if (!Array.isArray(data)) return [];
@@ -493,7 +493,7 @@ export async function fetchEpisodeStream(
   }`;
 
   try {
-    const response = await fetch(endpointUrl, {
+    const response = await fetch(resolveApiUrl(endpointUrl), {
       headers: { Accept: 'application/json' },
     });
 

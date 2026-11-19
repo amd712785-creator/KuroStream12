@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { AnimatePresence, MotionConfig, motion } from 'motion/react';
 import { ArrowUpRight, Sparkles, X } from 'lucide-react';
+import { resolveApiUrl } from '@/src/config/env';
 import { useAuth } from '@/src/context/AuthContext';
 import {
   getAnalyticsClientId,
@@ -111,7 +112,7 @@ export const PopupBannerCard: React.FC<PopupBannerCardProps> = ({
       <div className="relative aspect-[16/9] w-full overflow-hidden bg-[#131626]">
         {banner.imageUrl ? (
           <img
-            src={banner.imageUrl}
+            src={resolveApiUrl(banner.imageUrl)}
             alt={banner.title || 'Promotional banner'}
             className="h-full w-full object-cover"
           />

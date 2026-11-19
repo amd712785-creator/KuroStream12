@@ -11,6 +11,7 @@ import {
   updateDoc,
   where,
 } from 'firebase/firestore';
+import { resolveApiUrl } from '@/src/config/env';
 import { db, handleFirestoreError, OperationType } from '@/src/lib/firebase';
 import { extractErrorMessage, parseSafeJsonResponse } from '@/src/utils/errorUtils';
 import type {
@@ -57,7 +58,7 @@ export function getAnalyticsSessionId(): string {
 
 export async function recordSiteVisit(uid?: string | null): Promise<void> {
   try {
-    await fetch('/api/analytics/visit', {
+    await fetch(resolveApiUrl('/api/analytics/visit'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -73,7 +74,7 @@ export async function recordSiteVisit(uid?: string | null): Promise<void> {
 
 export async function sendPresenceHeartbeat(uid?: string | null): Promise<void> {
   try {
-    await fetch('/api/analytics/heartbeat', {
+    await fetch(resolveApiUrl('/api/analytics/heartbeat'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -89,16 +90,17 @@ export async function sendPresenceHeartbeat(uid?: string | null): Promise<void> 
 
 export function sendPresenceOfflineBeacon(): void {
   const payload = JSON.stringify({ sessionId: getAnalyticsSessionId() });
+  const offlineUrl = resolveApiUrl('/api/analytics/offline');
   try {
     if (typeof navigator !== 'undefined' && typeof navigator.sendBeacon === 'function') {
       const blob = new Blob([payload], { type: 'application/json' });
-      navigator.sendBeacon('/api/analytics/offline', blob);
+      navigator.sendBeacon(offlineUrl, blob);
       return;
     }
   } catch {
     // fallback below
   }
-  fetch('/api/analytics/offline', {
+  fetch(offlineUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: payload,
@@ -107,7 +109,7 @@ export function sendPresenceOfflineBeacon(): void {
 }
 
 export async function fetchAdminServerStats(idToken: string): Promise<AdminServerStats> {
-  const res = await fetch('/api/admin/stats', {
+  const res = await fetch(resolveApiUrl('/api/admin/stats'), {
     headers: {
       Authorization: `Bearer ${idToken}`,
       Accept: 'application/json',
@@ -196,7 +198,7 @@ export async function uploadBannerImage(
     reader.readAsDataURL(file);
   });
 
-  const res = await fetch('/api/admin/banners/upload', {
+  const res = await fetch(resolveApiUrl('/api/admin/banners/upload'), {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -405,7 +407,7 @@ export async function deletePopupBanner(
   const prefix = '/api/banners/image/';
   if (banner.imageUrl.startsWith(prefix) && idToken) {
     const filename = banner.imageUrl.slice(prefix.length);
-    fetch(`/api/admin/banners/image/${encodeURIComponent(filename)}`, {
+    fetch(resolveApiUrl(`/api/admin/banners/image/${encodeURIComponent(filename)}`), {
       method: 'DELETE',
       headers: { Authorization: `Bearer ${idToken}` },
     }).catch(() => {});

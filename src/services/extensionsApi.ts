@@ -1,3 +1,4 @@
+import { resolveApiUrl } from '@/src/config/env';
 import { extractErrorMessage, parseSafeJsonResponse } from '@/src/utils/errorUtils';
 import type {
   AniSkipResponse,
@@ -16,7 +17,7 @@ const DEFAULT_ENABLED_EXTENSION_IDS = [
 ];
 
 export async function fetchExtensionsCatalog(): Promise<ExtensionsCatalogResponse> {
-  const res = await fetch('/api/extensions/repos', {
+  const res = await fetch(resolveApiUrl('/api/extensions/repos'), {
     headers: { Accept: 'application/json' },
   });
   const parsed = await parseSafeJsonResponse<ExtensionsCatalogResponse>(res);
@@ -75,7 +76,7 @@ export function toggleCompatibleExtension(
 export async function fetchAniZipMetadata(anilistId: number): Promise<AniZipResponse | null> {
   if (!Number.isFinite(anilistId) || anilistId <= 0) return null;
   try {
-    const res = await fetch(`/api/anime/anizip/${anilistId}`, {
+    const res = await fetch(resolveApiUrl(`/api/anime/anizip/${anilistId}`), {
       headers: { Accept: 'application/json' },
     });
     if (!res.ok) return null;
@@ -95,7 +96,9 @@ export async function fetchAniSkipTimestamps(
   }
   try {
     const res = await fetch(
-      `/api/anime/skip/${malId}/${episodeNumber}?length=${Math.max(0, Math.floor(episodeLength))}`,
+      resolveApiUrl(
+        `/api/anime/skip/${malId}/${episodeNumber}?length=${Math.max(0, Math.floor(episodeLength))}`
+      ),
       { headers: { Accept: 'application/json' } }
     );
     if (!res.ok) return null;

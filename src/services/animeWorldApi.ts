@@ -1,3 +1,4 @@
+import { resolveApiUrl } from '@/src/config/env';
 import { parseWatchResponse } from '@/src/services/streamingApi';
 import {
   extractErrorDetails,
@@ -79,7 +80,7 @@ export interface AnimeWorldEpisodesResponse {
 
 export async function fetchAnimeWorldHome(): Promise<AnimeWorldHomeResponse> {
   const endpoint = `${AW_BASE}/home.php`;
-  const res = await fetch(endpoint, { headers: { Accept: 'application/json' } });
+  const res = await fetch(resolveApiUrl(endpoint), { headers: { Accept: 'application/json' } });
   const parsed = await parseSafeJsonResponse<AnimeWorldHomeResponse>(res);
   if (!parsed.ok || !parsed.data) {
     throw new Error(
@@ -94,7 +95,7 @@ export async function fetchAnimeWorldHome(): Promise<AnimeWorldHomeResponse> {
 
 export async function fetchAnimeWorldSeries(page = 1): Promise<AnimeWorldSeriesListResponse> {
   const endpoint = `${AW_BASE}/series.php?p=${encodeURIComponent(String(page))}`;
-  const res = await fetch(endpoint, { headers: { Accept: 'application/json' } });
+  const res = await fetch(resolveApiUrl(endpoint), { headers: { Accept: 'application/json' } });
   const parsed = await parseSafeJsonResponse<AnimeWorldSeriesListResponse>(res);
   if (!parsed.ok || !parsed.data) {
     throw new Error(
@@ -109,7 +110,7 @@ export async function fetchAnimeWorldSeries(page = 1): Promise<AnimeWorldSeriesL
 
 export async function searchAnimeWorld(query: string, page = 1): Promise<AnimeWorldSearchResponse> {
   const endpoint = `${AW_BASE}/search.php?query=${encodeURIComponent(query)}&p=${encodeURIComponent(String(page))}`;
-  const res = await fetch(endpoint, { headers: { Accept: 'application/json' } });
+  const res = await fetch(resolveApiUrl(endpoint), { headers: { Accept: 'application/json' } });
   const parsed = await parseSafeJsonResponse<AnimeWorldSearchResponse>(res);
   if (!parsed.ok || !parsed.data) {
     const details = extractErrorDetails(
@@ -135,7 +136,7 @@ export async function fetchAnimeWorldSeasons(
   seriesID: string
 ): Promise<{ status: number; data: AnimeWorldSeasonsResponse | null; rawText?: string; endpointUrl: string }> {
   const endpointUrl = `${AW_BASE}/seasons.php?seriesID=${encodeURIComponent(seriesID)}`;
-  const res = await fetch(endpointUrl, { headers: { Accept: 'application/json' } });
+  const res = await fetch(resolveApiUrl(endpointUrl), { headers: { Accept: 'application/json' } });
   const parsed = await parseSafeJsonResponse<AnimeWorldSeasonsResponse>(res);
   return { status: parsed.status, data: parsed.data, rawText: parsed.rawText, endpointUrl };
 }
@@ -144,7 +145,7 @@ export async function fetchAnimeWorldEpisodes(
   seasonId: string
 ): Promise<{ status: number; data: AnimeWorldEpisodesResponse | null; rawText?: string; endpointUrl: string }> {
   const endpointUrl = `${AW_BASE}/episodes.php?seasonId=${encodeURIComponent(seasonId)}`;
-  const res = await fetch(endpointUrl, { headers: { Accept: 'application/json' } });
+  const res = await fetch(resolveApiUrl(endpointUrl), { headers: { Accept: 'application/json' } });
   const parsed = await parseSafeJsonResponse<AnimeWorldEpisodesResponse>(res);
   return { status: parsed.status, data: parsed.data, rawText: parsed.rawText, endpointUrl };
 }
@@ -157,7 +158,7 @@ export async function fetchAnimeWorldStream(params: {
     ? `episodeId=${encodeURIComponent(params.episodeId)}`
     : `movieId=${encodeURIComponent(params.movieId || '')}`;
   const endpointUrl = `${AW_BASE}/stream.php?${qs}`;
-  const res = await fetch(endpointUrl, { headers: { Accept: 'application/json' } });
+  const res = await fetch(resolveApiUrl(endpointUrl), { headers: { Accept: 'application/json' } });
   const parsed = await parseSafeJsonResponse<AnimeWorldStreamResponse>(res);
   return { status: parsed.status, data: parsed.data, rawText: parsed.rawText, endpointUrl };
 }

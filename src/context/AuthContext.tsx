@@ -1,5 +1,13 @@
 import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
-import { onAuthStateChanged, signInWithPopup, signOut as firebaseSignOut, type User } from 'firebase/auth';
+import { Capacitor } from '@capacitor/core';
+import {
+  getRedirectResult,
+  onAuthStateChanged,
+  signInWithPopup,
+  signInWithRedirect,
+  signOut as firebaseSignOut,
+  type User,
+} from 'firebase/auth';
 import {
   collection,
   deleteDoc,
@@ -164,6 +172,16 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setAuthReady(true);
       return;
     }
+
+    getRedirectResult(auth)
+      .then((result) => {
+        if (result?.user) {
+          setIsAuthModalOpen(false);
+        }
+      })
+      .catch((err) => {
+        setAuthError(err instanceof Error ? err.message : 'Unable to complete Google sign-in.');
+      });
 
     const unsub = onAuthStateChanged(auth, async (firebaseUser) => {
       setUser(firebaseUser);
@@ -421,9 +439,28 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
     setAuthError(null);
     try {
+      if (Capacitor.isNativePlatform()) {
+        await signInWithRedirect(auth, googleProvider);
+        return;
+      }
       await signInWithPopup(auth, googleProvider);
       setIsAuthModalOpen(false);
     } catch (err) {
+      const code = (err as { code?: string } | null)?.code;
+      if (
+        code === 'auth/popup-blocked' ||
+        code === 'auth/operation-not-supported-in-this-environment'
+      ) {
+        try {
+          await signInWithRedirect(auth, googleProvider);
+          return;
+        } catch (redirectErr) {
+          setAuthError(
+            redirectErr instanceof Error ? redirectErr.message : 'Unable to sign in with Google.'
+          );
+          return;
+        }
+      }
       setAuthError(err instanceof Error ? err.message : 'Unable to sign in with Google.');
     }
   }, []);

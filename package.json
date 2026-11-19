@@ -9,9 +9,15 @@
     "build": "vite build && esbuild server.ts --bundle --platform=node --target=node20 --format=esm --outfile=server.js --packages=external",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
-    "lint": "tsc -b --noEmit"
+    "lint": "tsc -b --noEmit",
+    "android:sync": "npm run build && npx cap sync android"
   },
   "dependencies": {
+    "@capacitor/android": "^8.6.2",
+    "@capacitor/cli": "^8.6.2",
+    "@capacitor/core": "^8.6.2",
+    "@capacitor/splash-screen": "^8.0.2",
+    "@capacitor/status-bar": "^8.0.4",
     "@google/genai": "^2.4.0",
     "@tailwindcss/vite": "^4.3.3",
     "@vitejs/plugin-react": "^6.1.1",

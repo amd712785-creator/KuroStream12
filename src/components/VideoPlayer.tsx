@@ -19,7 +19,7 @@ import {
   Volume2,
   VolumeX,
 } from 'lucide-react';
-import { getStreamingApiBase, setStreamingApiOverride } from '@/src/config/env';
+import { getStreamingApiBase, resolveApiUrl, setStreamingApiOverride } from '@/src/config/env';
 import { extractErrorMessage } from '@/src/utils/errorUtils';
 import type {
   ParsedStreamResult,
@@ -222,7 +222,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       const referer = refererHeader || 'https://megavid.buzz/';
       const playbackUrl =
         activeSourceUrl.startsWith('http') && !activeSourceUrl.includes(window.location.host)
-          ? `/api/anime/proxy?url=${encodeURIComponent(activeSourceUrl)}&referer=${encodeURIComponent(referer)}`
+          ? resolveApiUrl(
+              `/api/anime/proxy?url=${encodeURIComponent(activeSourceUrl)}&referer=${encodeURIComponent(referer)}`
+            )
           : activeSourceUrl;
 
       const handleLoadedMetadata = () => {
@@ -698,7 +700,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                 <track
                   key={`${sub.url}-${idx}`}
                   kind="subtitles"
-                  src={sub.url}
+                  src={resolveApiUrl(sub.url)}
                   label={sub.label}
                   srcLang={sub.lang.slice(0, 2).toLowerCase()}
                   default={idx === selectedSubtitleIndex}
