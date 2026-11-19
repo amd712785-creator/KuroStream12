@@ -41,8 +41,7 @@ import type {
   StreamServer,
 } from '@/src/types/anime';
 
-const FALLBACK_SERVERS: StreamServer[] = [
-  { name: 'animeworld-india' },
+const SUB_DUB_FALLBACK_SERVERS: StreamServer[] = [
   { name: 'vidstreaming' },
   { name: 'megacloud' },
   { name: 'streamsb' },
@@ -52,12 +51,17 @@ const FALLBACK_SERVERS: StreamServer[] = [
   { name: 'kaido' },
 ];
 
+const HINDI_FALLBACK_SERVERS: StreamServer[] = [
+  { name: 'animeworld-india' },
+];
+
 function ensureStandardServers(list: StreamServer[]): StreamServer[] {
   const seen = new Set<string>();
   const merged: StreamServer[] = [];
 
-  for (const s of [...FALLBACK_SERVERS, ...list]) {
+  for (const s of [...SUB_DUB_FALLBACK_SERVERS, ...list]) {
     const key = s.name.toLowerCase();
+    if (key.includes('animeworld')) continue;
     if (!seen.has(key)) {
       seen.add(key);
       merged.push(s);
@@ -92,12 +96,29 @@ export const WatchPage: React.FC = () => {
   const [aniZipMalId, setAniZipMalId] = useState<number | null>(null);
   const [aniSkipData, setAniSkipData] = useState<AniSkipResponse | null>(null);
   const [adaptedExtensions, setAdaptedExtensions] = useState<ExtensionRepoItem[]>([]);
-  const [servers, setServers] = useState<StreamServer[]>(FALLBACK_SERVERS);
+  const [servers, setServers] = useState<StreamServer[]>(
+    preferences.preferredAudio === 'hindi' ? HINDI_FALLBACK_SERVERS : SUB_DUB_FALLBACK_SERVERS
+  );
   const [selectedServer, setSelectedServer] = useState<string>(
     preferences.preferredAudio === 'hindi' ? 'animeworld-india' : 'vidstreaming'
   );
   const [audioMode, setAudioMode] = useState<'sub' | 'dub' | 'hindi'>(preferences.preferredAudio);
   const [autoNext, setAutoNext] = useState<boolean>(preferences.autoNext);
+
+  useEffect(() => {
+    if (audioMode === 'hindi') {
+      setServers(HINDI_FALLBACK_SERVERS);
+      setSelectedServer('animeworld-india');
+    } else {
+      setServers((prev) => {
+        const filtered = prev.filter((s) => !s.name.toLowerCase().includes('animeworld'));
+        return filtered.length > 0 ? filtered : SUB_DUB_FALLBACK_SERVERS;
+      });
+      if (selectedServer.toLowerCase().includes('animeworld')) {
+        setSelectedServer('vidstreaming');
+      }
+    }
+  }, [audioMode]);
 
   const [streamData, setStreamData] = useState<ParsedStreamResult | null>(null);
   const [streamError, setStreamError] = useState<StreamFetchError | null>(null);
@@ -239,7 +260,7 @@ export const WatchPage: React.FC = () => {
     const epIdToUse = effectiveEpisodeId || decodedEpisodeId;
     if (!epIdToUse || epIdToUse === 'EPISODE_ID') return;
 
-    const useAnimeWorld = selectedServer.toLowerCase() === 'animeworld-india';
+    const useAnimeWorld = audioMode === 'hindi';
     if (useAnimeWorld && !anime) {
       if (animeLoadError) {
         setStreamData(null);
@@ -264,11 +285,11 @@ export const WatchPage: React.FC = () => {
         format: anime.format,
         seasonYear: anime.seasonYear,
         episodeNumber: resolvedEpNumber,
-        preferHindi: audioMode === 'hindi',
-        preferLang: audioMode,
+        preferHindi: true,
+        preferLang: 'hindi',
       });
 
-      setServers((prev) => ensureStandardServers(prev));
+      setServers(HINDI_FALLBACK_SERVERS);
 
       if (awRes.data) {
         setStreamData(awRes.data);
@@ -303,7 +324,7 @@ export const WatchPage: React.FC = () => {
     } else if (streamRes.data?.servers?.length) {
       setServers(ensureStandardServers(streamRes.data.servers));
     } else {
-      setServers(FALLBACK_SERVERS);
+      setServers(SUB_DUB_FALLBACK_SERVERS);
     }
 
     if (streamRes.data) {
@@ -334,7 +355,7 @@ export const WatchPage: React.FC = () => {
     const epIdToUse = effectiveEpisodeId || decodedEpisodeId;
     if (!epIdToUse || epIdToUse === 'EPISODE_ID') return false;
 
-    if (selectedServer.toLowerCase() === 'animeworld-india') {
+    if (audioMode === 'hindi') {
       if (!anime) return false;
       const awRes = await resolveAnimeWorldStreamForAnime({
         title: anime.title.english || anime.title.romaji,
@@ -342,8 +363,8 @@ export const WatchPage: React.FC = () => {
         format: anime.format,
         seasonYear: anime.seasonYear,
         episodeNumber: resolvedEpNumber,
-        preferHindi: audioMode === 'hindi',
-        preferLang: audioMode,
+        preferHindi: true,
+        preferLang: 'hindi',
       });
       if (awRes.data) {
         setStreamData(awRes.data);
@@ -722,7 +743,12 @@ export const WatchPage: React.FC = () => {
                   <Server className="h-3.5 w-3.5 text-violet-400" />
                   <span>Servers:</span>
                 </span>
-                {(servers.length > 0 ? servers : FALLBACK_SERVERS).map((srv) => {
+                {(audioMode === 'hindi'
+                  ? HINDI_FALLBACK_SERVERS
+                  : (servers.length > 0 ? servers : SUB_DUB_FALLBACK_SERVERS).filter(
+                      (srv) => !srv.name.toLowerCase().includes('animeworld')
+                    )
+                ).map((srv) => {
                   const isSelected =
                     (selectedServer || servers[0]?.name || 'vidstreaming').toLowerCase() ===
                     srv.name.toLowerCase();
@@ -740,8 +766,9 @@ export const WatchPage: React.FC = () => {
                   );
                 })}
 
-                {extraAdaptedExtensions.map((ext) => {
+                {audioMode !== 'hindi' && extraAdaptedExtensions.map((ext) => {
                   const extServerKey = (ext.adapterServer || ext.name).toLowerCase();
+                  if (extServerKey.includes('animeworld')) return null;
                   const isSelected = selectedServer.toLowerCase() === extServerKey;
                   return (
                     <button
