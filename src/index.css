@@ -143,20 +143,18 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* Smooth lightweight GPU page entrance for low-end mobile compatibility */
+/* Lightweight GPU-safe page entrance compatible with Android System WebView */
 @keyframes kuroPageEnter {
   from {
-    opacity: 0;
-    transform: translate3d(0, 8px, 0);
+    opacity: 0.92;
   }
   to {
     opacity: 1;
-    transform: translate3d(0, 0, 0);
   }
 }
 
 .kuro-page-enter {
-  animation: kuroPageEnter 200ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  animation: kuroPageEnter 150ms ease-out;
 }
 
 /* iOS 26 inspired dark frosted glass surface */
@@ -173,6 +171,17 @@
   -webkit-backdrop-filter: blur(28px) saturate(150%);
   border: 1px solid rgba(255, 255, 255, 0.14);
   box-shadow: 0 24px 64px -16px rgba(0, 0, 0, 0.72), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+}
+
+@media (max-width: 768px) {
+  .kuro-glass,
+  .kuro-glass-elevated,
+  .kuro-btn-glass,
+  .kuro-btn-active,
+  .kuro-dock-pill {
+    backdrop-filter: blur(12px) saturate(130%);
+    -webkit-backdrop-filter: blur(12px) saturate(130%);
+  }
 }
 
 /* Tactile iOS-inspired Button Depth System (GPU-friendly for Android & desktop) */

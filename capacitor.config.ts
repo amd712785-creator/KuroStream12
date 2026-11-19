@@ -10,8 +10,11 @@ const config: CapacitorConfig = {
       '*.vercel.app',
       '*.firebaseapp.com',
       '*.googleapis.com',
+      '*.googleusercontent.com',
       'accounts.google.com',
       'graphql.anilist.co',
+      'api.ani.zip',
+      'api.aniskip.com',
     ],
   },
   plugins: {

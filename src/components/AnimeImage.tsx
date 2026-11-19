@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { ASSETS } from '@/src/config/env';
 
 interface AnimeImageProps {
@@ -27,12 +27,18 @@ export const AnimeImage: React.FC<AnimeImageProps> = ({
   const [imgSrc, setImgSrc] = useState<string>(resolvedInitial);
   const [loaded, setLoaded] = useState(false);
   const [failedAll, setFailedAll] = useState(false);
+  const imgRef = useRef<HTMLImageElement>(null);
 
   useEffect(() => {
     const nextSrc = src && src.trim() ? src.trim() : fallback;
     setImgSrc(nextSrc);
-    setLoaded(false);
     setFailedAll(false);
+    const el = imgRef.current;
+    if (el && el.complete && el.naturalWidth > 0 && el.getAttribute('src') === nextSrc) {
+      setLoaded(true);
+    } else {
+      setLoaded(false);
+    }
   }, [src, fallback]);
 
   if (failedAll) {
@@ -61,6 +67,7 @@ export const AnimeImage: React.FC<AnimeImageProps> = ({
         />
       )}
       <img
+        ref={imgRef}
         src={imgSrc}
         alt={alt}
         referrerPolicy="no-referrer"
@@ -75,7 +82,7 @@ export const AnimeImage: React.FC<AnimeImageProps> = ({
             setFailedAll(true);
           }
         }}
-        className={`h-full w-full ${objectFitClass} ${objectPosClass} transition-opacity duration-300 ${
+        className={`h-full w-full ${objectFitClass} ${objectPosClass} transition-opacity duration-200 ${
           loaded ? 'opacity-100' : 'opacity-0'
         }`}
       />

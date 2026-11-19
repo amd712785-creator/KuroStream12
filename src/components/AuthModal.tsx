@@ -34,12 +34,12 @@ export const AuthModal: React.FC = () => {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-md"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-md overflow-y-auto"
       role="dialog"
       aria-modal="true"
       aria-labelledby="auth-modal-title"
     >
-      <div className="kuro-glass-elevated relative w-full max-w-md rounded-3xl p-6">
+      <div className="kuro-glass-elevated relative my-auto max-h-[90dvh] w-full max-w-md overflow-y-auto rounded-3xl p-5 sm:p-6">
         <button
           type="button"
           onClick={closeAuthModal}

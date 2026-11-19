@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { ChevronLeft, ChevronRight, Filter, Languages, Search, X } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Filter, Languages, RotateCcw, Search, X } from 'lucide-react';
 import { AnimeCard } from '@/src/components/AnimeCard';
 import { ANIME_GENRES, searchAnime } from '@/src/services/anilistApi';
 import { isHindiDubbedAnime, VERIFIED_HINDI_DUBBED_ID_LIST } from '@/src/services/hindiAnime';
@@ -46,6 +46,7 @@ export const CatalogPage: React.FC<CatalogPageProps> = ({
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [reloadNonce, setReloadNonce] = useState(0);
 
   useEffect(() => {
     const q = searchParams.get('q') || '';
@@ -100,7 +101,7 @@ export const CatalogPage: React.FC<CatalogPageProps> = ({
     return () => {
       active = false;
     };
-  }, [debouncedQuery, genre, format, presetFormat, status, language, sort, page]);
+  }, [debouncedQuery, genre, format, presetFormat, status, language, sort, page, reloadNonce]);
 
   const displayedItems = useMemo(() => {
     if (language === 'original') {
@@ -301,8 +302,26 @@ export const CatalogPage: React.FC<CatalogPageProps> = ({
       </div>
 
       {error ? (
-        <div className="kuro-glass rounded-2xl border-rose-500/30 bg-rose-500/10 p-6 text-center text-sm text-rose-200">
-          {error}
+        <div className="kuro-glass rounded-3xl border-rose-500/30 bg-rose-500/10 p-6 sm:p-8 text-center">
+          <h2 className="text-base sm:text-lg font-bold text-white">Unable to load anime catalog</h2>
+          <p className="mt-2 text-xs sm:text-sm text-rose-200 break-words">{error}</p>
+          <div className="mt-4 flex flex-wrap items-center justify-center gap-2.5">
+            <button
+              type="button"
+              onClick={() => setReloadNonce((n) => n + 1)}
+              className="kuro-btn-primary inline-flex min-h-[42px] items-center gap-2 rounded-2xl px-5 py-2 text-xs sm:text-sm font-semibold"
+            >
+              <RotateCcw className="h-4 w-4" />
+              <span>Retry</span>
+            </button>
+            <button
+              type="button"
+              onClick={resetFilters}
+              className="kuro-btn-glass inline-flex min-h-[42px] items-center rounded-2xl px-4 py-2 text-xs sm:text-sm font-semibold"
+            >
+              Reset Filters
+            </button>
+          </div>
         </div>
       ) : loading ? (
         <div className="grid grid-cols-2 gap-3.5 sm:grid-cols-3 sm:gap-4 md:grid-cols-4 lg:grid-cols-6">
@@ -332,8 +351,13 @@ export const CatalogPage: React.FC<CatalogPageProps> = ({
       ) : (
         <>
           <div className="grid grid-cols-2 gap-3.5 sm:grid-cols-3 sm:gap-4 md:grid-cols-4 lg:grid-cols-6">
-            {displayedItems.map((anime) => (
-              <AnimeCard key={anime.id} anime={anime} showHindiBadge />
+            {displayedItems.map((anime, index) => (
+              <AnimeCard
+                key={anime.id}
+                anime={anime}
+                showHindiBadge
+                priorityImage={index < 6}
+              />
             ))}
           </div>
 

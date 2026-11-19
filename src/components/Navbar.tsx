@@ -87,25 +87,28 @@ export const Navbar: React.FC = () => {
     Boolean(preferences.photoURL) && preferences.photoURL !== ASSETS.defaultAvatar;
 
   return (
-    <header className="sticky top-0 z-40 border-b border-white/[0.08] bg-[#07080d]/80 backdrop-blur-2xl">
-      <div className="mx-auto flex h-14 max-w-7xl items-center justify-between gap-4 px-4 sm:h-16 sm:px-6 lg:gap-8">
+    <header
+      className="sticky top-0 z-40 border-b border-white/[0.08] bg-[#07080d]/85 backdrop-blur-xl"
+      style={{ paddingTop: 'env(safe-area-inset-top)' }}
+    >
+      <div className="mx-auto flex h-14 max-w-7xl items-center justify-between gap-2 px-3 sm:h-16 sm:gap-4 sm:px-6 lg:gap-8">
         {/* Brand Zone */}
         <Link
           to="/"
-          className="group flex items-center gap-2.5 sm:gap-3 whitespace-nowrap shrink-0 select-none"
+          className="group flex items-center gap-2 sm:gap-3 whitespace-nowrap shrink-0 min-w-0 select-none"
           aria-label="KuroStream Home"
         >
-          <span className="flex h-8 w-8 sm:h-9 sm:w-9 items-center justify-center rounded-xl border border-violet-400/30 bg-gradient-to-br from-violet-500 via-purple-600 to-fuchsia-600 text-white shadow-[0_0_20px_-2px_rgba(147,51,234,0.6)] transition-all duration-300 group-hover:scale-105 group-hover:shadow-[0_0_26px_0px_rgba(168,85,247,0.75)] group-active:scale-95">
+          <span className="flex h-8 w-8 sm:h-9 sm:w-9 shrink-0 items-center justify-center rounded-xl border border-violet-400/30 bg-gradient-to-br from-violet-500 via-purple-600 to-fuchsia-600 text-white shadow-[0_0_20px_-2px_rgba(147,51,234,0.6)] transition-all duration-300 group-hover:scale-105 group-hover:shadow-[0_0_26px_0px_rgba(168,85,247,0.75)] group-active:scale-95">
             <Play className="h-4 w-4 sm:h-4.5 sm:w-4.5 translate-x-0.5 fill-current" />
           </span>
-          <span className="font-display text-xl sm:text-2xl font-black tracking-[-0.02em] leading-none drop-shadow-[0_0_16px_rgba(168,85,247,0.45)] transition-all duration-300 group-hover:drop-shadow-[0_0_24px_rgba(168,85,247,0.65)]">
+          <span className="font-display text-lg max-[359px]:text-base sm:text-2xl font-black tracking-[-0.02em] leading-none drop-shadow-[0_0_16px_rgba(168,85,247,0.45)] transition-all duration-300 group-hover:drop-shadow-[0_0_24px_rgba(168,85,247,0.65)]">
             <span className="text-white">Kuro</span>
             <span className="bg-gradient-to-r from-violet-400 via-purple-300 to-fuchsia-400 bg-clip-text text-transparent">Stream</span>
           </span>
         </Link>
 
         {/* Desktop Nav Zone */}
-        <nav className="hidden md:flex items-center gap-6" aria-label="Main navigation">
+        <nav className="hidden md:flex items-center gap-6 shrink-0" aria-label="Main navigation">
           <NavLink to="/" end className={navLinkClass}>
             Home
           </NavLink>
@@ -124,8 +127,8 @@ export const Navbar: React.FC = () => {
         </nav>
 
         {/* Search + Profile / Menu Action Zone */}
-        <div className="flex flex-1 items-center justify-end gap-2.5 sm:gap-3 min-w-0">
-          <div ref={searchContainerRef} className="relative w-full max-w-xs lg:max-w-sm hidden sm:block">
+        <div className="flex shrink-0 items-center justify-end gap-1.5 sm:gap-2.5 md:flex-1 md:min-w-0">
+          <div ref={searchContainerRef} className="relative w-full max-w-xs lg:max-w-sm hidden sm:block min-w-0">
             <form onSubmit={handleSubmit} className="relative">
               <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
               <input
@@ -201,7 +204,7 @@ export const Navbar: React.FC = () => {
             <Link
               to="/profile"
               aria-label="Open profile"
-              className="kuro-btn-glass flex min-h-[40px] items-center gap-2 rounded-2xl px-2.5 py-1.5 text-sm font-medium whitespace-nowrap shrink-0"
+              className="kuro-btn-glass flex h-9 w-9 sm:h-10 sm:w-auto sm:px-2.5 items-center justify-center gap-2 rounded-2xl text-sm font-medium whitespace-nowrap shrink-0"
             >
               <AnimeImage
                 src={preferences.photoURL}
@@ -214,11 +217,11 @@ export const Navbar: React.FC = () => {
               </span>
             </Link>
           ) : (
-            <div className="flex items-center gap-2 shrink-0">
+            <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
               <Link
                 to="/profile"
                 aria-label="Profile avatar and library"
-                className="kuro-btn-glass inline-flex min-h-[40px] items-center gap-2 rounded-2xl px-2.5 py-1.5 text-sm font-medium whitespace-nowrap shrink-0"
+                className="kuro-btn-glass inline-flex h-9 w-9 sm:h-10 sm:w-auto sm:px-2.5 items-center justify-center gap-2 rounded-2xl text-sm font-medium whitespace-nowrap shrink-0"
               >
                 {hasCustomAvatar ? (
                   <AnimeImage
@@ -235,9 +238,9 @@ export const Navbar: React.FC = () => {
               <button
                 type="button"
                 onClick={openAuthModal}
-                className="kuro-btn-primary inline-flex min-h-[40px] items-center gap-1.5 rounded-2xl px-3.5 py-2 text-xs font-semibold whitespace-nowrap shrink-0 sm:text-sm"
+                className="kuro-btn-primary inline-flex h-9 sm:h-10 items-center gap-1.5 rounded-2xl px-2.5 max-[359px]:px-2 sm:px-3.5 text-xs max-[359px]:text-[11px] font-semibold whitespace-nowrap shrink-0 sm:text-sm"
               >
-                <LogIn className="h-3.5 w-3.5 sm:hidden" />
+                <LogIn className="h-3.5 w-3.5 max-[359px]:hidden sm:hidden" />
                 <span>Sign In</span>
               </button>
             </div>
@@ -247,7 +250,7 @@ export const Navbar: React.FC = () => {
             type="button"
             onClick={() => setMobileMenuOpen((v) => !v)}
             aria-label={mobileMenuOpen ? 'Close menu' : 'Open menu'}
-            className="kuro-btn-glass flex h-10 w-10 items-center justify-center rounded-2xl md:hidden shrink-0"
+            className="kuro-btn-glass flex h-9 w-9 sm:h-10 sm:w-10 items-center justify-center rounded-2xl md:hidden shrink-0"
           >
             {mobileMenuOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
           </button>
@@ -256,7 +259,7 @@ export const Navbar: React.FC = () => {
 
       {/* Glass Mobile Menu Drawer */}
       {mobileMenuOpen && (
-        <div className="border-t border-white/[0.08] bg-[#0a0b13]/95 px-4 py-4 backdrop-blur-2xl md:hidden">
+        <div className="max-h-[calc(100dvh-4rem)] overflow-y-auto border-t border-white/[0.08] bg-[#0a0b13]/95 px-4 py-4 backdrop-blur-2xl md:hidden">
           <form onSubmit={handleSubmit} className="relative mb-3 sm:hidden">
             <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
             <input

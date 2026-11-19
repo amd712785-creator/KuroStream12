@@ -81,7 +81,7 @@ export const FeaturedAnimeSection: React.FC<FeaturedAnimeSectionProps> = ({
                     alt={title}
                     variant="poster"
                     priority
-                    className="h-full w-full object-cover transition-transform duration-300 ease-out will-change-transform group-hover:scale-[1.05]"
+                    className="h-full w-full object-cover transition-transform duration-300 ease-out group-hover:scale-[1.05]"
                   />
                   <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-[#07080d]/95 via-[#07080d]/25 to-transparent opacity-80 transition-opacity duration-200 group-hover:opacity-95" />
 
@@ -93,8 +93,8 @@ export const FeaturedAnimeSection: React.FC<FeaturedAnimeSectionProps> = ({
                     </div>
                   )}
 
-                  <div className="pointer-events-none absolute inset-0 flex items-center justify-center opacity-0 transition-opacity duration-200 group-hover:opacity-100">
-                    <span className="flex h-14 w-14 items-center justify-center rounded-full border border-white/25 bg-violet-600/90 text-white shadow-xl shadow-violet-950/80 backdrop-blur-md">
+                  <div className="pointer-events-none absolute inset-0 hidden sm:flex items-center justify-center opacity-0 transition-opacity duration-200 group-hover:opacity-100">
+                    <span className="flex h-14 w-14 items-center justify-center rounded-full border border-white/25 bg-violet-600/95 text-white shadow-xl shadow-violet-950/80">
                       <Play className="h-6 w-6 translate-x-0.5 fill-current" />
                     </span>
                   </div>

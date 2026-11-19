@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Calendar, Clock, Play } from 'lucide-react';
+import { Calendar, Clock, Play, RotateCcw } from 'lucide-react';
 import { AnimeImage } from '@/src/components/AnimeImage';
 import { getAiringSchedule, getDisplayTitle, slugifyTitle } from '@/src/services/anilistApi';
 import type { AiringScheduleItem } from '@/src/types/anime';
@@ -27,6 +27,7 @@ export const SchedulePage: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedDay, setSelectedDay] = useState<string>('');
+  const [reloadNonce, setReloadNonce] = useState(0);
 
   useEffect(() => {
     let active = true;
@@ -51,7 +52,7 @@ export const SchedulePage: React.FC = () => {
     return () => {
       active = false;
     };
-  }, []);
+  }, [reloadNonce]);
 
   const days = useMemo(() => {
     const map = new Map<string, { label: string; sub: string; items: AiringScheduleItem[] }>();
@@ -83,8 +84,17 @@ export const SchedulePage: React.FC = () => {
       </div>
 
       {error ? (
-        <div className="kuro-glass rounded-2xl border-rose-500/30 bg-rose-500/10 p-6 text-center text-sm text-rose-200">
-          {error}
+        <div className="kuro-glass rounded-3xl border-rose-500/30 bg-rose-500/10 p-6 sm:p-8 text-center">
+          <h2 className="text-base sm:text-lg font-bold text-white">Failed to load schedule</h2>
+          <p className="mt-2 text-xs sm:text-sm text-rose-200 break-words">{error}</p>
+          <button
+            type="button"
+            onClick={() => setReloadNonce((n) => n + 1)}
+            className="kuro-btn-primary mt-4 inline-flex min-h-[42px] items-center gap-2 rounded-2xl px-5 py-2 text-xs sm:text-sm font-semibold"
+          >
+            <RotateCcw className="h-4 w-4" />
+            <span>Retry</span>
+          </button>
         </div>
       ) : loading ? (
         <div className="space-y-4">

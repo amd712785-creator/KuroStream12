@@ -30,6 +30,7 @@ export const AnimeDetailPage: React.FC = () => {
   const [epFilter, setEpFilter] = useState('');
   const [chunkIndex, setChunkIndex] = useState(0);
   const [showTrailer, setShowTrailer] = useState(false);
+  const [reloadNonce, setReloadNonce] = useState(0);
 
   useEffect(() => {
     if (!Number.isFinite(animeId) || animeId <= 0) {
@@ -63,7 +64,7 @@ export const AnimeDetailPage: React.FC = () => {
     return () => {
       active = false;
     };
-  }, [animeId]);
+  }, [animeId, reloadNonce]);
 
   const chunks = useMemo(() => {
     if (episodes.length <= CHUNK_SIZE) return [];
@@ -114,13 +115,22 @@ export const AnimeDetailPage: React.FC = () => {
     return (
       <div className="mx-auto max-w-3xl px-4 py-20 text-center">
         <h1 className="text-2xl font-bold text-white">Anime Not Found</h1>
-        <p className="mt-2 text-sm text-rose-300">{error || 'Unable to load details.'}</p>
-        <Link
-          to="/"
-          className="kuro-btn-primary mt-6 inline-flex min-h-[44px] items-center rounded-2xl px-5 py-2.5 text-sm font-semibold"
-        >
-          Back to Home
-        </Link>
+        <p className="mt-2 break-words text-sm text-rose-300">{error || 'Unable to load details.'}</p>
+        <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
+          <button
+            type="button"
+            onClick={() => setReloadNonce((n) => n + 1)}
+            className="kuro-btn-primary inline-flex min-h-[44px] items-center rounded-2xl px-5 py-2.5 text-sm font-semibold"
+          >
+            Retry
+          </button>
+          <Link
+            to="/"
+            className="kuro-btn-glass inline-flex min-h-[44px] items-center rounded-2xl px-5 py-2.5 text-sm font-semibold"
+          >
+            Back to Home
+          </Link>
+        </div>
       </div>
     );
   }

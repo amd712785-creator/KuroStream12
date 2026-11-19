@@ -2545,6 +2545,42 @@ export function createExpressApp() {
     }
   });
 
+  app.post('/api/anilist', jsonParser, async (req: Request, res: Response) => {
+    const body = req.body && typeof req.body === 'object' ? (req.body as Record<string, unknown>) : {};
+    const query = typeof body.query === 'string' ? body.query.trim() : '';
+    const variables =
+      body.variables && typeof body.variables === 'object' ? body.variables : {};
+
+    if (!query || query.length > 20000) {
+      res.status(400).json({ errors: [{ message: 'Invalid AniList GraphQL query.' }] });
+      return;
+    }
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 12000);
+    try {
+      const upstream = await fetch(ANILIST_API_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        body: JSON.stringify({ query, variables }),
+        signal: controller.signal,
+      });
+
+      const rawText = await upstream.text();
+      res.status(upstream.status);
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      res.send(rawText);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'AniList upstream request failed.';
+      res.status(502).json({ errors: [{ message: msg }] });
+    } finally {
+      clearTimeout(timer);
+    }
+  });
+
   app.get('/api/anime/anizip/:anilistId', async (req: Request, res: Response) => {
     const anilistId = Number(req.params.anilistId);
     if (!Number.isFinite(anilistId) || anilistId <= 0) {

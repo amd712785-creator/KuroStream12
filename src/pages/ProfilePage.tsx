@@ -21,6 +21,7 @@ import { AdminDashboardSection } from '@/src/components/AdminDashboardSection';
 import { AnimeImage } from '@/src/components/AnimeImage';
 import { AvatarGalleryModal } from '@/src/components/AvatarGalleryModal';
 import { ExtensionManager } from '@/src/components/ExtensionManager';
+import { ThemeSelector } from '@/src/components/ThemeSelector';
 import {
   getDefaultStreamingApiBase,
   getStreamingApiBase,
@@ -236,7 +237,7 @@ export const ProfilePage: React.FC = () => {
 
           <div>
             <span className="block text-xs font-medium text-slate-400 mb-1.5">Default Audio</span>
-            <div className="kuro-segment-track inline-flex rounded-xl p-1 gap-1">
+            <div className="kuro-segment-track inline-flex flex-wrap rounded-xl p-1 gap-1">
               <button
                 type="button"
                 onClick={() => updatePreferences({ preferredAudio: 'sub' })}
@@ -515,53 +516,59 @@ export const ProfilePage: React.FC = () => {
       )}
 
       {tab === 'settings' && (
-        <section className="kuro-glass rounded-3xl p-5 sm:p-6 space-y-6">
-          <div>
-            <h2 className="text-lg font-bold text-white">Playback &amp; Streaming Settings</h2>
-            <p className="mt-1 text-xs sm:text-sm text-slate-400">
-              Configure your streaming API provider URL and playback behavior.
-            </p>
-          </div>
+        <div className="space-y-6">
+          <section className="kuro-glass rounded-3xl p-5 sm:p-6">
+            <ThemeSelector />
+          </section>
 
-          <form onSubmit={handleSaveEndpoint} className="space-y-3 max-w-2xl">
-            <label htmlFor="streaming-endpoint" className="block text-xs font-semibold text-slate-300">
-              Primary Streaming Provider Base URL
-            </label>
-            <div className="flex flex-col sm:flex-row gap-2.5">
-              <input
-                id="streaming-endpoint"
-                type="url"
-                value={endpointInput}
-                onChange={(e) => setEndpointInput(e.target.value)}
-                placeholder={getDefaultStreamingApiBase()}
-                className="h-11 flex-1 rounded-xl border border-white/[0.1] bg-[#07080d]/85 px-3.5 text-sm text-white focus:border-violet-500 focus:outline-none"
-              />
-              <div className="flex items-center gap-2">
-                <button
-                  type="submit"
-                  className="kuro-btn-primary inline-flex min-h-[44px] items-center gap-1.5 rounded-2xl px-4.5 text-xs font-semibold"
-                >
-                  {endpointSaved ? <Check className="h-4 w-4" /> : null}
-                  <span>{endpointSaved ? 'Saved' : 'Apply URL'}</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    const def = getDefaultStreamingApiBase();
-                    setEndpointInput(def);
-                    setStreamingApiOverride(null);
-                    setEndpointSaved(true);
-                    window.setTimeout(() => setEndpointSaved(false), 2000);
-                  }}
-                  className="kuro-btn-glass inline-flex min-h-[44px] items-center gap-1.5 rounded-2xl px-4 text-xs font-semibold"
-                >
-                  <RotateCcw className="h-3.5 w-3.5" />
-                  <span>Reset</span>
-                </button>
-              </div>
+          <section className="kuro-glass rounded-3xl p-5 sm:p-6 space-y-6">
+            <div>
+              <h2 className="text-lg font-bold text-white">Playback &amp; Streaming Settings</h2>
+              <p className="mt-1 text-xs sm:text-sm text-slate-400">
+                Configure your streaming API provider URL and playback behavior.
+              </p>
             </div>
-          </form>
-        </section>
+
+            <form onSubmit={handleSaveEndpoint} className="space-y-3 max-w-2xl">
+              <label htmlFor="streaming-endpoint" className="block text-xs font-semibold text-slate-300">
+                Primary Streaming Provider Base URL
+              </label>
+              <div className="flex flex-col sm:flex-row gap-2.5">
+                <input
+                  id="streaming-endpoint"
+                  type="url"
+                  value={endpointInput}
+                  onChange={(e) => setEndpointInput(e.target.value)}
+                  placeholder={getDefaultStreamingApiBase()}
+                  className="h-11 flex-1 rounded-xl border border-white/[0.1] bg-[#07080d]/85 px-3.5 text-sm text-white focus:border-violet-500 focus:outline-none"
+                />
+                <div className="flex items-center gap-2">
+                  <button
+                    type="submit"
+                    className="kuro-btn-primary inline-flex min-h-[44px] items-center gap-1.5 rounded-2xl px-4.5 text-xs font-semibold"
+                  >
+                    {endpointSaved ? <Check className="h-4 w-4" /> : null}
+                    <span>{endpointSaved ? 'Saved' : 'Apply URL'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const def = getDefaultStreamingApiBase();
+                      setEndpointInput(def);
+                      setStreamingApiOverride(null);
+                      setEndpointSaved(true);
+                      window.setTimeout(() => setEndpointSaved(false), 2000);
+                    }}
+                    className="kuro-btn-glass inline-flex min-h-[44px] items-center gap-1.5 rounded-2xl px-4 text-xs font-semibold"
+                  >
+                    <RotateCcw className="h-3.5 w-3.5" />
+                    <span>Reset</span>
+                  </button>
+                </div>
+              </div>
+            </form>
+          </section>
+        </div>
       )}
 
       {tab === 'sources' && <ExtensionManager />}

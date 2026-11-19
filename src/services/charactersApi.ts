@@ -1,4 +1,4 @@
-import { getAnilistApiUrl } from '@/src/config/env';
+import { getAnilistApiUrl, resolveApiUrl } from '@/src/config/env';
 import type { AnimeCharacterAvatar } from '@/src/types/anime';
 
 export interface SeriesFilterOption {
@@ -59,25 +59,40 @@ async function gqlCharacterFetch<T>(
   query: string,
   variables: Record<string, unknown>
 ): Promise<T> {
-  const response = await fetch(getAnilistApiUrl(), {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Accept: 'application/json',
-    },
-    body: JSON.stringify({ query, variables }),
-  });
+  const endpoints = [getAnilistApiUrl(), resolveApiUrl('/api/anilist')];
+  const body = JSON.stringify({ query, variables });
+  let lastErr: Error | null = null;
 
-  if (!response.ok) {
-    throw new Error(`Character catalog request failed (HTTP ${response.status})`);
+  for (const endpoint of endpoints) {
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), 12000);
+    try {
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        body,
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        lastErr = new Error(`Character catalog request failed (HTTP ${response.status})`);
+        continue;
+      }
+      const payload = await response.json();
+      if (payload?.errors?.length) {
+        throw new Error(payload.errors[0]?.message || 'AniList character query failed');
+      }
+      return payload.data as T;
+    } catch (err) {
+      lastErr = err instanceof Error ? err : new Error('Unable to load character avatars.');
+    } finally {
+      window.clearTimeout(timer);
+    }
   }
 
-  const payload = await response.json();
-  if (payload.errors?.length) {
-    throw new Error(payload.errors[0]?.message || 'AniList character query failed');
-  }
-
-  return payload.data as T;
+  throw lastErr || new Error('Unable to load character avatars.');
 }
 
 const CHARACTER_SEARCH_ALIASES: Record<string, string> = {

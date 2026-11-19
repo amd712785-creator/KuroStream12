@@ -27,7 +27,7 @@ export const Footer: React.FC = () => {
   };
 
   return (
-    <footer className="mt-16 border-t border-white/[0.08] bg-[#05060a] pb-28">
+    <footer className="mt-16 border-t border-white/[0.08] bg-[#05060a] pb-[calc(7rem+env(safe-area-inset-bottom))]">
       <div className="mx-auto max-w-7xl px-4 py-12 sm:px-6">
         <div className="grid grid-cols-1 gap-10 md:grid-cols-4">
           <div className="md:col-span-2">

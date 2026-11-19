@@ -29,6 +29,7 @@ import {
   googleProvider,
   handleFirestoreError,
   isFirebaseConfigured,
+  logFirestoreError,
   OperationType,
   testFirestoreConnection,
 } from '@/src/lib/firebase';
@@ -274,7 +275,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             }
           }
         } catch (err) {
-          handleFirestoreError(err, OperationType.WRITE, `users/${firebaseUser.uid}`);
+          logFirestoreError(err, OperationType.WRITE, `users/${firebaseUser.uid}`);
         }
       }
     });
@@ -327,7 +328,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           saveStoredWatchStats(loadedStats);
         }
       },
-      (error) => handleFirestoreError(error, OperationType.GET, userPath)
+      (error) => {
+        logFirestoreError(error, OperationType.GET, userPath);
+      }
     );
 
     const wlPath = `users/${uid}/watchlist`;
@@ -351,7 +354,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             .sort((a, b) => b.addedAt - a.addedAt)
         );
       },
-      (error) => handleFirestoreError(error, OperationType.LIST, wlPath)
+      (error) => {
+        logFirestoreError(error, OperationType.LIST, wlPath);
+      }
     );
 
     const favPath = `users/${uid}/favorites`;
@@ -375,7 +380,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             .sort((a, b) => b.addedAt - a.addedAt)
         );
       },
-      (error) => handleFirestoreError(error, OperationType.LIST, favPath)
+      (error) => {
+        logFirestoreError(error, OperationType.LIST, favPath);
+      }
     );
 
     const histPath = `users/${uid}/history`;
@@ -407,7 +414,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             .sort((a, b) => b.updatedAt - a.updatedAt)
         );
       },
-      (error) => handleFirestoreError(error, OperationType.LIST, histPath)
+      (error) => {
+        logFirestoreError(error, OperationType.LIST, histPath);
+      }
     );
 
     return () => {
@@ -447,6 +456,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setIsAuthModalOpen(false);
     } catch (err) {
       const code = (err as { code?: string } | null)?.code;
+      const rawMessage = err instanceof Error ? err.message : 'Unable to sign in with Google.';
       if (
         code === 'auth/popup-blocked' ||
         code === 'auth/operation-not-supported-in-this-environment'
@@ -461,7 +471,16 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           return;
         }
       }
-      setAuthError(err instanceof Error ? err.message : 'Unable to sign in with Google.');
+      if (
+        Capacitor.isNativePlatform() &&
+        (rawMessage.includes('disallowed_useragent') || code === 'auth/unauthorized-domain')
+      ) {
+        setAuthError(
+          'Google OAuth requires a system browser on Android WebView. You can continue using Local Guest Mode with full watchlist, history, and custom themes saved on this device.'
+        );
+        return;
+      }
+      setAuthError(rawMessage);
     }
   }, []);
 
@@ -647,7 +666,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           if (safeEpTitle) payload.episodeTitle = safeEpTitle;
           await setDoc(doc(db, path), payload);
         } catch (err) {
-          handleFirestoreError(err, OperationType.WRITE, path);
+          logFirestoreError(err, OperationType.WRITE, path);
         }
         return;
       }
@@ -781,7 +800,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           }
           await updateDoc(doc(db, path), updatePayload);
         } catch (err) {
-          handleFirestoreError(err, OperationType.UPDATE, path);
+          logFirestoreError(err, OperationType.UPDATE, path);
         }
       } else {
         updateGuest((prev) => ({

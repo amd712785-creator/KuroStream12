@@ -54,7 +54,7 @@ export const AnimeCard: React.FC<AnimeCardProps> = ({
           alt={title}
           variant="poster"
           priority={priorityImage}
-          className="h-full w-full object-cover transition-transform duration-300 ease-out will-change-transform group-hover:scale-[1.06]"
+          className="h-full w-full object-cover transition-transform duration-300 ease-out group-hover:scale-[1.06]"
         />
 
         {/* Cinema bottom scrim for legibility */}
@@ -70,8 +70,8 @@ export const AnimeCard: React.FC<AnimeCardProps> = ({
         )}
 
         {/* Center Play hover affordance */}
-        <div className="pointer-events-none absolute inset-0 flex items-center justify-center opacity-0 transition-opacity duration-200 group-hover:opacity-100">
-          <span className="flex h-12 w-12 items-center justify-center rounded-full border border-white/25 bg-violet-600/90 text-white shadow-xl shadow-violet-950/80 backdrop-blur-md">
+        <div className="pointer-events-none absolute inset-0 hidden sm:flex items-center justify-center opacity-0 transition-opacity duration-200 group-hover:opacity-100">
+          <span className="flex h-12 w-12 items-center justify-center rounded-full border border-white/25 bg-violet-600/95 text-white shadow-xl shadow-violet-950/80">
             <Play className="h-5 w-5 translate-x-0.5 fill-current" />
           </span>
         </div>
@@ -79,7 +79,7 @@ export const AnimeCard: React.FC<AnimeCardProps> = ({
         {/* Context badge (Trending / New Episode / Airing) inside bottom scrim */}
         {badgeText && (
           <div className="pointer-events-none absolute bottom-2.5 left-2.5 right-2.5 z-10">
-            <span className="inline-flex items-center rounded-lg border border-violet-400/35 bg-[#0b0d17]/85 px-2 py-0.5 text-[10px] font-semibold tracking-wide text-violet-200 tabular-nums backdrop-blur-md shadow-sm">
+            <span className="inline-flex items-center rounded-lg border border-violet-400/35 bg-[#0b0d17]/90 px-2 py-0.5 text-[10px] font-semibold tracking-wide text-violet-200 tabular-nums shadow-sm">
               {badgeText}
             </span>
           </div>

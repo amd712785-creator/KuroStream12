@@ -14,10 +14,12 @@ export async function initCapacitorNativeUI(): Promise<void> {
   try {
     if (!Capacitor.isNativePlatform()) return;
 
-    await StatusBar.setOverlaysWebView({ overlay: false }).catch(() => {});
-    await StatusBar.setStyle({ style: Style.Dark }).catch(() => {});
-    await StatusBar.setBackgroundColor({ color: '#08090d' }).catch(() => {});
-    await SplashScreen.hide({ fadeOutDuration: 250 }).catch(() => {});
+    await Promise.allSettled([
+      StatusBar.setOverlaysWebView({ overlay: false }),
+      StatusBar.setStyle({ style: Style.Dark }),
+      StatusBar.setBackgroundColor({ color: '#08090d' }),
+      SplashScreen.hide({ fadeOutDuration: 250 }),
+    ]);
   } catch {
     // No-op in web browsers / SSR
   }

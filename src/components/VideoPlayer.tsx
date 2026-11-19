@@ -541,37 +541,37 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
             </div>
           </div>
         ) : streamError || mediaError ? (
-          <div className="flex h-full w-full flex-col items-center justify-center bg-gradient-to-br from-[#0b0d16] via-[#130d1d] to-[#160b14] p-5 sm:p-6 text-center">
-            <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-rose-500/30 bg-rose-500/15 text-rose-400">
-              <AlertTriangle className="h-6 w-6" />
+          <div className="flex h-full w-full flex-col items-center justify-center overflow-y-auto bg-gradient-to-br from-[#0b0d16] via-[#130d1d] to-[#160b14] p-4 sm:p-6 text-center">
+            <div className="flex h-11 w-11 sm:h-12 sm:w-12 shrink-0 items-center justify-center rounded-2xl border border-rose-500/30 bg-rose-500/15 text-rose-400">
+              <AlertTriangle className="h-5 w-5 sm:h-6 sm:w-6" />
             </div>
-            <h3 className="mt-3.5 text-base sm:text-lg font-bold text-white">
+            <h3 className="mt-3 text-sm sm:text-lg font-bold text-white">
               Stream Currently Unavailable
             </h3>
-            <p className="mt-1.5 max-w-lg text-xs sm:text-sm text-slate-300">
+            <p className="mt-1.5 max-w-lg break-words text-xs sm:text-sm text-slate-300">
               {extractErrorMessage(
                 mediaError || streamError?.message || streamError,
                 'Unable to load stream from this server.'
               )}
             </p>
             {(streamError?.statusCode || streamError?.detail) && (
-              <p className="mt-1.5 max-w-xl truncate font-mono text-[11px] text-rose-300/80">
+              <p className="mt-1.5 max-w-full sm:max-w-xl truncate font-mono text-[11px] text-rose-300/80">
                 {streamError?.statusCode ? `HTTP ${streamError.statusCode}` : ''}
                 {streamError?.statusCode && streamError?.detail ? ' · ' : ''}
                 {streamError?.detail ? extractErrorMessage(streamError.detail, '') : ''}
               </p>
             )}
             {streamError?.endpointUrl && (
-              <p className="mt-1 max-w-xl truncate font-mono text-[11px] text-slate-500">
+              <p className="mt-1 max-w-full sm:max-w-xl truncate font-mono text-[11px] text-slate-500">
                 Endpoint: {streamError.endpointUrl}
               </p>
             )}
 
-            <div className="mt-4 flex flex-wrap items-center justify-center gap-2.5">
+            <div className="mt-3.5 flex flex-wrap items-center justify-center gap-2">
               <button
                 type="button"
                 onClick={onRetry}
-                className="kuro-btn-primary inline-flex min-h-[42px] items-center gap-2 rounded-2xl px-4.5 py-2 text-xs sm:text-sm font-semibold"
+                className="kuro-btn-primary inline-flex min-h-[40px] items-center gap-2 rounded-2xl px-4 py-2 text-xs sm:text-sm font-semibold"
               >
                 <RefreshCw className="h-4 w-4" />
                 <span>Retry Stream</span>
@@ -579,7 +579,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               <button
                 type="button"
                 onClick={() => setShowCustomEndpoint((v) => !v)}
-                className="kuro-btn-glass inline-flex min-h-[42px] items-center gap-2 rounded-2xl px-4.5 py-2 text-xs sm:text-sm font-semibold"
+                className="kuro-btn-glass inline-flex min-h-[40px] items-center gap-2 rounded-2xl px-4 py-2 text-xs sm:text-sm font-semibold"
               >
                 <Settings2 className="h-4 w-4" />
                 <span>Provider URL</span>
@@ -587,7 +587,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
             </div>
 
             {servers && servers.length > 0 && onSelectServer && (
-              <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
+              <div className="mt-3.5 flex flex-wrap items-center justify-center gap-2">
                 <span className="text-xs text-slate-400 mr-1">Switch Server:</span>
                 {servers
                   .filter((srv) => srv.name.toLowerCase() !== (selectedServer || '').toLowerCase())
@@ -596,7 +596,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                       key={srv.name}
                       type="button"
                       onClick={() => onSelectServer(srv.name)}
-                      className="kuro-btn-glass min-h-[36px] rounded-xl px-3.5 py-1.5 text-xs font-semibold capitalize"
+                      className="kuro-btn-glass min-h-[34px] rounded-xl px-3 py-1 text-xs font-semibold capitalize"
                     >
                       {srv.name}
                     </button>
@@ -607,18 +607,18 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
             {showCustomEndpoint && (
               <form
                 onSubmit={handleSaveCustomEndpoint}
-                className="mt-4 flex w-full max-w-md items-center gap-2 rounded-2xl border border-white/15 bg-[#07080d]/90 p-2.5"
+                className="mt-3.5 flex w-full max-w-md items-center gap-2 rounded-2xl border border-white/15 bg-[#07080d]/90 p-2"
               >
                 <input
                   type="url"
                   value={customEndpoint}
                   onChange={(e) => setCustomEndpoint(e.target.value)}
                   placeholder="https://your-streaming-api.example.com"
-                  className="flex-1 rounded-xl bg-[#121422] px-3 py-2 text-xs text-slate-100 focus:outline-none focus:ring-1 focus:ring-violet-500"
+                  className="min-w-0 flex-1 rounded-xl bg-[#121422] px-3 py-2 text-xs text-slate-100 focus:outline-none focus:ring-1 focus:ring-violet-500"
                 />
                 <button
                   type="submit"
-                  className="kuro-btn-primary min-h-[36px] rounded-xl px-3.5 py-1.5 text-xs font-semibold"
+                  className="kuro-btn-primary shrink-0 min-h-[36px] rounded-xl px-3.5 py-1.5 text-xs font-semibold"
                 >
                   Apply
                 </button>

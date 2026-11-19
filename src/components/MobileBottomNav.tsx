@@ -65,12 +65,12 @@ export const MobileBottomNav: React.FC = () => {
   return (
     <MotionConfig reducedMotion="user">
       <div
-        className="pointer-events-none fixed inset-x-0 bottom-0 z-40 px-3 sm:px-6"
-        style={{ paddingBottom: 'max(0.75rem, env(safe-area-inset-bottom))' }}
+        className="pointer-events-none fixed inset-x-0 bottom-0 z-40 px-2 sm:px-6"
+        style={{ paddingBottom: 'max(0.65rem, env(safe-area-inset-bottom))' }}
       >
         <nav
           aria-label="Bottom navigation"
-          className="kuro-dock-pill pointer-events-auto relative mx-auto grid w-full max-w-[376px] sm:max-w-[420px] md:max-w-[440px] grid-cols-5 items-center rounded-full px-2.5 py-2 sm:px-3.5 sm:py-2.5"
+          className="kuro-dock-pill pointer-events-auto relative mx-auto grid w-full max-w-[min(376px,calc(100vw-1rem))] sm:max-w-[420px] md:max-w-[440px] grid-cols-5 items-center rounded-full px-1.5 py-1.5 sm:px-3.5 sm:py-2.5 [@media(max-height:480px)]:py-1"
         >
           {MOBILE_TABS.map((tab) => {
             const Icon = tab.icon;
@@ -81,9 +81,9 @@ export const MobileBottomNav: React.FC = () => {
                 to={tab.to}
                 aria-current={active ? 'page' : undefined}
                 aria-label={tab.label}
-                className="group relative flex flex-col items-center justify-center gap-1 py-0.5 select-none focus-visible:outline-none"
+                className="group relative flex flex-col items-center justify-center gap-1 py-0.5 select-none focus-visible:outline-none [@media(max-height:480px)]:gap-0.5"
               >
-                <span className="relative flex h-11 w-11 sm:h-12 sm:w-12 items-center justify-center rounded-full transition-transform duration-150 ease-out group-active:scale-[0.92] group-focus-visible:ring-2 group-focus-visible:ring-violet-400">
+                <span className="relative flex h-10 w-10 max-[359px]:h-9 max-[359px]:w-9 sm:h-12 sm:w-12 [@media(max-height:480px)]:h-8 [@media(max-height:480px)]:w-8 items-center justify-center rounded-full transition-transform duration-150 ease-out group-active:scale-[0.92] group-focus-visible:ring-2 group-focus-visible:ring-violet-400">
                   <span
                     aria-hidden="true"
                     className="kuro-dock-orb-idle absolute inset-0 rounded-full group-hover:border-white/[0.14]"
@@ -105,7 +105,7 @@ export const MobileBottomNav: React.FC = () => {
 
                   <Icon
                     strokeWidth={active ? 2.1 : 1.6}
-                    className={`relative z-10 h-[19px] w-[19px] sm:h-5 sm:w-5 transition-colors duration-200 ${
+                    className={`relative z-10 h-[18px] w-[18px] sm:h-5 sm:w-5 [@media(max-height:480px)]:h-4 [@media(max-height:480px)]:w-4 transition-colors duration-200 ${
                       active
                         ? 'text-white'
                         : 'text-slate-300/80 group-hover:text-white'
@@ -114,7 +114,7 @@ export const MobileBottomNav: React.FC = () => {
                 </span>
 
                 <span
-                  className={`text-[10px] sm:text-[10.5px] leading-none tracking-tight whitespace-nowrap transition-colors duration-200 ${
+                  className={`text-[10px] max-[359px]:text-[9.5px] sm:text-[10.5px] leading-none tracking-tight whitespace-nowrap transition-colors duration-200 [@media(max-height:480px)]:hidden ${
                     active
                       ? 'font-semibold text-white'
                       : 'font-medium text-slate-400 group-hover:text-slate-200'

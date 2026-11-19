@@ -1,8 +1,22 @@
-import { getAnilistApiUrl } from '@/src/config/env';
+import { getAnilistApiUrl, resolveApiUrl } from '@/src/config/env';
 import type { AiringScheduleItem, AnimeDetail, AnimeSummary } from '@/src/types/anime';
 
 const cache = new Map<string, { expiresAt: number; data: unknown }>();
 const CACHE_TTL_MS = 5 * 60 * 1000;
+
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit,
+  timeoutMs = 12000
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
 
 async function gqlFetch<T>(query: string, variables: Record<string, unknown> = {}): Promise<T> {
   const key = JSON.stringify({ query, variables });
@@ -12,26 +26,68 @@ async function gqlFetch<T>(query: string, variables: Record<string, unknown> = {
     return cached.data as T;
   }
 
-  const response = await fetch(getAnilistApiUrl(), {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Accept: 'application/json',
-    },
-    body: JSON.stringify({ query, variables }),
-  });
+  const directUrl = getAnilistApiUrl();
+  const proxyUrl = resolveApiUrl('/api/anilist');
+  const endpoints = proxyUrl !== directUrl ? [directUrl, proxyUrl] : [directUrl];
+  const body = JSON.stringify({ query, variables });
 
-  if (!response.ok) {
-    throw new Error(`AniList metadata request failed with HTTP ${response.status}`);
+  let lastError: Error | null = null;
+
+  for (const endpoint of endpoints) {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const response = await fetchWithTimeout(
+          endpoint,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Accept: 'application/json',
+            },
+            body,
+          },
+          12000
+        );
+
+        if (response.status === 429 || response.status >= 500) {
+          lastError = new Error(`AniList metadata request failed with HTTP ${response.status}`);
+          if (attempt === 0) {
+            await new Promise((r) => setTimeout(r, 450));
+            continue;
+          }
+          break;
+        }
+
+        if (!response.ok) {
+          throw new Error(`AniList metadata request failed with HTTP ${response.status}`);
+        }
+
+        const payload = await response.json();
+        if (payload?.errors?.length) {
+          throw new Error(payload.errors[0]?.message || 'AniList GraphQL error');
+        }
+        if (!payload?.data) {
+          throw new Error('AniList returned an empty data payload.');
+        }
+
+        cache.set(key, { expiresAt: Date.now() + CACHE_TTL_MS, data: payload.data });
+        return payload.data as T;
+      } catch (err) {
+        lastError =
+          err instanceof Error
+            ? err.name === 'AbortError'
+              ? new Error('AniList metadata request timed out. Please check your connection.')
+              : err
+            : new Error('Unable to reach AniList catalog.');
+      }
+    }
   }
 
-  const payload = await response.json();
-  if (payload.errors?.length) {
-    throw new Error(payload.errors[0]?.message || 'AniList GraphQL error');
+  if (cached?.data) {
+    return cached.data as T;
   }
 
-  cache.set(key, { expiresAt: now + CACHE_TTL_MS, data: payload.data });
-  return payload.data as T;
+  throw lastError || new Error('Unable to load AniList catalog.');
 }
 
 const SUMMARY_FIELDS = `
@@ -129,11 +185,11 @@ export async function getHomeSections(): Promise<HomeSectionsData> {
 
   return {
     featuredPriority: orderedFeatured,
-    trending: data.trending.media,
-    popular: data.popular.media,
-    latestEpisodes: data.latestEpisodes.media,
-    recentlyUpdated: data.recentlyUpdated.media,
-    upcoming: data.upcoming.media,
+    trending: data.trending?.media || [],
+    popular: data.popular?.media || [],
+    latestEpisodes: data.latestEpisodes?.media || [],
+    recentlyUpdated: data.recentlyUpdated?.media || [],
+    upcoming: data.upcoming?.media || [],
   };
 }
 
@@ -172,7 +228,10 @@ export async function getAnimeDetails(id: number): Promise<AnimeDetail> {
     }
   `;
 
-  const data = await gqlFetch<{ Media: AnimeDetail }>(query, { id });
+  const data = await gqlFetch<{ Media: AnimeDetail | null }>(query, { id });
+  if (!data?.Media) {
+    throw new Error(`Anime #${id} metadata is currently unavailable.`);
+  }
   return data.Media;
 }
 
@@ -241,17 +300,17 @@ export async function searchAnime(filters: SearchFilters): Promise<SearchPageRes
   if (filters.idIn && filters.idIn.length > 0) variables.idIn = filters.idIn;
 
   const data = await gqlFetch<{
-    Page: {
-      pageInfo: { total: number; currentPage: number; hasNextPage: boolean };
-      media: AnimeSummary[];
+    Page?: {
+      pageInfo?: { total?: number; currentPage?: number; hasNextPage?: boolean };
+      media?: AnimeSummary[];
     };
   }>(query, variables);
 
   return {
-    items: data.Page.media,
-    hasNextPage: data.Page.pageInfo.hasNextPage,
-    total: data.Page.pageInfo.total,
-    currentPage: data.Page.pageInfo.currentPage,
+    items: (data.Page?.media || []).filter((item): item is AnimeSummary => Boolean(item && item.id)),
+    hasNextPage: Boolean(data.Page?.pageInfo?.hasNextPage),
+    total: Number(data.Page?.pageInfo?.total || 0),
+    currentPage: Number(data.Page?.pageInfo?.currentPage || filters.page || 1),
   };
 }
 
@@ -276,10 +335,10 @@ export async function getAiringSchedule(daysAhead = 7): Promise<AiringScheduleIt
   `;
 
   const data = await gqlFetch<{
-    Page: { airingSchedules: AiringScheduleItem[] };
+    Page?: { airingSchedules?: AiringScheduleItem[] };
   }>(query, { start: startOfToday, end: endWindow });
 
-  return (data.Page.airingSchedules || []).filter((item) => item.media && item.media.id);
+  return (data.Page?.airingSchedules || []).filter((item) => item.media && item.media.id);
 }
 
 export function getDisplayTitle(title?: AnimeSummary['title'] | null): string {
