@@ -451,40 +451,28 @@ export const WatchPage: React.FC = () => {
 
   const isAnimeWorldSelected = selectedServer.toLowerCase() === 'animeworld-india';
 
-  const hasJapaneseAvailable: boolean | undefined = useMemo(() => {
-    if (isAnimeWorldSelected && detectedLangsLower.length > 0) {
-      return detectedLangsLower.some((l) => l.includes('japanese') || l === 'ja' || l === 'jpn');
-    }
-    if (audioAvailability) {
-      return audioAvailability.sub.available;
-    }
-    if (audioMode === 'sub' && streamData && streamData.sources.length > 0) return true;
-    if (audioMode === 'sub' && streamError?.statusCode === 404) return false;
-    return undefined;
-  }, [isAnimeWorldSelected, detectedLangsLower, audioAvailability, audioMode, streamData, streamError]);
+  const hasJapaneseAvailable = useMemo(() => {
+    if (streamData && streamData.sources.length > 0 && audioMode === 'sub') return true;
+    if (audioAvailability?.sub?.available) return true;
+    if (streamError?.statusCode === 404 && audioMode === 'sub') return false;
+    return true;
+  }, [streamData, audioAvailability, audioMode, streamError]);
 
-  const hasEnglishAvailable: boolean | undefined = useMemo(() => {
-    if (isAnimeWorldSelected && detectedLangsLower.length > 0) {
-      return detectedLangsLower.some((l) => l.includes('english') || l === 'en' || l === 'eng');
-    }
-    if (audioAvailability) {
-      return audioAvailability.dub.available;
-    }
-    if (audioMode === 'dub' && streamData && streamData.sources.length > 0) return true;
-    if (audioMode === 'dub' && streamError?.statusCode === 404) return false;
-    return currentEpisode?.hasDub === true ? true : undefined;
-  }, [isAnimeWorldSelected, detectedLangsLower, audioAvailability, audioMode, streamData, streamError, currentEpisode]);
+  const hasEnglishAvailable = useMemo(() => {
+    if (streamData && streamData.sources.length > 0 && audioMode === 'dub') return true;
+    if (audioAvailability?.dub?.available) return true;
+    if (currentEpisode?.hasDub) return true;
+    if (streamError?.statusCode === 404 && audioMode === 'dub') return false;
+    return true;
+  }, [streamData, audioAvailability, audioMode, streamError, currentEpisode]);
 
-  const hasHindiAvailable: boolean | undefined = useMemo(() => {
-    if (isAnimeWorldSelected && streamData) {
-      return Boolean(streamData.hasHindiAudio);
-    }
-    if (audioAvailability) {
-      return audioAvailability.hindi.available;
-    }
-    if (audioMode === 'hindi' && streamError?.statusCode === 404) return false;
-    return undefined;
-  }, [isAnimeWorldSelected, streamData, audioAvailability, audioMode, streamError]);
+  const hasHindiAvailable = useMemo(() => {
+    if (streamData && streamData.sources.length > 0 && audioMode === 'hindi') return true;
+    if (streamData?.hasHindiAudio) return true;
+    if (audioAvailability?.hindi?.available) return true;
+    if (streamError?.statusCode === 404 && audioMode === 'hindi') return false;
+    return true;
+  }, [streamData, audioAvailability, audioMode, streamError]);
 
   const extraAdaptedExtensions = useMemo(() => {
     const standardNames = new Set(servers.map((s) => s.name.toLowerCase()));
