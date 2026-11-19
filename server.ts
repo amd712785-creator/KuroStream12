@@ -3,6 +3,7 @@ import express, { type NextFunction, type Request, type Response } from 'express
 import * as cheerio from 'cheerio';
 import crypto from 'crypto';
 import fs from 'fs';
+import http from 'http';
 import os from 'os';
 import path from 'path';
 import { Readable } from 'stream';
@@ -3485,11 +3486,17 @@ export const app = createExpressApp();
 export default app;
 
 export async function startStandaloneServer() {
+  const httpServer = http.createServer(app);
+  const disableHmr = process.env.DISABLE_HMR === 'true';
+
   if (!isVercelRuntime && process.env.NODE_ENV !== 'production') {
     const vitePkg = ['vi', 'te'].join('');
     const { createServer: createViteServer } = await import(vitePkg);
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        hmr: disableHmr ? false : { server: httpServer },
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);
@@ -3506,7 +3513,7 @@ export async function startStandaloneServer() {
     });
   }
 
-  return app.listen(PORT, '0.0.0.0', () => {
+  return httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(`KuroStream server listening on http://0.0.0.0:${PORT}`);
   });
 }
