@@ -1,4 +1,4 @@
-import 'dotenv/config';
+import dotenv from 'dotenv';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import * as cheerio from 'cheerio';
 import crypto from 'crypto';
@@ -10,19 +10,45 @@ import { fileURLToPath } from 'url';
 import { cert, getApps, initializeApp as initAdminApp } from 'firebase-admin/app';
 import { getAuth as getAdminAuth } from 'firebase-admin/auth';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
 const isVercelRuntime = Boolean(
   process.env.VERCEL || process.env.VERCEL_ENV || process.env.AWS_LAMBDA_FUNCTION_NAME
 );
+
+if (!isVercelRuntime) {
+  try {
+    dotenv.config();
+  } catch {
+    // ignore missing .env
+  }
+}
+
+function resolveServerRootDir(): string {
+  try {
+    const metaUrl = typeof import.meta !== 'undefined' ? import.meta.url : undefined;
+    if (typeof metaUrl === 'string' && metaUrl.startsWith('file:')) {
+      return path.dirname(fileURLToPath(metaUrl));
+    }
+  } catch {
+    // Fallback when bundled to CommonJS (e.g., Vercel @vercel/node)
+  }
+  try {
+    if (typeof __dirname === 'string' && __dirname) {
+      return __dirname;
+    }
+  } catch {
+    // Fallback in strict ESM
+  }
+  return process.cwd();
+}
+
+const SERVER_ROOT_DIR = resolveServerRootDir();
 
 const AUTHORIZED_ADMIN_EMAIL = (process.env.ADMIN_EMAIL || 'amd712785@gmail.com').trim();
 
 function resolveWritableDataDir(): string {
   const candidates = isVercelRuntime
     ? [path.join(os.tmpdir(), 'kurostream-data')]
-    : [path.resolve(__dirname, '.kurostream-data'), path.join(os.tmpdir(), 'kurostream-data')];
+    : [path.resolve(SERVER_ROOT_DIR, '.kurostream-data'), path.join(os.tmpdir(), 'kurostream-data')];
 
   for (const dir of candidates) {
     try {
@@ -63,7 +89,7 @@ function loadFirebaseAppletConfig(): FirebaseAppletConfig | null {
   }
 
   const candidatePaths = [
-    path.resolve(__dirname, 'firebase-applet-config.json'),
+    path.resolve(SERVER_ROOT_DIR, 'firebase-applet-config.json'),
     path.resolve(process.cwd(), 'firebase-applet-config.json'),
   ];
 
@@ -505,11 +531,11 @@ async function resolveMalIdFromAnilist(anilistId: number): Promise<number | null
   }
 }
 
-async function verifyStreamPlaylistReachable(
+async function fetchVerifiedStreamPlaylist(
   url: string,
   referer: string,
   timeoutMs = 3500
-): Promise<boolean> {
+): Promise<{ reachable: boolean; playlistText: string }> {
   try {
     const res = await fetchWithTimeout(
       url,
@@ -523,16 +549,25 @@ async function verifyStreamPlaylistReachable(
       },
       timeoutMs
     );
-    if (!res.ok) return false;
+    if (!res.ok) return { reachable: false, playlistText: '' };
     const ct = (res.headers.get('content-type') || '').toLowerCase();
     if (url.toLowerCase().includes('.m3u8') || ct.includes('mpegurl')) {
       const text = await res.text();
-      return text.includes('#EXTM3U');
+      return { reachable: text.includes('#EXTM3U'), playlistText: text };
     }
-    return true;
+    return { reachable: true, playlistText: '' };
   } catch {
-    return false;
+    return { reachable: false, playlistText: '' };
   }
+}
+
+async function verifyStreamPlaylistReachable(
+  url: string,
+  referer: string,
+  timeoutMs = 3500
+): Promise<boolean> {
+  const result = await fetchVerifiedStreamPlaylist(url, referer, timeoutMs);
+  return result.reachable;
 }
 
 async function fetchAniZipMetadata(anilistId: number): Promise<Record<string, unknown>> {
@@ -1238,7 +1273,12 @@ async function resolveFromMegavid(
         continue;
       }
 
-      const isReachable = await verifyStreamPlaylistReachable(cleanSourceUrl, 'https://megavid.buzz/', 3000);
+      const verifiedPlaylist = await fetchVerifiedStreamPlaylist(
+        cleanSourceUrl,
+        'https://megavid.buzz/',
+        3500
+      );
+      const isReachable = verifiedPlaylist.reachable;
       let sourceHost = '';
       try {
         sourceHost = new URL(cleanSourceUrl).hostname;
@@ -1268,22 +1308,16 @@ async function resolveFromMegavid(
         },
       ];
 
-      // Parse variant qualities from master playlist so quality selector has real 720p / 480p options
-      try {
-        const masterRes = await fetchWithTimeout(
-          cleanSourceUrl,
-          { headers: { Referer: 'https://megavid.buzz/', 'User-Agent': BROWSER_UA } },
-          3000
-        );
-        if (masterRes.ok) {
-          const playlistText = await masterRes.text();
-          const lines = playlistText.split(/\r?\n/);
-          for (let i = 0; i < lines.length; i++) {
-            const line = lines[i].trim();
-            if (line.startsWith('#EXT-X-STREAM-INF:')) {
-              const resMatch = line.match(/RESOLUTION=\d+x(\d+)/i);
-              const nextLine = (lines[i + 1] || '').trim();
-              if (nextLine && !nextLine.startsWith('#')) {
+      // Parse variant qualities from already-fetched master playlist
+      if (verifiedPlaylist.playlistText) {
+        const lines = verifiedPlaylist.playlistText.split(/\r?\n/);
+        for (let i = 0; i < lines.length; i++) {
+          const line = lines[i].trim();
+          if (line.startsWith('#EXT-X-STREAM-INF:')) {
+            const resMatch = line.match(/RESOLUTION=\d+x(\d+)/i);
+            const nextLine = (lines[i + 1] || '').trim();
+            if (nextLine && !nextLine.startsWith('#')) {
+              try {
                 const variantUrl = new URL(nextLine, cleanSourceUrl).toString();
                 sources.push({
                   url: variantUrl,
@@ -1291,12 +1325,12 @@ async function resolveFromMegavid(
                   isM3U8: true,
                   type: 'hls',
                 });
+              } catch {
+                // ignore invalid variant line
               }
             }
           }
         }
-      } catch {
-        // keep Auto HLS source if variant parsing fails
       }
 
       const subtitles: ResolvedSubtitle[] = (data.tracks || [])
@@ -2958,15 +2992,16 @@ export const app = createExpressApp();
 export default app;
 
 export async function startStandaloneServer() {
-  if (process.env.NODE_ENV !== 'production') {
-    const { createServer: createViteServer } = await import('vite');
+  if (!isVercelRuntime && process.env.NODE_ENV !== 'production') {
+    const vitePkg = ['vi', 'te'].join('');
+    const { createServer: createViteServer } = await import(vitePkg);
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.resolve(__dirname, 'dist');
+    const distPath = path.resolve(SERVER_ROOT_DIR, 'dist');
     app.use(express.static(distPath));
     app.get('*', (_req: Request, res: Response) => {
       const indexHtml = path.join(distPath, 'index.html');

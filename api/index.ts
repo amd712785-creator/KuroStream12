@@ -1,7 +1,31 @@
 import type { IncomingMessage, ServerResponse } from 'http';
-import app from '../server';
 
-export default function handler(req: IncomingMessage, res: ServerResponse) {
+type ExpressApp = (req: IncomingMessage, res: ServerResponse) => unknown;
+
+let cachedApp: ExpressApp | null = null;
+let appLoadPromise: Promise<ExpressApp> | null = null;
+
+async function getServerApp(): Promise<ExpressApp> {
+  if (cachedApp) return cachedApp;
+  if (!appLoadPromise) {
+    appLoadPromise = import('../server')
+      .then((mod) => {
+        const resolved = (mod.default || mod.app) as ExpressApp | undefined;
+        if (typeof resolved !== 'function') {
+          throw new Error('Express server module did not export a valid request handler.');
+        }
+        cachedApp = resolved;
+        return resolved;
+      })
+      .catch((err) => {
+        appLoadPromise = null;
+        throw err;
+      });
+  }
+  return appLoadPromise;
+}
+
+export default async function handler(req: IncomingMessage, res: ServerResponse) {
   try {
     if (req.url) {
       const parsed = new URL(req.url, 'http://localhost');
@@ -18,15 +42,47 @@ export default function handler(req: IncomingMessage, res: ServerResponse) {
         req.url = '/api/health';
       }
     }
-    return app(req as Parameters<typeof app>[0], res as Parameters<typeof app>[1]);
+
+    const mutableReq = req as IncomingMessage & {
+      originalUrl?: string;
+      query?: Record<string, unknown>;
+    };
+    if (req.url) {
+      mutableReq.originalUrl = req.url;
+    }
+    // Clear pre-populated Vercel query object containing __kuro_path so Express parses fresh req.url
+    if (mutableReq.query && typeof mutableReq.query === 'object') {
+      try {
+        Object.defineProperty(mutableReq, 'query', {
+          value: undefined,
+          writable: true,
+          configurable: true,
+        });
+      } catch {
+        delete mutableReq.query.__kuro_path;
+      }
+    }
+
+    const app = await getServerApp();
+    return app(req, res);
   } catch (err) {
     const message =
       err instanceof Error ? err.message : typeof err === 'string' ? err : 'Serverless API handler failure.';
-    console.error('[Vercel Handler Error]', message);
+    const code =
+      err && typeof err === 'object' && 'code' in err ? String((err as { code?: unknown }).code) : undefined;
+    console.error('[Vercel Handler Error]', code || '', message);
     if (!res.headersSent) {
       res.statusCode = 500;
       res.setHeader('Content-Type', 'application/json; charset=utf-8');
-      res.end(JSON.stringify({ success: false, error: message, message }));
+      res.end(
+        JSON.stringify({
+          success: false,
+          error: message,
+          code,
+          message,
+        })
+      );
     }
   }
 }
+
