@@ -24,15 +24,16 @@ import {
   fetchExtensionsCatalog,
   getEnabledExtensionIds,
 } from '@/src/services/extensionsApi';
-import { isHindiDubbedAnime } from '@/src/services/hindiAnime';
 import {
   fetchAnimeEpisodes,
+  fetchAudioAvailability,
   fetchEpisodeServers,
   fetchEpisodeStream,
 } from '@/src/services/streamingApi';
 import type {
   AnimeDetail,
   AniSkipResponse,
+  AudioAvailabilityResponse,
   EpisodeItem,
   ExtensionRepoItem,
   ParsedStreamResult,
@@ -45,16 +46,17 @@ const FALLBACK_SERVERS: StreamServer[] = [
   { name: 'vidstreaming' },
   { name: 'megacloud' },
   { name: 'streamsb' },
+  { name: 'animepahe' },
+  { name: 'aniwatchtv' },
+  { name: 'hianime' },
+  { name: 'kaido' },
 ];
 
-function ensureAnimeWorldInServers(list: StreamServer[]): StreamServer[] {
+function ensureStandardServers(list: StreamServer[]): StreamServer[] {
   const seen = new Set<string>();
   const merged: StreamServer[] = [];
-  if (!list.some((s) => s.name.toLowerCase() === 'animeworld-india')) {
-    merged.push({ name: 'animeworld-india' });
-    seen.add('animeworld-india');
-  }
-  for (const s of list) {
+
+  for (const s of [...FALLBACK_SERVERS, ...list]) {
     const key = s.name.toLowerCase();
     if (!seen.has(key)) {
       seen.add(key);
@@ -100,6 +102,8 @@ export const WatchPage: React.FC = () => {
   const [streamData, setStreamData] = useState<ParsedStreamResult | null>(null);
   const [streamError, setStreamError] = useState<StreamFetchError | null>(null);
   const [loadingStream, setLoadingStream] = useState(true);
+  const [audioAvailability, setAudioAvailability] = useState<AudioAvailabilityResponse | null>(null);
+  const [checkingAudio, setCheckingAudio] = useState(false);
   const [showShortcuts, setShowShortcuts] = useState(false);
   const [showSourceManager, setShowSourceManager] = useState(false);
 
@@ -205,6 +209,30 @@ export const WatchPage: React.FC = () => {
     };
   }, [effectiveMalId, resolvedEpNumber]);
 
+  // Real audio availability probe across Japanese (SUB), English (DUB), Hindi (DUB)
+  useEffect(() => {
+    if (!anime || resolvedEpNumber <= 0) return;
+    let active = true;
+    setCheckingAudio(true);
+    fetchAudioAvailability({
+      anilistId: animeId,
+      malId: effectiveMalId,
+      episodeNumber: resolvedEpNumber,
+      title: anime.title.english || anime.title.romaji,
+      romajiTitle: anime.title.romaji,
+      format: anime.format,
+    })
+      .then((res) => {
+        if (active) setAudioAvailability(res);
+      })
+      .finally(() => {
+        if (active) setCheckingAudio(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [animeId, effectiveMalId, resolvedEpNumber, anime]);
+
   const episodeKey = `${animeId}:${effectiveEpisodeId || decodedEpisodeId}:${selectedServer}:${audioMode}`;
 
   const loadStream = useCallback(async () => {
@@ -237,9 +265,10 @@ export const WatchPage: React.FC = () => {
         seasonYear: anime.seasonYear,
         episodeNumber: resolvedEpNumber,
         preferHindi: audioMode === 'hindi',
+        preferLang: audioMode,
       });
 
-      setServers(FALLBACK_SERVERS);
+      setServers((prev) => ensureStandardServers(prev));
 
       if (awRes.data) {
         setStreamData(awRes.data);
@@ -270,9 +299,9 @@ export const WatchPage: React.FC = () => {
     ]);
 
     if (serverList.length > 0) {
-      setServers(ensureAnimeWorldInServers(serverList));
+      setServers(ensureStandardServers(serverList));
     } else if (streamRes.data?.servers?.length) {
-      setServers(ensureAnimeWorldInServers(streamRes.data.servers));
+      setServers(ensureStandardServers(streamRes.data.servers));
     } else {
       setServers(FALLBACK_SERVERS);
     }
@@ -314,6 +343,7 @@ export const WatchPage: React.FC = () => {
         seasonYear: anime.seasonYear,
         episodeNumber: resolvedEpNumber,
         preferHindi: audioMode === 'hindi',
+        preferLang: audioMode,
       });
       if (awRes.data) {
         setStreamData(awRes.data);
@@ -400,26 +430,73 @@ export const WatchPage: React.FC = () => {
 
   const isAnimeWorldSelected = selectedServer.toLowerCase() === 'animeworld-india';
 
-  const hasEnglishAvailable = useMemo(() => {
-    if (isAnimeWorldSelected && detectedLangsLower.length > 0) {
-      return detectedLangsLower.some((l) => l.includes('english') || l === 'en');
-    }
-    return currentEpisode ? Boolean(currentEpisode.hasDub || currentEpisode.dubId) : false;
-  }, [isAnimeWorldSelected, detectedLangsLower, currentEpisode]);
-
-  const hasJapaneseAvailable = useMemo(() => {
+  const hasJapaneseAvailable: boolean | undefined = useMemo(() => {
     if (isAnimeWorldSelected && detectedLangsLower.length > 0) {
       return detectedLangsLower.some((l) => l.includes('japanese') || l === 'ja' || l === 'jpn');
     }
-    return true;
-  }, [isAnimeWorldSelected, detectedLangsLower]);
+    if (audioAvailability) {
+      return audioAvailability.sub.available;
+    }
+    if (audioMode === 'sub' && streamData && streamData.sources.length > 0) return true;
+    if (audioMode === 'sub' && streamError?.statusCode === 404) return false;
+    return undefined;
+  }, [isAnimeWorldSelected, detectedLangsLower, audioAvailability, audioMode, streamData, streamError]);
 
-  const hasHindiAvailable = useMemo(() => {
-    if (streamData?.hasHindiAudio) return true;
-    if (anime && isHindiDubbedAnime(anime)) return true;
-    if (isAnimeWorldSelected && streamData && streamData.hasHindiAudio === false) return false;
-    return audioMode === 'hindi';
-  }, [streamData, anime, isAnimeWorldSelected, audioMode]);
+  const hasEnglishAvailable: boolean | undefined = useMemo(() => {
+    if (isAnimeWorldSelected && detectedLangsLower.length > 0) {
+      return detectedLangsLower.some((l) => l.includes('english') || l === 'en' || l === 'eng');
+    }
+    if (audioAvailability) {
+      return audioAvailability.dub.available;
+    }
+    if (audioMode === 'dub' && streamData && streamData.sources.length > 0) return true;
+    if (audioMode === 'dub' && streamError?.statusCode === 404) return false;
+    return currentEpisode?.hasDub === true ? true : undefined;
+  }, [isAnimeWorldSelected, detectedLangsLower, audioAvailability, audioMode, streamData, streamError, currentEpisode]);
+
+  const hasHindiAvailable: boolean | undefined = useMemo(() => {
+    if (isAnimeWorldSelected && streamData) {
+      return Boolean(streamData.hasHindiAudio);
+    }
+    if (audioAvailability) {
+      return audioAvailability.hindi.available;
+    }
+    if (audioMode === 'hindi' && streamError?.statusCode === 404) return false;
+    return undefined;
+  }, [isAnimeWorldSelected, streamData, audioAvailability, audioMode, streamError]);
+
+  const extraAdaptedExtensions = useMemo(() => {
+    const standardNames = new Set(servers.map((s) => s.name.toLowerCase()));
+    return adaptedExtensions.filter((ext) => {
+      const extNameLower = ext.name.toLowerCase();
+      if (standardNames.has(extNameLower)) return false;
+      if (
+        extNameLower.includes('hianime') ||
+        extNameLower.includes('zoro') ||
+        extNameLower.includes('aniwatch') ||
+        extNameLower.includes('kaido') ||
+        extNameLower.includes('animepahe')
+      ) {
+        return false;
+      }
+      return true;
+    });
+  }, [adaptedExtensions, servers]);
+
+  const handleSelectAudioMode = useCallback(
+    (mode: 'sub' | 'dub' | 'hindi') => {
+      setAudioMode(mode);
+      updatePreferences({ preferredAudio: mode });
+      if (mode === 'hindi') {
+        setSelectedServer('animeworld-india');
+      } else if (selectedServer.toLowerCase() === 'animeworld-india') {
+        setSelectedServer('vidstreaming');
+      }
+    },
+    [selectedServer, updatePreferences]
+  );
+
+  const selectedTrackStatus = audioAvailability ? audioAvailability[audioMode] : undefined;
 
   return (
     <div className="mx-auto max-w-7xl px-4 py-5 sm:px-6 sm:py-6">
@@ -463,6 +540,7 @@ export const WatchPage: React.FC = () => {
             autoNext={autoNext}
             hasNextEpisode={Boolean(nextEpisode)}
             audioMode={audioMode}
+            onSelectAudioMode={handleSelectAudioMode}
             servers={servers}
             selectedServer={selectedServer}
             onSelectServer={setSelectedServer}
@@ -564,58 +642,60 @@ export const WatchPage: React.FC = () => {
                   <span>Audio Language:</span>
                 </span>
                 <div className="kuro-segment-track inline-flex flex-wrap rounded-xl p-1 gap-1">
-                  {hasJapaneseAvailable && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setAudioMode('sub');
-                        updatePreferences({ preferredAudio: 'sub' });
-                        if (selectedServer.toLowerCase() === 'animeworld-india') {
-                          setSelectedServer('vidstreaming');
-                        }
-                      }}
-                      className={`min-h-[34px] rounded-lg px-3 py-1 text-xs font-semibold ${
-                        audioMode === 'sub' ? 'kuro-segment-active' : 'kuro-segment-idle'
-                      }`}
-                    >
-                      Japanese (SUB)
-                    </button>
-                  )}
+                  <button
+                    type="button"
+                    onClick={() => handleSelectAudioMode('sub')}
+                    title={audioAvailability?.sub.reason || 'Japanese (SUB)'}
+                    className={`inline-flex min-h-[34px] items-center gap-1.5 rounded-lg px-3 py-1 text-xs font-semibold ${
+                      audioMode === 'sub' ? 'kuro-segment-active' : 'kuro-segment-idle'
+                    } ${hasJapaneseAvailable === false ? 'opacity-65' : ''}`}
+                  >
+                    <span>Japanese (SUB)</span>
+                    {hasJapaneseAvailable === true && (
+                      <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" title="Available" />
+                    )}
+                    {hasJapaneseAvailable === false && (
+                      <span className="text-[10px] font-normal text-rose-300">(Unavailable)</span>
+                    )}
+                  </button>
 
-                  {hasEnglishAvailable && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setAudioMode('dub');
-                        updatePreferences({ preferredAudio: 'dub' });
-                        if (selectedServer.toLowerCase() === 'animeworld-india') {
-                          setSelectedServer('vidstreaming');
-                        }
-                      }}
-                      className={`min-h-[34px] rounded-lg px-3 py-1 text-xs font-semibold ${
-                        audioMode === 'dub' ? 'kuro-segment-active' : 'kuro-segment-idle'
-                      }`}
-                    >
-                      English (DUB)
-                    </button>
-                  )}
+                  <button
+                    type="button"
+                    onClick={() => handleSelectAudioMode('dub')}
+                    title={audioAvailability?.dub.reason || 'English (DUB)'}
+                    className={`inline-flex min-h-[34px] items-center gap-1.5 rounded-lg px-3 py-1 text-xs font-semibold ${
+                      audioMode === 'dub' ? 'kuro-segment-active' : 'kuro-segment-idle'
+                    } ${hasEnglishAvailable === false ? 'opacity-65' : ''}`}
+                  >
+                    <span>English (DUB)</span>
+                    {hasEnglishAvailable === true && (
+                      <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" title="Available" />
+                    )}
+                    {hasEnglishAvailable === false && (
+                      <span className="text-[10px] font-normal text-rose-300">(Unavailable)</span>
+                    )}
+                  </button>
 
-                  {hasHindiAvailable && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setAudioMode('hindi');
-                        updatePreferences({ preferredAudio: 'hindi' });
-                        setSelectedServer('animeworld-india');
-                      }}
-                      className={`min-h-[34px] rounded-lg px-3 py-1 text-xs font-semibold ${
-                        audioMode === 'hindi' ? 'kuro-segment-amber' : 'kuro-segment-idle'
-                      }`}
-                    >
-                      Hindi Dubbed
-                    </button>
-                  )}
+                  <button
+                    type="button"
+                    onClick={() => handleSelectAudioMode('hindi')}
+                    title={audioAvailability?.hindi.reason || 'Hindi (DUB)'}
+                    className={`inline-flex min-h-[34px] items-center gap-1.5 rounded-lg px-3 py-1 text-xs font-semibold ${
+                      audioMode === 'hindi' ? 'kuro-segment-amber' : 'kuro-segment-idle'
+                    } ${hasHindiAvailable === false ? 'opacity-65' : ''}`}
+                  >
+                    <span>Hindi (DUB)</span>
+                    {hasHindiAvailable === true && (
+                      <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" title="Available" />
+                    )}
+                    {hasHindiAvailable === false && (
+                      <span className="text-[10px] font-normal text-rose-300">(Unavailable)</span>
+                    )}
+                  </button>
                 </div>
+                {checkingAudio && !audioAvailability && (
+                  <span className="text-[11px] text-slate-400">Checking tracks...</span>
+                )}
               </div>
 
               <button
@@ -629,6 +709,12 @@ export const WatchPage: React.FC = () => {
                 <span>Shortcuts</span>
               </button>
             </div>
+
+            {selectedTrackStatus && !selectedTrackStatus.available && selectedTrackStatus.reason && (
+              <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 px-3.5 py-2.5 text-xs text-amber-200">
+                {selectedTrackStatus.reason}
+              </div>
+            )}
 
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="flex flex-wrap items-center gap-2">
@@ -654,8 +740,8 @@ export const WatchPage: React.FC = () => {
                   );
                 })}
 
-                {adaptedExtensions.map((ext) => {
-                  const extServerKey = ext.name.toLowerCase();
+                {extraAdaptedExtensions.map((ext) => {
+                  const extServerKey = (ext.adapterServer || ext.name).toLowerCase();
                   const isSelected = selectedServer.toLowerCase() === extServerKey;
                   return (
                     <button

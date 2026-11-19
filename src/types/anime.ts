@@ -132,8 +132,27 @@ export interface ParsedStreamResult {
   recap?: SkipInterval;
   hasHindiAudio?: boolean;
   audioLanguages?: string[];
+  requestedLanguage?: 'sub' | 'dub' | 'hindi';
   providerSource?: string;
   rawResponse?: unknown;
+}
+
+export interface AudioTrackStatus {
+  available: boolean;
+  verified: boolean;
+  blockedByCloudflare?: boolean;
+  languages?: string[];
+  reason?: string;
+}
+
+export interface AudioAvailabilityResponse {
+  anilistId?: number;
+  malId?: number | null;
+  episodeNumber: number;
+  sub: AudioTrackStatus;
+  dub: AudioTrackStatus;
+  hindi: AudioTrackStatus;
+  checkedAt: string;
 }
 
 export interface StreamFetchError {

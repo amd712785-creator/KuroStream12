@@ -14,6 +14,7 @@ import {
 import type {
   AnimeDetail,
   AniZipResponse,
+  AudioAvailabilityResponse,
   EpisodeItem,
   ParsedStreamResult,
   SkipInterval,
@@ -236,6 +237,13 @@ export function parseWatchResponse(payload: unknown): ParsedStreamResult {
   const hasHindiAudio =
     typeof dataObj.hasHindiAudio === 'boolean' ? dataObj.hasHindiAudio : undefined;
 
+  const requestedLanguage =
+    dataObj.requestedLanguage === 'sub' ||
+    dataObj.requestedLanguage === 'dub' ||
+    dataObj.requestedLanguage === 'hindi'
+      ? dataObj.requestedLanguage
+      : undefined;
+
   return {
     sources,
     subtitles,
@@ -247,6 +255,7 @@ export function parseWatchResponse(payload: unknown): ParsedStreamResult {
     recap,
     hasHindiAudio,
     audioLanguages,
+    requestedLanguage,
     providerSource:
       typeof dataObj.source === 'string' ? dataObj.source : undefined,
     rawResponse: payload,
@@ -307,7 +316,7 @@ function buildMetadataEpisodes(
       airDate: zipEp?.airDate || null,
       runtime: zipEp?.runtime ?? null,
       externalUrl: meta?.url || null,
-      hasDub: true,
+      hasDub: undefined,
     });
   }
   return list;
@@ -590,5 +599,40 @@ export async function fetchEpisodeStream(
           : `Failed to fetch episode stream: ${extracted.message}`,
       },
     };
+  }
+}
+
+export async function fetchAudioAvailability(options: {
+  anilistId?: number;
+  malId?: number | null;
+  episodeNumber: number;
+  title?: string | null;
+  romajiTitle?: string | null;
+  format?: string | null;
+}): Promise<AudioAvailabilityResponse | null> {
+  const params = new URLSearchParams();
+  if (options.anilistId) params.set('anilistId', String(options.anilistId));
+  if (options.malId) params.set('malId', String(options.malId));
+  params.set('ep', String(Math.max(1, options.episodeNumber || 1)));
+  if (options.title) params.set('title', options.title);
+  if (options.romajiTitle) params.set('romajiTitle', options.romajiTitle);
+  if (options.format) params.set('format', options.format);
+  const customBase = getCustomBaseParam();
+  if (customBase) params.set('base', customBase);
+
+  const resolvedUrl = resolveApiUrl(`/api/anime/audio-availability?${params.toString()}`);
+  try {
+    const res = await fetchApiWithTimeout(resolvedUrl, 12000);
+    if (!res.ok) {
+      logApiDiagnostic('AudioAvailability', resolvedUrl, { status: res.status });
+      return null;
+    }
+    const parsed = await parseSafeJsonResponse<AudioAvailabilityResponse>(res);
+    return parsed.ok ? parsed.data : null;
+  } catch (err) {
+    logApiDiagnostic('AudioAvailability', resolvedUrl, {
+      message: err instanceof Error ? err.message : 'Audio availability check failed',
+    });
+    return null;
   }
 }

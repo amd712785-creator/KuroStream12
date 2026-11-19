@@ -463,11 +463,23 @@ interface CacheEntry<T> {
 
 const aniZipCache = new Map<number, CacheEntry<Record<string, unknown>>>();
 const aniSkipCache = new Map<string, CacheEntry<Record<string, unknown>>>();
+const audioAvailabilityCache = new Map<string, CacheEntry<Record<string, unknown>>>();
 const primaryUnavailableCache = new Map<
   string,
   CacheEntry<{ statusCode: number; message: string; detail?: string }>
 >();
 let extensionsCache: CacheEntry<Record<string, unknown>> | null = null;
+
+const ALL_STREAM_SERVERS = [
+  { name: 'animeworld-india' },
+  { name: 'vidstreaming' },
+  { name: 'megacloud' },
+  { name: 'streamsb' },
+  { name: 'animepahe' },
+  { name: 'aniwatchtv' },
+  { name: 'hianime' },
+  { name: 'kaido' },
+];
 
 interface ResolvedSource {
   url: string;
@@ -1103,9 +1115,17 @@ async function fetchAnimeWorldHtml(url: string): Promise<{
     );
     const cfMitigated = (res.headers.get('cf-mitigated') || '').toLowerCase();
     const serverHeader = (res.headers.get('server') || '').toLowerCase();
+    const rawBody = await res.text().catch(() => '');
+    const lowerBody = rawBody.slice(0, 4000).toLowerCase();
+    const hasCfChallengeMarker =
+      lowerBody.includes('just a moment...') ||
+      lowerBody.includes('cf_chl_opt') ||
+      lowerBody.includes('cf-browser-verification') ||
+      lowerBody.includes('attention required! | cloudflare');
     const blockedByUpstream =
-      res.status === 403 && (cfMitigated.includes('challenge') || serverHeader.includes('cloudflare'));
-    const html = res.ok ? await res.text() : '';
+      (res.status === 403 || res.status === 503) &&
+      (cfMitigated.includes('challenge') || serverHeader.includes('cloudflare') || hasCfChallengeMarker);
+    const html = res.ok ? rawBody : '';
     if (!res.ok) {
       console.warn(
         `[AnimeWorld Diagnostic] Upstream request failed: URL=${url}, Status=${res.status} ${res.statusText}${
@@ -1206,33 +1226,67 @@ async function resolveFromMegavid(
   message?: string;
   payload?: Record<string, unknown>;
 }> {
-  const catToUse = category === 'hindi' ? 'dub' : category;
+  if (category === 'hindi') {
+    return {
+      ok: false,
+      statusCode: 404,
+      message: `Hindi (DUB) audio track is not available on ${requestedServer || 'this server'}. Only Japanese (SUB) and English (DUB) streams exist here; switch to AnimeWorld-India for verified Hindi dubbed audio.`,
+    };
+  }
+
+  const catToUse: 'sub' | 'dub' = category === 'dub' ? 'dub' : 'sub';
   const refererUrl = `https://megavid.buzz/mal/${malId}/${episodeNumber}/${catToUse}`;
   const baseSourceUrl = `${refererUrl}/source`;
 
-  // Map requested server names (including adapted Aniyomi source identifiers) to megavid query strategies
+  // Map each server cleanly to its primary query & verified HLS fallback query on megavid.buzz
   const serverLower = requestedServer.toLowerCase();
   const candidateQueries: Array<{ qs: string; label: string }> =
-    serverLower === 'streamsb' || serverLower.includes('animepahe')
+    serverLower === 'streamsb'
       ? [
           { qs: 'axsv=sora', label: 'Streamsb' },
+          { qs: 'axsv=loli', label: 'Streamsb · HLS' },
           { qs: 'noax=1', label: 'Megacloud' },
         ]
-      : serverLower === 'vidstreaming' ||
-          serverLower.includes('hianime') ||
-          serverLower.includes('zoro') ||
-          serverLower.includes('kaido') ||
-          serverLower.includes('animeonsen')
+      : serverLower.includes('animepahe')
         ? [
-            { qs: 'noax=1', label: 'Vidstreaming' },
-            { qs: 'axsv=yuki', label: 'Vidstreaming' },
+            { qs: 'axsv=sora', label: 'AnimePahe' },
+            { qs: 'axsv=loli', label: 'AnimePahe · HLS' },
+            { qs: 'noax=1', label: 'AnimePahe · Fallback' },
           ]
-        : [
-            { qs: 'noax=1', label: 'Megacloud' },
-            { qs: 'axsv=nero', label: 'Megacloud' },
-          ];
+        : serverLower === 'megacloud'
+          ? [
+              { qs: 'axsv=nero', label: 'Megacloud' },
+              { qs: 'noax=1', label: 'Megacloud · HLS' },
+              { qs: 'axsv=loli', label: 'Megacloud · Mirror' },
+            ]
+          : serverLower.includes('aniwatch')
+            ? [
+                { qs: 'axsv=nero', label: 'AniWatchtv' },
+                { qs: 'noax=1', label: 'AniWatchtv · HLS' },
+                { qs: 'axsv=loli', label: 'AniWatchtv · Mirror' },
+              ]
+            : serverLower.includes('kaido')
+              ? [
+                  { qs: 'axsv=zuna', label: 'Kaido' },
+                  { qs: 'axsv=loli', label: 'Kaido · HLS' },
+                  { qs: 'noax=1', label: 'Kaido · Mirror' },
+                ]
+              : serverLower.includes('hianime') || serverLower.includes('zoro')
+                ? [
+                    { qs: 'noax=1', label: 'HiAnime · HLS' },
+                    { qs: 'axsv=yuki', label: 'HiAnime' },
+                    { qs: 'axsv=loli', label: 'HiAnime · Mirror' },
+                  ]
+                : [
+                    { qs: 'noax=1', label: 'Vidstreaming' },
+                    { qs: 'axsv=loli', label: 'Vidstreaming · HLS' },
+                    { qs: 'axsv=yuki', label: 'Vidstreaming · Mirror' },
+                  ];
 
-  let lastMessage = 'Stream not available for this episode.';
+  let lastMessage =
+    catToUse === 'dub'
+      ? 'English (DUB) stream is not available for this episode.'
+      : 'Japanese (SUB) stream is not available for this episode.';
   let lastStatus = 404;
 
   for (const candidate of candidateQueries) {
@@ -1396,15 +1450,11 @@ async function resolveFromMegavid(
         payload: {
           sources,
           subtitles,
-          servers: [
-            { name: 'animeworld-india' },
-            { name: 'vidstreaming' },
-            { name: 'megacloud' },
-            { name: 'streamsb' },
-          ],
+          servers: ALL_STREAM_SERVERS,
           headers: { Referer: 'https://megavid.buzz/' },
           hasHindiAudio: false,
           audioLanguages: [catToUse === 'dub' ? 'English' : 'Japanese'],
+          requestedLanguage: catToUse,
           intro:
             typeof introChapter?.start === 'number' && typeof introChapter?.end === 'number'
               ? { start: introChapter.start, end: introChapter.end }
@@ -1416,7 +1466,9 @@ async function resolveFromMegavid(
           providerMeta: {
             source: 'megavid',
             activeServer: requestedServer || 'vidstreaming',
-            category,
+            resolvedCandidate: candidate.qs,
+            resolvedHost: sourceHost,
+            category: catToUse,
           },
         },
       };
@@ -1430,6 +1482,235 @@ async function resolveFromMegavid(
     statusCode: lastStatus,
     message: lastMessage,
   };
+}
+
+async function checkMegavidAudioAvailability(
+  malId: number,
+  episodeNumber: number,
+  category: 'sub' | 'dub'
+): Promise<{ available: boolean; verified: boolean; reason?: string }> {
+  const refererUrl = `https://megavid.buzz/mal/${malId}/${episodeNumber}/${category}`;
+  for (const qs of ['noax=1', 'axsv=loli']) {
+    try {
+      const res = await fetchWithTimeout(
+        `${refererUrl}/source?${qs}`,
+        {
+          headers: {
+            Referer: refererUrl,
+            'User-Agent': BROWSER_UA,
+            Accept: 'application/json',
+          },
+        },
+        3500
+      );
+      if (!res.ok) continue;
+      const data = (await res.json()) as { status?: string; source?: string; message?: string };
+      if (data.status === 'ok' && isValidHttpUrl(data.source)) {
+        const cleanUrl = normalizeUrl(data.source);
+        const reachable = await verifyStreamPlaylistReachable(cleanUrl, 'https://megavid.buzz/', 2500);
+        if (reachable) {
+          return { available: true, verified: true };
+        }
+      } else if (data.message) {
+        return {
+          available: false,
+          verified: true,
+          reason:
+            category === 'dub'
+              ? 'English (DUB) stream is not available for this episode.'
+              : data.message,
+        };
+      }
+    } catch {
+      // try next candidate
+    }
+  }
+  return {
+    available: false,
+    verified: true,
+    reason:
+      category === 'dub'
+        ? 'English (DUB) stream was not found for this episode.'
+        : 'Japanese (SUB) stream was not found for this episode.',
+  };
+}
+
+async function probeAnimeWorldHindiAvailability(options: {
+  title?: string;
+  romajiTitle?: string;
+  format?: string;
+  episodeNumber: number;
+}): Promise<{
+  available: boolean;
+  verified: boolean;
+  blockedByCloudflare?: boolean;
+  languages?: string[];
+  reason?: string;
+}> {
+  const queryTitle = (options.title || options.romajiTitle || '').trim();
+  if (!queryTitle) {
+    return { available: false, verified: false, reason: 'Missing anime title for Hindi lookup.' };
+  }
+
+  const cleanedQuery = queryTitle
+    .replace(/:\s*(the\s+)?final\s+season.*$/i, '')
+    .replace(/\s*[-–:]\s*season\s*\d+.*$/i, '')
+    .replace(/\s+\d+(?:st|nd|rd|th)\s+season.*$/i, '')
+    .trim();
+
+  const searchRes = await fetchAnimeWorldHtml(
+    `${ANIMEWORLD_UPSTREAM}/?s=${encodeURIComponent(cleanedQuery || queryTitle)}`
+  );
+  if (!searchRes.ok || !searchRes.html) {
+    if (searchRes.status === 403 || searchRes.blockedByUpstream) {
+      return {
+        available: false,
+        verified: false,
+        blockedByCloudflare: true,
+        reason: `AnimeWorld India (${ANIMEWORLD_UPSTREAM}) returned HTTP 403 Cloudflare protection on server IP.`,
+      };
+    }
+    return {
+      available: false,
+      verified: false,
+      reason: `AnimeWorld India search returned HTTP ${searchRes.status || 502}.`,
+    };
+  }
+
+  const $ = cheerio.load(searchRes.html);
+  const cards = parseAnimeWorldCards($);
+  if (cards.length === 0) {
+    return {
+      available: false,
+      verified: true,
+      reason: `"${queryTitle}" was not found on AnimeWorld India.`,
+    };
+  }
+
+  const isMovie = (options.format || '').toUpperCase() === 'MOVIE';
+  const targetNorm = (cleanedQuery || queryTitle).toLowerCase().replace(/[^a-z0-9\s]/g, ' ').trim();
+  let best = cards[0];
+  let bestScore = -1;
+  for (const c of cards) {
+    const titleNorm = String(c.title || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').trim();
+    let score = 0;
+    if (titleNorm === targetNorm) score += 100;
+    else if (titleNorm.includes(targetNorm) || targetNorm.includes(titleNorm)) score += 60;
+    if (isMovie && c.movieId) score += 20;
+    if (!isMovie && c.seriesId) score += 20;
+    if (score > bestScore) {
+      bestScore = score;
+      best = c;
+    }
+  }
+
+  let targetEpisodeUrl = '';
+  if (best.movieId && (isMovie || !best.seriesId)) {
+    targetEpisodeUrl = `${ANIMEWORLD_UPSTREAM}/movies/${encodeURIComponent(String(best.movieId))}/`;
+  } else if (best.seriesId) {
+    const seriesRes = await fetchAnimeWorldHtml(
+      `${ANIMEWORLD_UPSTREAM}/series/${encodeURIComponent(String(best.seriesId))}/`
+    );
+    if (!seriesRes.ok || !seriesRes.html) {
+      return {
+        available: false,
+        verified: false,
+        blockedByCloudflare: seriesRes.status === 403 || seriesRes.blockedByUpstream,
+        reason: `AnimeWorld India series lookup returned HTTP ${seriesRes.status}.`,
+      };
+    }
+    const $s = cheerio.load(seriesRes.html);
+    let epSlug = '';
+    $s('article.tr-episode-card').each((_, el) => {
+      if (epSlug) return;
+      const card = $s(el);
+      const href = card.find('a.tr-episode-link').first().attr('href') || '';
+      const numText = card.find('.tr-episode-number').first().text().trim();
+      const numMatch = numText.match(/(\d+)/);
+      const num = numMatch ? Number(numMatch[1]) : null;
+      if (num === options.episodeNumber) {
+        epSlug = extractSlugFromHref(href, 'episode') || '';
+      }
+    });
+    if (!epSlug) {
+      const firstHref = $s('article.tr-episode-card a.tr-episode-link').first().attr('href') || '';
+      if (options.episodeNumber === 1) {
+        epSlug = extractSlugFromHref(firstHref, 'episode') || '';
+      }
+    }
+    if (!epSlug) {
+      return {
+        available: false,
+        verified: true,
+        reason: `Episode ${options.episodeNumber} was not found on AnimeWorld India.`,
+      };
+    }
+    targetEpisodeUrl = `${ANIMEWORLD_UPSTREAM}/episode/${encodeURIComponent(epSlug)}/`;
+  }
+
+  if (!targetEpisodeUrl) {
+    return { available: false, verified: true, reason: 'No matching AnimeWorld India entry found.' };
+  }
+
+  const epRes = await fetchAnimeWorldHtml(targetEpisodeUrl);
+  if (!epRes.ok || !epRes.html) {
+    return {
+      available: false,
+      verified: false,
+      blockedByCloudflare: epRes.status === 403 || epRes.blockedByUpstream,
+      reason: `AnimeWorld India episode returned HTTP ${epRes.status}.`,
+    };
+  }
+
+  const $e = cheerio.load(epRes.html);
+  const iframeSrcs: string[] = [];
+  $e('#aa-options iframe, .video-player iframe, .video-embed iframe').each((_, el) => {
+    const s = ($e(el).attr('src') || $e(el).attr('data-src') || '').trim();
+    if (s && s.startsWith('http') && !iframeSrcs.includes(s)) iframeSrcs.push(s);
+  });
+
+  const detectedLangs: string[] = [];
+  let hasHindi = false;
+
+  for (const src of iframeSrcs) {
+    if (src.includes('multi-lang-plyr.php') && src.includes('data=')) {
+      try {
+        const rawData = new URL(src).searchParams.get('data');
+        if (rawData) {
+          const entries = JSON.parse(Buffer.from(rawData, 'base64').toString('utf8')) as Array<{
+            language?: string;
+            link?: string;
+          }>;
+          for (const entry of entries) {
+            const lang = (entry.language || '').trim();
+            if (!lang || !entry.link) continue;
+            if (!detectedLangs.includes(lang)) detectedLangs.push(lang);
+            if (lang.toLowerCase() === 'hindi' || lang.toLowerCase() === 'hin') hasHindi = true;
+          }
+        }
+      } catch {
+        // ignore malformed payload
+      }
+    } else if (src.includes('ravok.buzz')) {
+      const ravokLangs = await verifyRavokAudioLanguages(src);
+      for (const l of ravokLangs) {
+        if (!detectedLangs.includes(l)) detectedLangs.push(l);
+        if (l.toLowerCase() === 'hindi') hasHindi = true;
+      }
+    }
+  }
+
+  return hasHindi
+    ? { available: true, verified: true, languages: detectedLangs }
+    : {
+        available: false,
+        verified: true,
+        languages: detectedLangs,
+        reason:
+          detectedLangs.length > 0
+            ? `No Hindi audio stream found on AnimeWorld India (only ${detectedLangs.join(', ')} available).`
+            : 'No verified Hindi audio stream found for this episode.',
+      };
 }
 
 export function createExpressApp() {
@@ -1617,74 +1898,79 @@ export function createExpressApp() {
       ),
     ]);
 
-    const [vidstreamingResolved, megacloudResolved, streamsbResolved] = await Promise.all([
+    const [
+      vidstreamingSub,
+      megacloudSub,
+      streamsbSub,
+      animepaheSub,
+      aniwatchtvSub,
+      hianimeSub,
+      kaidoSub,
+      vidstreamingDub,
+    ] = await Promise.all([
       resolveFromMegavid(malId, ep, 'sub', 'vidstreaming'),
       resolveFromMegavid(malId, ep, 'sub', 'megacloud'),
       resolveFromMegavid(malId, ep, 'sub', 'streamsb'),
+      resolveFromMegavid(malId, ep, 'sub', 'animepahe'),
+      resolveFromMegavid(malId, ep, 'sub', 'aniwatchtv'),
+      resolveFromMegavid(malId, ep, 'sub', 'hianime'),
+      resolveFromMegavid(malId, ep, 'sub', 'kaido'),
+      resolveFromMegavid(malId, ep, 'dub', 'vidstreaming'),
     ]);
 
-    const inspectMegavid = async (
-      probe: typeof megavidPrimaryRes,
+    const summarizeMegavidDiag = (
+      probe: typeof megavidPrimaryRes | null,
       resolved: Awaited<ReturnType<typeof resolveFromMegavid>>
     ) => {
-      const primaryPayload = resolved.payload as
-        | { sources?: Array<{ url: string; quality: string; type: string }> }
-        | undefined;
-      const firstSource = primaryPayload?.sources?.[0];
-      let resolvedHost = '';
-      try {
-        if (firstSource?.url) resolvedHost = new URL(firstSource.url).hostname;
-      } catch {
-        // ignore
-      }
-
-      let primaryCandidateHost = '';
-      let primaryCandidateReachable = false;
-      if (probe.response && probe.ok) {
-        try {
-          const json = (await probe.response.json()) as { source?: string };
-          const candidateUrl = json.source ? normalizeUrl(json.source) : '';
-          if (candidateUrl) {
-            primaryCandidateHost = new URL(candidateUrl).hostname;
-            primaryCandidateReachable =
-              candidateUrl === firstSource?.url
-                ? Boolean(resolved.ok)
-                : await verifyStreamPlaylistReachable(candidateUrl, 'https://megavid.buzz/', 2000);
+      const payload = resolved.payload as
+        | {
+            sources?: Array<{ url: string; quality: string; type: string }>;
+            providerMeta?: { resolvedCandidate?: string; resolvedHost?: string };
           }
-        } catch {
-          // ignore probe parse error
-        }
-      }
-
+        | undefined;
+      const firstSource = payload?.sources?.[0];
+      const resolvedHost = payload?.providerMeta?.resolvedHost || '';
+      const resolvedCandidate = payload?.providerMeta?.resolvedCandidate || '';
       return {
-        status: resolved.ok ? 200 : resolved.statusCode || probe.status || 502,
+        status: resolved.ok ? 200 : resolved.statusCode || probe?.status || 502,
         ok: Boolean(resolved.ok && firstSource?.url),
         working: Boolean(resolved.ok && firstSource?.url),
-        latencyMs: probe.latencyMs,
-        primaryCandidateHost: primaryCandidateHost || undefined,
-        primaryCandidateReachable,
+        latencyMs: probe?.latencyMs,
+        resolvedCandidate: resolvedCandidate || undefined,
         resolvedHost: resolvedHost || undefined,
         verifiedStreamType: firstSource?.type || undefined,
-        verifiedQualities: primaryPayload?.sources?.map((s) => s.quality) || [],
-        error: resolved.ok ? undefined : resolved.message || probe.error || `HTTP ${probe.status}`,
-        note:
-          resolved.ok && primaryCandidateHost && !primaryCandidateReachable
-            ? `Primary CDN (${primaryCandidateHost}) unreachable; automatically fell back to verified HLS (${resolvedHost}).`
-            : undefined,
+        verifiedQualities: payload?.sources?.map((s) => s.quality) || [],
+        error: resolved.ok ? undefined : resolved.message || probe?.error || `HTTP ${probe?.status}`,
       };
     };
 
-    const [vidstreamingDiag, streamsbDiag, megacloudDiag] = await Promise.all([
-      inspectMegavid(megavidPrimaryRes, vidstreamingResolved),
-      inspectMegavid(megavidSoraRes, streamsbResolved),
-      inspectMegavid(megavidNeroRes, megacloudResolved),
-    ]);
+    const [
+      vidstreamingDiag,
+      streamsbDiag,
+      megacloudDiag,
+      animepaheDiag,
+      aniwatchtvDiag,
+      hianimeDiag,
+      kaidoDiag,
+      englishDubDiag,
+    ] = [
+      summarizeMegavidDiag(megavidPrimaryRes, vidstreamingSub),
+      summarizeMegavidDiag(megavidSoraRes, streamsbSub),
+      summarizeMegavidDiag(megavidNeroRes, megacloudSub),
+      summarizeMegavidDiag(megavidSoraRes, animepaheSub),
+      summarizeMegavidDiag(megavidNeroRes, aniwatchtvSub),
+      summarizeMegavidDiag(megavidPrimaryRes, hianimeSub),
+      summarizeMegavidDiag(megavidPrimaryRes, kaidoSub),
+      summarizeMegavidDiag(null, vidstreamingDub),
+    ];
 
     const consumetVercelErr = consumetRes.response?.headers.get('x-vercel-error') || undefined;
     const awCfMitigated = animeWorldRes.response?.headers.get('cf-mitigated') || undefined;
     let awResultCount = 0;
     let awPlayableVerified = false;
     let awSampleStreamType: string | undefined;
+    let awSampleLanguages: string[] = [];
+    let awHasHindiAudio = false;
     let awSampleError: string | undefined;
 
     if (animeWorldRes.response && animeWorldRes.ok) {
@@ -1709,14 +1995,40 @@ export function createExpressApp() {
               );
               if (epHtmlRes.ok && epHtmlRes.html) {
                 const $e = cheerio.load(epHtmlRes.html);
-                const iframeSrc = (
-                  $e('#aa-options iframe, .video-player iframe, .video-embed iframe')
-                    .first()
-                    .attr('src') || ''
-                ).trim();
-                if (isValidHttpUrl(iframeSrc)) {
+                const iframes: string[] = [];
+                $e('#aa-options iframe, .video-player iframe, .video-embed iframe').each((_, el) => {
+                  const s = ($e(el).attr('src') || $e(el).attr('data-src') || '').trim();
+                  if (isValidHttpUrl(s) && !iframes.includes(s)) iframes.push(s);
+                });
+                const iframeSrc = iframes[0] || '';
+                if (iframeSrc) {
                   awPlayableVerified = true;
                   awSampleStreamType = classifyAnimeWorldStreamType(iframeSrc);
+                  for (const src of iframes) {
+                    if (src.includes('ravok.buzz')) {
+                      const rl = await verifyRavokAudioLanguages(src);
+                      for (const l of rl) {
+                        if (!awSampleLanguages.includes(l)) awSampleLanguages.push(l);
+                        if (l.toLowerCase() === 'hindi') awHasHindiAudio = true;
+                      }
+                    } else if (src.includes('multi-lang-plyr.php') && src.includes('data=')) {
+                      try {
+                        const rawData = new URL(src).searchParams.get('data');
+                        if (rawData) {
+                          const entries = JSON.parse(
+                            Buffer.from(rawData, 'base64').toString('utf8')
+                          ) as Array<{ language?: string }>;
+                          for (const e of entries) {
+                            const l = (e.language || '').trim();
+                            if (l && !awSampleLanguages.includes(l)) awSampleLanguages.push(l);
+                            if (l.toLowerCase() === 'hindi') awHasHindiAudio = true;
+                          }
+                        }
+                      } catch {
+                        // ignore
+                      }
+                    }
+                  }
                 } else {
                   awSampleError = 'Episode page had no valid stream/embed URL.';
                 }
@@ -1747,6 +2059,10 @@ export function createExpressApp() {
       vidstreamingWorking: vidstreamingDiag.working,
       megacloudWorking: megacloudDiag.working,
       streamsbWorking: streamsbDiag.working,
+      animepaheWorking: animepaheDiag.working,
+      aniwatchtvWorking: aniwatchtvDiag.working,
+      hianimeWorking: hianimeDiag.working,
+      kaidoWorking: kaidoDiag.working,
       animeWorldWorking: awWorking,
       animeWorldStatus: animeWorldRes.status,
     });
@@ -1764,12 +2080,9 @@ export function createExpressApp() {
           latencyMs: consumetRes.latencyMs,
           upstreamHeaderError: consumetVercelErr,
           note: !consumetRes.ok
-            ? 'Consumet primary host is unavailable; KuroStream automatically falls back to Megavid + AniZip + AniSkip.'
+            ? 'Consumet primary host is unavailable; KuroStream resolves streams via verified Megavid + AniZip + AniSkip.'
             : undefined,
         },
-        vidstreaming: vidstreamingDiag,
-        megacloud: megacloudDiag,
-        streamsb: streamsbDiag,
         animeWorldIndia: {
           upstream: ANIMEWORLD_UPSTREAM,
           status: animeWorldRes.status,
@@ -1779,12 +2092,26 @@ export function createExpressApp() {
           parsedCards: awResultCount,
           playableStreamVerified: awPlayableVerified,
           sampleStreamType: awSampleStreamType,
+          hasHindiAudio: awHasHindiAudio,
+          audioLanguages: awSampleLanguages,
           blockedByCloudflare: animeWorldRes.status === 403 || Boolean(awCfMitigated),
           error: awWorking ? undefined : awSampleError,
           note:
             animeWorldRes.status === 403
               ? 'Upstream Cloudflare WAF blocks server/datacenter IPs with HTTP 403. Other providers remain operational.'
               : undefined,
+        },
+        vidstreaming: vidstreamingDiag,
+        megacloud: megacloudDiag,
+        streamsb: streamsbDiag,
+        animepahe: animepaheDiag,
+        aniwatchtv: aniwatchtvDiag,
+        hianime: hianimeDiag,
+        kaido: kaidoDiag,
+        audioVerification: {
+          japaneseSub: vidstreamingDiag.working,
+          englishDub: englishDubDiag.working,
+          hindiDub: awWorking && awHasHindiAudio,
         },
         anilist: {
           status: anilistRes.status,
@@ -2072,6 +2399,7 @@ export function createExpressApp() {
       if (!ok || !html) {
         res.status(status || 502).json({
           success: false,
+          blockedByCloudflare: Boolean(blockedByUpstream || status === 403),
           error: formatAnimeWorldUpstreamError(status, blockedByUpstream, 'homepage'),
         });
         return;
@@ -2103,6 +2431,7 @@ export function createExpressApp() {
       if (!ok || !html) {
         res.status(status || 404).json({
           success: false,
+          blockedByCloudflare: Boolean(blockedByUpstream || status === 403),
           error: formatAnimeWorldUpstreamError(status, blockedByUpstream, 'series list'),
         });
         return;
@@ -2150,6 +2479,7 @@ export function createExpressApp() {
       if (!ok || !html) {
         res.status(status || 404).json({
           success: false,
+          blockedByCloudflare: Boolean(blockedByUpstream || status === 403),
           error: formatAnimeWorldUpstreamError(status, blockedByUpstream, 'search'),
         });
         return;
@@ -2188,6 +2518,7 @@ export function createExpressApp() {
       if (!ok || !html) {
         res.status(status || 404).json({
           success: false,
+          blockedByCloudflare: Boolean(blockedByUpstream || status === 403),
           error: formatAnimeWorldUpstreamError(status, blockedByUpstream, `series "${seriesID}"`),
         });
         return;
@@ -2313,6 +2644,7 @@ export function createExpressApp() {
         if (!ok || !html) {
           res.status(status || 404).json({
             success: false,
+            blockedByCloudflare: Boolean(blockedByUpstream || status === 403),
             error: formatAnimeWorldUpstreamError(status, blockedByUpstream, 'episodes endpoint'),
           });
           return;
@@ -2341,6 +2673,7 @@ export function createExpressApp() {
       if (!seriesPage.ok || !seriesPage.html) {
         res.status(seriesPage.status || 404).json({
           success: false,
+          blockedByCloudflare: Boolean(seriesPage.blockedByUpstream || seriesPage.status === 403),
           error: formatAnimeWorldUpstreamError(
             seriesPage.status,
             seriesPage.blockedByUpstream,
@@ -2390,6 +2723,7 @@ export function createExpressApp() {
   app.get('/api/anime-world-india/v1/stream.php', async (req: Request, res: Response) => {
     const episodeId = typeof req.query.episodeId === 'string' ? req.query.episodeId.trim() : '';
     const movieId = typeof req.query.movieId === 'string' ? req.query.movieId.trim() : '';
+    const requestedLang = typeof req.query.lang === 'string' ? req.query.lang.trim().toLowerCase() : 'hindi';
 
     if (!episodeId && !movieId) {
       res.status(400).json({ success: false, error: 'Missing episodeId or movieId' });
@@ -2406,6 +2740,7 @@ export function createExpressApp() {
       if (!ok || !html) {
         res.status(status === 404 ? 404 : status || 502).json({
           success: false,
+          blockedByCloudflare: Boolean(blockedByUpstream || status === 403),
           error: formatAnimeWorldUpstreamError(status, blockedByUpstream, 'stream endpoint'),
         });
         return;
@@ -2431,6 +2766,8 @@ export function createExpressApp() {
       }> = [];
       const audioLanguages: string[] = [];
       let hindiStreamLink: string | null = null;
+      let englishStreamLink: string | null = null;
+      let japaneseStreamLink: string | null = null;
       let hasHindiAudio = false;
 
       // 1. Parse multi-lang-plyr.php?data=<base64 JSON> (explicit per-language streams!)
@@ -2453,6 +2790,10 @@ export function createExpressApp() {
                 if (lowerLang === 'hindi' || lowerLang === 'hin') {
                   hasHindiAudio = true;
                   if (!hindiStreamLink) hindiStreamLink = link;
+                } else if (lowerLang === 'english' || lowerLang === 'eng') {
+                  if (!englishStreamLink) englishStreamLink = link;
+                } else if (lowerLang === 'japanese' || lowerLang === 'jpn') {
+                  if (!japaneseStreamLink) japaneseStreamLink = link;
                 }
                 streams.push({
                   language: lang,
@@ -2487,13 +2828,17 @@ export function createExpressApp() {
             url: src,
             type: 'embed',
             label: ravokHasHindi
-              ? 'AnimeWorld India · Multi-Audio (Hindi Default)'
-              : 'AnimeWorld India · PlayX Mirror',
+              ? 'AnimeWorld India · Multi-Audio (Hindi Verified)'
+              : ravokLangs.length > 0
+                ? `AnimeWorld India · Multi-Audio (${ravokLangs.join(', ')})`
+                : 'AnimeWorld India · PlayX Mirror (Unverified Audio)',
           });
         } else if (src.includes('megaplay.buzz')) {
           const isDub = src.toLowerCase().includes('/dub');
           const lang = isDub ? 'English' : 'Japanese';
           if (!audioLanguages.includes(lang)) audioLanguages.push(lang);
+          if (isDub && !englishStreamLink) englishStreamLink = src;
+          if (!isDub && !japaneseStreamLink) japaneseStreamLink = src;
           streams.push({
             language: lang,
             url: src,
@@ -2510,23 +2855,38 @@ export function createExpressApp() {
         }
       }
 
-      // Keep only verified HTTP(S) URLs and order Hindi stream FIRST
+      // Keep only verified HTTP(S) URLs and order according to requested language
       const validStreams = streams.filter((s) => isValidHttpUrl(s.url));
-      validStreams.sort((a, b) => {
-        const aHindi = a.language.toLowerCase() === 'hindi' ? 0 : 1;
-        const bHindi = b.language.toLowerCase() === 'hindi' ? 0 : 1;
-        return aHindi - bHindi;
-      });
+      const priorityFor = (langStr: string) => {
+        const lower = langStr.toLowerCase();
+        if (requestedLang === 'dub' || requestedLang === 'english') {
+          return lower === 'english' ? 0 : lower === 'multi-audio' ? 1 : 2;
+        }
+        if (requestedLang === 'sub' || requestedLang === 'japanese') {
+          return lower === 'japanese' ? 0 : lower === 'multi-audio' ? 1 : 2;
+        }
+        return lower === 'hindi' ? 0 : 1;
+      };
+      validStreams.sort((a, b) => priorityFor(a.language) - priorityFor(b.language));
 
-      const primaryCandidate =
-        hindiStreamLink || (hasHindiAudio && ravokUrl) || validStreams[0]?.url || downloadLink || null;
+      let primaryCandidate: string | null = null;
+      if (requestedLang === 'dub' || requestedLang === 'english') {
+        primaryCandidate = englishStreamLink || validStreams[0]?.url || downloadLink || null;
+      } else if (requestedLang === 'sub' || requestedLang === 'japanese') {
+        primaryCandidate = japaneseStreamLink || validStreams[0]?.url || downloadLink || null;
+      } else {
+        primaryCandidate =
+          hindiStreamLink || (hasHindiAudio && ravokUrl) || validStreams[0]?.url || downloadLink || null;
+      }
       const primaryLink = isValidHttpUrl(primaryCandidate) ? primaryCandidate : validStreams[0]?.url || null;
 
       logProviderDiagnostic('animeworld-india', 'stream', {
         id: episodeId || movieId,
         type,
+        requestedLang,
         streamCount: validStreams.length,
         hasHindiAudio,
+        audioLanguages,
         hasPrimaryLink: Boolean(primaryLink),
       });
 
@@ -2697,6 +3057,67 @@ export function createExpressApp() {
     }
   });
 
+  app.get('/api/anime/audio-availability', async (req: Request, res: Response) => {
+    const anilistId = Number(req.query.anilistId || 0);
+    let malId = Number(req.query.malId || 0);
+    const ep = Math.max(1, Number(req.query.ep || 1));
+    const title = typeof req.query.title === 'string' ? req.query.title.trim() : '';
+    const romajiTitle = typeof req.query.romajiTitle === 'string' ? req.query.romajiTitle.trim() : '';
+    const format = typeof req.query.format === 'string' ? req.query.format.trim() : '';
+
+    const cacheKey = `${anilistId || malId}:${ep}:${(title || romajiTitle).toLowerCase()}`;
+    const cached = audioAvailabilityCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      res.json(cached.data);
+      return;
+    }
+
+    if (!malId && anilistId > 0) {
+      const resolved = await resolveMalIdFromAnilist(anilistId);
+      if (resolved) {
+        malId = resolved;
+      } else {
+        const aniZip = await fetchAniZipMetadata(anilistId);
+        const zipMal = (aniZip.mappings as { malId?: number | null } | undefined)?.malId;
+        if (typeof zipMal === 'number' && zipMal > 0) malId = zipMal;
+      }
+    }
+
+    const [subStatus, dubStatus, hindiStatus] = await Promise.all([
+      malId > 0
+        ? checkMegavidAudioAvailability(malId, ep, 'sub')
+        : Promise.resolve({
+            available: false,
+            verified: false,
+            reason: 'Missing MyAnimeList ID for SUB lookup.',
+          }),
+      malId > 0
+        ? checkMegavidAudioAvailability(malId, ep, 'dub')
+        : Promise.resolve({
+            available: false,
+            verified: false,
+            reason: 'Missing MyAnimeList ID for English DUB lookup.',
+          }),
+      probeAnimeWorldHindiAvailability({ title, romajiTitle, format, episodeNumber: ep }),
+    ]);
+
+    const payload = {
+      anilistId: anilistId || undefined,
+      malId: malId || null,
+      episodeNumber: ep,
+      sub: subStatus,
+      dub: dubStatus,
+      hindi: hindiStatus,
+      checkedAt: new Date().toISOString(),
+    };
+
+    audioAvailabilityCache.set(cacheKey, {
+      expiresAt: Date.now() + 5 * 60 * 1000,
+      data: payload,
+    });
+    res.json(payload);
+  });
+
   app.get('/api/anime/servers/:episodeId', async (req: Request, res: Response) => {
     const episodeId = req.params.episodeId;
     const base =
@@ -2733,12 +3154,7 @@ export function createExpressApp() {
       }
     }
 
-    res.json([
-      { name: 'animeworld-india' },
-      { name: 'vidstreaming' },
-      { name: 'megacloud' },
-      { name: 'streamsb' },
-    ]);
+    res.json(ALL_STREAM_SERVERS);
   });
 
   app.get('/api/anime/watch/:episodeId', async (req: Request, res: Response) => {
@@ -2765,6 +3181,13 @@ export function createExpressApp() {
       res.status(400).json({
         message:
           'AnimeWorld-India uses /api/anime-world-india/v1/ (search.php, seasons.php, episodes.php, stream.php) with native AnimeWorld IDs rather than AniList IDs.',
+      });
+      return;
+    }
+
+    if (category === 'hindi') {
+      res.status(404).json({
+        message: `Hindi (DUB) audio track is not available on ${server || 'this server'}. Only Japanese (SUB) and English (DUB) are served here — switch to AnimeWorld-India for verified Hindi audio, or choose Japanese (SUB) / English (DUB).`,
       });
       return;
     }

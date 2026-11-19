@@ -186,11 +186,18 @@ export async function fetchAnimeWorldEpisodes(
 export async function fetchAnimeWorldStream(params: {
   episodeId?: string;
   movieId?: string;
+  lang?: 'hindi' | 'sub' | 'dub';
 }): Promise<{ status: number; data: AnimeWorldStreamResponse | null; rawText?: string; endpointUrl: string }> {
-  const qs = params.episodeId
-    ? `episodeId=${encodeURIComponent(params.episodeId)}`
-    : `movieId=${encodeURIComponent(params.movieId || '')}`;
-  const endpointUrl = `${AW_BASE}/stream.php?${qs}`;
+  const qp = new URLSearchParams();
+  if (params.episodeId) {
+    qp.set('episodeId', params.episodeId);
+  } else {
+    qp.set('movieId', params.movieId || '');
+  }
+  if (params.lang) {
+    qp.set('lang', params.lang);
+  }
+  const endpointUrl = `${AW_BASE}/stream.php?${qp.toString()}`;
   const { resolvedUrl, res } = await fetchAwWithTimeout(endpointUrl);
   const parsed = await parseSafeJsonResponse<AnimeWorldStreamResponse>(res);
   if (!parsed.ok) {
@@ -425,8 +432,11 @@ export async function resolveAnimeWorldStreamForAnime(options: {
   seasonYear?: number | null;
   episodeNumber: number;
   preferHindi?: boolean;
+  preferLang?: 'hindi' | 'sub' | 'dub';
 }): Promise<{ data?: ParsedStreamResult; error?: StreamFetchError }> {
-  const { title, romajiTitle, format, seasonYear, episodeNumber, preferHindi = true } = options;
+  const { title, romajiTitle, format, seasonYear, episodeNumber, preferHindi = true, preferLang } = options;
+  const effectiveLang: 'hindi' | 'sub' | 'dub' = preferLang || (preferHindi ? 'hindi' : 'sub');
+  const wantHindi = effectiveLang === 'hindi';
   const queries = buildSearchQueries(title, romajiTitle);
   const targetTitles = [title, romajiTitle].filter((t): t is string => Boolean(t && t.trim()));
   const isMovie = format === 'MOVIE';
@@ -494,7 +504,7 @@ export async function resolveAnimeWorldStreamForAnime(options: {
   let streamRawText = '';
 
   if (bestItem.movieId && (isMovie || !bestItem.seriesId)) {
-    const res = await fetchAnimeWorldStream({ movieId: bestItem.movieId });
+    const res = await fetchAnimeWorldStream({ movieId: bestItem.movieId, lang: effectiveLang });
     streamStatus = res.status;
     streamEndpoint = res.endpointUrl;
     streamPayload = res.data;
@@ -517,7 +527,7 @@ export async function resolveAnimeWorldStreamForAnime(options: {
       seasonsRes.data.seasons,
       targetSeasonNum,
       episodeNumber,
-      preferHindi
+      wantHindi
     );
 
     if (!matchedSeason) {
@@ -553,7 +563,10 @@ export async function resolveAnimeWorldStreamForAnime(options: {
       };
     }
 
-    const res = await fetchAnimeWorldStream({ episodeId: matchedEpisode.episodeId });
+    const res = await fetchAnimeWorldStream({
+      episodeId: matchedEpisode.episodeId,
+      lang: effectiveLang,
+    });
     streamStatus = res.status;
     streamEndpoint = res.endpointUrl;
     streamPayload = res.data;
@@ -599,9 +612,9 @@ export async function resolveAnimeWorldStreamForAnime(options: {
           ]
         : [];
 
-  const mappedSources = candidateSources.filter((src) => isPlayableStreamUrl(src.url));
+  const playableSources = candidateSources.filter((src) => isPlayableStreamUrl(src.url));
 
-  if (mappedSources.length === 0) {
+  if (playableSources.length === 0) {
     return {
       error: {
         statusCode: 404,
@@ -611,19 +624,89 @@ export async function resolveAnimeWorldStreamForAnime(options: {
     };
   }
 
+  const detectedLanguages = streamPayload.audioLanguages || parsed.audioLanguages || [];
+  const detectedLower = detectedLanguages.map((l) => l.toLowerCase());
+  const hasHindiAudio =
+    Boolean(streamPayload.hasHindiAudio) ||
+    detectedLower.some((l) => l.includes('hindi') || l === 'hin');
+  const hasEnglishAudio =
+    detectedLower.some((l) => l.includes('english') || l === 'eng' || l === 'en') ||
+    playableSources.some((s) => (s.language || '').toLowerCase().includes('english'));
+  const hasJapaneseAudio =
+    detectedLower.some((l) => l.includes('japanese') || l === 'jpn' || l === 'ja') ||
+    playableSources.some((s) => (s.language || '').toLowerCase().includes('japanese'));
+
+  // Enforce strict language fidelity: never play English as Hindi or play an unrelated language silently
+  if (effectiveLang === 'hindi' && !hasHindiAudio) {
+    return {
+      error: {
+        statusCode: 404,
+        endpointUrl: streamEndpoint,
+        message:
+          detectedLanguages.length > 0
+            ? `Hindi (DUB) audio track is not available on AnimeWorld India for Episode ${episodeNumber} (available tracks: ${detectedLanguages.join(', ')}). Select Japanese (SUB) or English (DUB) instead.`
+            : `Hindi (DUB) audio track was not found for Episode ${episodeNumber} on AnimeWorld India.`,
+      },
+    };
+  }
+
+  if (effectiveLang === 'dub' && detectedLanguages.length > 0 && !hasEnglishAudio) {
+    return {
+      error: {
+        statusCode: 404,
+        endpointUrl: streamEndpoint,
+        message: `English (DUB) audio track is not available on AnimeWorld India for Episode ${episodeNumber} (available tracks: ${detectedLanguages.join(', ')}). Switch to Vidstreaming or Megacloud for English DUB.`,
+      },
+    };
+  }
+
+  if (effectiveLang === 'sub' && detectedLanguages.length > 0 && !hasJapaneseAudio) {
+    return {
+      error: {
+        statusCode: 404,
+        endpointUrl: streamEndpoint,
+        message: `Japanese (SUB) audio track is not available on AnimeWorld India for Episode ${episodeNumber} (available tracks: ${detectedLanguages.join(', ')}). Switch to Vidstreaming or Megacloud for Japanese SUB.`,
+      },
+    };
+  }
+
+  const matchesRequestedLang = (src: StreamSource): boolean => {
+    const langLower = (src.language || '').toLowerCase();
+    const isMultiAudioContainer =
+      src.url.includes('ravok.buzz') || langLower.includes('multi');
+    if (effectiveLang === 'hindi') {
+      return langLower.includes('hindi') || langLower === 'hin' || (isMultiAudioContainer && hasHindiAudio);
+    }
+    if (effectiveLang === 'dub') {
+      return langLower.includes('english') || langLower === 'eng' || isMultiAudioContainer;
+    }
+    return langLower.includes('japanese') || langLower === 'jpn' || isMultiAudioContainer;
+  };
+
+  const languageFiltered = playableSources.filter(matchesRequestedLang);
+  const mappedSources =
+    languageFiltered.length > 0
+      ? languageFiltered
+      : playableSources;
+
   return {
     data: {
       ...parsed,
       sources: mappedSources,
       downloadUrl: streamPayload.stream?.file || parsed.downloadUrl,
-      hasHindiAudio: Boolean(streamPayload.hasHindiAudio),
-      audioLanguages: streamPayload.audioLanguages || parsed.audioLanguages || [],
+      hasHindiAudio,
+      audioLanguages: detectedLanguages,
+      requestedLanguage: effectiveLang,
       providerSource: streamPayload.source || streamEndpoint,
       servers: [
         { name: 'animeworld-india' },
         { name: 'vidstreaming' },
         { name: 'megacloud' },
         { name: 'streamsb' },
+        { name: 'animepahe' },
+        { name: 'aniwatchtv' },
+        { name: 'hianime' },
+        { name: 'kaido' },
       ],
     },
   };

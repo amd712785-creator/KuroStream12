@@ -39,6 +39,7 @@ interface VideoPlayerProps {
   autoNext: boolean;
   hasNextEpisode: boolean;
   audioMode?: 'sub' | 'dub' | 'hindi';
+  onSelectAudioMode?: (mode: 'sub' | 'dub' | 'hindi') => void;
   servers?: StreamServer[];
   selectedServer?: string;
   onSelectServer?: (serverName: string) => void;
@@ -90,6 +91,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   autoNext,
   hasNextEpisode,
   audioMode,
+  onSelectAudioMode,
   servers,
   selectedServer,
   onSelectServer,
@@ -414,6 +416,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     const el = containerRef.current as
       | (HTMLDivElement & { webkitRequestFullscreen?: () => Promise<void> | void })
       | null;
+    const video = videoRef.current as
+      | (HTMLVideoElement & { webkitEnterFullscreen?: () => void; webkitExitFullscreen?: () => void })
+      | null;
     if (!el) return;
     const doc = document as Document & {
       webkitFullscreenElement?: Element | null;
@@ -425,6 +430,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           await el.requestFullscreen();
         } else if (el.webkitRequestFullscreen) {
           await el.webkitRequestFullscreen();
+        } else if (video?.webkitEnterFullscreen) {
+          video.webkitEnterFullscreen();
         }
       } else {
         if (document.exitFullscreen) {
@@ -434,7 +441,13 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         }
       }
     } catch {
-      // ignore fullscreen errors
+      if (video?.webkitEnterFullscreen) {
+        try {
+          video.webkitEnterFullscreen();
+        } catch {
+          // ignore fullscreen errors
+        }
+      }
     }
   }, []);
 
@@ -603,6 +616,28 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                 <span>Provider URL</span>
               </button>
             </div>
+
+            {onSelectAudioMode && audioMode !== 'sub' && (
+              <div className="mt-3 flex flex-wrap items-center justify-center gap-2">
+                <span className="text-xs text-slate-400 mr-1">Switch Audio:</span>
+                <button
+                  type="button"
+                  onClick={() => onSelectAudioMode('sub')}
+                  className="kuro-btn-glass min-h-[34px] rounded-xl px-3 py-1 text-xs font-semibold"
+                >
+                  Japanese (SUB)
+                </button>
+                {audioMode !== 'dub' && (
+                  <button
+                    type="button"
+                    onClick={() => onSelectAudioMode('dub')}
+                    className="kuro-btn-glass min-h-[34px] rounded-xl px-3 py-1 text-xs font-semibold"
+                  >
+                    English (DUB)
+                  </button>
+                )}
+              </div>
+            )}
 
             {servers && servers.length > 0 && onSelectServer && (
               <div className="mt-3.5 flex flex-wrap items-center justify-center gap-2">
@@ -1035,7 +1070,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                   <CheckCircle2 className="h-3.5 w-3.5" />
                   <span>Hindi Audio Verified</span>
                 </span>
-              ) : (
+              ) : audioMode === 'hindi' ? (
                 <span className="inline-flex items-center gap-1.5 rounded-xl border border-amber-500/40 bg-amber-500/15 px-2.5 py-1 font-semibold text-amber-300">
                   <AlertTriangle className="h-3.5 w-3.5" />
                   <span>
@@ -1043,6 +1078,13 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                     {streamData?.audioLanguages?.length
                       ? ` (${streamData.audioLanguages.join(', ')} only)`
                       : ''}
+                  </span>
+                </span>
+              ) : (
+                <span className="inline-flex items-center gap-1.5 rounded-xl border border-violet-500/35 bg-violet-500/15 px-2.5 py-1 font-semibold text-violet-200">
+                  <CheckCircle2 className="h-3.5 w-3.5" />
+                  <span>
+                    {audioMode === 'dub' ? 'English (DUB) Stream' : 'Japanese (SUB) Stream'}
                   </span>
                 </span>
               )}
