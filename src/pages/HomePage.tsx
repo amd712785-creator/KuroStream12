@@ -48,7 +48,7 @@ export const HomePage: React.FC = () => {
         </div>
       ) : (
         <>
-          <HeroBanner items={sections?.trending || []} />
+          <HeroBanner items={sections?.trending || []} loading={loading} />
           <FeaturedAnimeSection
             items={sections?.featuredPriority || []}
             loading={loading}
@@ -119,54 +119,58 @@ export const HomePage: React.FC = () => {
         </section>
       )}
 
-      <AnimeSection
-        title="Trending Now"
-        subtitle="Most watched anime across the global community"
-        items={sections?.trending || []}
-        loading={loading}
-        viewAllTo="/anime?sort=TRENDING_DESC"
-        badgeResolver={(_, idx) => `Trending #${idx + 1}`}
-      />
+      {!error && (
+        <>
+          <AnimeSection
+            title="Trending Now"
+            subtitle="Most watched anime across the global community"
+            items={sections?.trending || []}
+            loading={loading}
+            viewAllTo="/anime?sort=TRENDING_DESC"
+            badgeResolver={(_, idx) => `Trending #${idx + 1}`}
+          />
 
-      <AnimeSection
-        title="Popular Anime"
-        subtitle="All-time fan favorites and acclaimed series"
-        items={sections?.popular || []}
-        loading={loading}
-        viewAllTo="/anime?sort=POPULARITY_DESC"
-      />
+          <AnimeSection
+            title="Popular Anime"
+            subtitle="All-time fan favorites and acclaimed series"
+            items={sections?.popular || []}
+            loading={loading}
+            viewAllTo="/anime?sort=POPULARITY_DESC"
+          />
 
-      <AnimeSection
-        title="New Episodes"
-        subtitle="Currently airing shows with new episodes this week"
-        items={sections?.latestEpisodes || []}
-        loading={loading}
-        viewAllTo="/anime?status=RELEASING&sort=UPDATED_AT_DESC"
-        badgeResolver={(anime) =>
-          anime.nextAiringEpisode?.episode
-            ? `New Episode · Ep ${Math.max(1, anime.nextAiringEpisode.episode - 1)}`
-            : 'New Episode'
-        }
-      />
+          <AnimeSection
+            title="New Episodes"
+            subtitle="Currently airing shows with new episodes this week"
+            items={sections?.latestEpisodes || []}
+            loading={loading}
+            viewAllTo="/anime?status=RELEASING&sort=UPDATED_AT_DESC"
+            badgeResolver={(anime) =>
+              anime.nextAiringEpisode?.episode
+                ? `New Episode · Ep ${Math.max(1, anime.nextAiringEpisode.episode - 1)}`
+                : 'New Episode'
+            }
+          />
 
-      <AnimeSection
-        title="Recently Updated"
-        subtitle="Freshly cataloged and updated anime releases"
-        items={sections?.recentlyUpdated || []}
-        loading={loading}
-        viewAllTo="/anime?sort=UPDATED_AT_DESC"
-      />
+          <AnimeSection
+            title="Recently Updated"
+            subtitle="Freshly cataloged and updated anime releases"
+            items={sections?.recentlyUpdated || []}
+            loading={loading}
+            viewAllTo="/anime?sort=UPDATED_AT_DESC"
+          />
 
-      <AnimeSection
-        title="Upcoming Anime"
-        subtitle="Anticipated premieres announced for upcoming seasons"
-        items={sections?.upcoming || []}
-        loading={loading}
-        viewAllTo="/anime?status=NOT_YET_RELEASED&sort=POPULARITY_DESC"
-        badgeResolver={(anime) =>
-          anime.seasonYear ? `${anime.season || 'TBA'} ${anime.seasonYear}` : 'Upcoming'
-        }
-      />
+          <AnimeSection
+            title="Upcoming Anime"
+            subtitle="Anticipated premieres announced for upcoming seasons"
+            items={sections?.upcoming || []}
+            loading={loading}
+            viewAllTo="/anime?status=NOT_YET_RELEASED&sort=POPULARITY_DESC"
+            badgeResolver={(anime) =>
+              anime.seasonYear ? `${anime.season || 'TBA'} ${anime.seasonYear}` : 'Upcoming'
+            }
+          />
+        </>
+      )}
     </div>
   );
 };

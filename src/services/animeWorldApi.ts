@@ -1,4 +1,4 @@
-import { resolveApiUrl } from '@/src/config/env';
+import { logApiDiagnostic, resolveApiUrl } from '@/src/config/env';
 import { parseWatchResponse } from '@/src/services/streamingApi';
 import {
   extractErrorDetails,
@@ -78,47 +78,74 @@ export interface AnimeWorldEpisodesResponse {
   error?: string;
 }
 
+async function fetchAwWithTimeout(endpointUrl: string, timeoutMs = 15000): Promise<{
+  resolvedUrl: string;
+  res: Response;
+}> {
+  const resolvedUrl = resolveApiUrl(endpointUrl);
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(resolvedUrl, {
+      headers: { Accept: 'application/json' },
+      signal: controller.signal,
+    });
+    return { resolvedUrl, res };
+  } catch (err) {
+    logApiDiagnostic('AnimeWorld', resolvedUrl, {
+      message: err instanceof Error ? err.message : 'Network failure',
+    });
+    throw err;
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
 export async function fetchAnimeWorldHome(): Promise<AnimeWorldHomeResponse> {
   const endpoint = `${AW_BASE}/home.php`;
-  const res = await fetch(resolveApiUrl(endpoint), { headers: { Accept: 'application/json' } });
+  const { resolvedUrl, res } = await fetchAwWithTimeout(endpoint);
   const parsed = await parseSafeJsonResponse<AnimeWorldHomeResponse>(res);
   if (!parsed.ok || !parsed.data) {
-    throw new Error(
-      extractErrorMessage(
-        parsed.data || parsed.rawText,
-        `AnimeWorld India homepage returned HTTP ${parsed.status}`
-      )
+    const msg = extractErrorMessage(
+      parsed.data || parsed.rawText,
+      `AnimeWorld India homepage returned HTTP ${parsed.status}`
     );
+    logApiDiagnostic('AnimeWorldHome', resolvedUrl, { status: parsed.status, message: msg });
+    throw new Error(msg);
   }
   return parsed.data;
 }
 
 export async function fetchAnimeWorldSeries(page = 1): Promise<AnimeWorldSeriesListResponse> {
   const endpoint = `${AW_BASE}/series.php?p=${encodeURIComponent(String(page))}`;
-  const res = await fetch(resolveApiUrl(endpoint), { headers: { Accept: 'application/json' } });
+  const { resolvedUrl, res } = await fetchAwWithTimeout(endpoint);
   const parsed = await parseSafeJsonResponse<AnimeWorldSeriesListResponse>(res);
   if (!parsed.ok || !parsed.data) {
-    throw new Error(
-      extractErrorMessage(
-        parsed.data || parsed.rawText,
-        `AnimeWorld India series list returned HTTP ${parsed.status}`
-      )
+    const msg = extractErrorMessage(
+      parsed.data || parsed.rawText,
+      `AnimeWorld India series list returned HTTP ${parsed.status}`
     );
+    logApiDiagnostic('AnimeWorldSeries', resolvedUrl, { status: parsed.status, message: msg });
+    throw new Error(msg);
   }
   return parsed.data;
 }
 
 export async function searchAnimeWorld(query: string, page = 1): Promise<AnimeWorldSearchResponse> {
   const endpoint = `${AW_BASE}/search.php?query=${encodeURIComponent(query)}&p=${encodeURIComponent(String(page))}`;
-  const res = await fetch(resolveApiUrl(endpoint), { headers: { Accept: 'application/json' } });
+  const { resolvedUrl, res } = await fetchAwWithTimeout(endpoint);
   const parsed = await parseSafeJsonResponse<AnimeWorldSearchResponse>(res);
   if (!parsed.ok || !parsed.data) {
     const details = extractErrorDetails(
       parsed.data || parsed.rawText,
-      endpoint,
+      resolvedUrl,
       parsed.status,
       `AnimeWorld India search returned HTTP ${parsed.status}`
     );
+    logApiDiagnostic('AnimeWorldSearch', resolvedUrl, {
+      status: parsed.status,
+      message: details.message,
+    });
     const err = new Error(details.message) as Error & {
       statusCode?: number;
       detail?: string;
@@ -136,18 +163,24 @@ export async function fetchAnimeWorldSeasons(
   seriesID: string
 ): Promise<{ status: number; data: AnimeWorldSeasonsResponse | null; rawText?: string; endpointUrl: string }> {
   const endpointUrl = `${AW_BASE}/seasons.php?seriesID=${encodeURIComponent(seriesID)}`;
-  const res = await fetch(resolveApiUrl(endpointUrl), { headers: { Accept: 'application/json' } });
+  const { resolvedUrl, res } = await fetchAwWithTimeout(endpointUrl);
   const parsed = await parseSafeJsonResponse<AnimeWorldSeasonsResponse>(res);
-  return { status: parsed.status, data: parsed.data, rawText: parsed.rawText, endpointUrl };
+  if (!parsed.ok) {
+    logApiDiagnostic('AnimeWorldSeasons', resolvedUrl, { status: parsed.status });
+  }
+  return { status: parsed.status, data: parsed.data, rawText: parsed.rawText, endpointUrl: resolvedUrl };
 }
 
 export async function fetchAnimeWorldEpisodes(
   seasonId: string
 ): Promise<{ status: number; data: AnimeWorldEpisodesResponse | null; rawText?: string; endpointUrl: string }> {
   const endpointUrl = `${AW_BASE}/episodes.php?seasonId=${encodeURIComponent(seasonId)}`;
-  const res = await fetch(resolveApiUrl(endpointUrl), { headers: { Accept: 'application/json' } });
+  const { resolvedUrl, res } = await fetchAwWithTimeout(endpointUrl);
   const parsed = await parseSafeJsonResponse<AnimeWorldEpisodesResponse>(res);
-  return { status: parsed.status, data: parsed.data, rawText: parsed.rawText, endpointUrl };
+  if (!parsed.ok) {
+    logApiDiagnostic('AnimeWorldEpisodes', resolvedUrl, { status: parsed.status });
+  }
+  return { status: parsed.status, data: parsed.data, rawText: parsed.rawText, endpointUrl: resolvedUrl };
 }
 
 export async function fetchAnimeWorldStream(params: {
@@ -158,9 +191,12 @@ export async function fetchAnimeWorldStream(params: {
     ? `episodeId=${encodeURIComponent(params.episodeId)}`
     : `movieId=${encodeURIComponent(params.movieId || '')}`;
   const endpointUrl = `${AW_BASE}/stream.php?${qs}`;
-  const res = await fetch(resolveApiUrl(endpointUrl), { headers: { Accept: 'application/json' } });
+  const { resolvedUrl, res } = await fetchAwWithTimeout(endpointUrl);
   const parsed = await parseSafeJsonResponse<AnimeWorldStreamResponse>(res);
-  return { status: parsed.status, data: parsed.data, rawText: parsed.rawText, endpointUrl };
+  if (!parsed.ok) {
+    logApiDiagnostic('AnimeWorldStream', resolvedUrl, { status: parsed.status });
+  }
+  return { status: parsed.status, data: parsed.data, rawText: parsed.rawText, endpointUrl: resolvedUrl };
 }
 
 function normalizeText(raw: string): string {

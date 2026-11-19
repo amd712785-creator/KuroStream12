@@ -115,7 +115,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const networkRetryCountRef = useRef(0);
   const mediaRetryCountRef = useRef(0);
   const refreshAttemptCountRef = useRef(0);
-  const proxyAttemptedRef = useRef(false);
+  const directAttemptedRef = useRef(false);
   const lastSavedVideoTimeRef = useRef(-10);
   const lastSavedWallMsRef = useRef(0);
   const onProgressRef = useRef(onProgress);
@@ -137,7 +137,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const [showCustomEndpoint, setShowCustomEndpoint] = useState(false);
   const [customEndpoint, setCustomEndpoint] = useState(() => getStreamingApiBase());
   const [autoNextCountdown, setAutoNextCountdown] = useState<number | null>(null);
-  const [useProxyFallback, setUseProxyFallback] = useState(false);
+  const [useDirectFallback, setUseDirectFallback] = useState(false);
   const [hindiAudioWarning, setHindiAudioWarning] = useState<string | null>(null);
   const [audioTracks, setAudioTracks] = useState<Array<{ id: number; name: string; lang: string }>>([]);
   const [selectedAudioTrackIndex, setSelectedAudioTrackIndex] = useState<number>(-1);
@@ -158,7 +158,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     setMediaError(null);
     setIsBuffering(false);
     setAutoNextCountdown(null);
-    setUseProxyFallback(false);
+    setUseDirectFallback(false);
     setHindiAudioWarning(null);
     setAudioTracks([]);
     setSelectedAudioTrackIndex(-1);
@@ -167,7 +167,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     networkRetryCountRef.current = 0;
     mediaRetryCountRef.current = 0;
     refreshAttemptCountRef.current = 0;
-    proxyAttemptedRef.current = false;
+    directAttemptedRef.current = false;
     lastSavedVideoTimeRef.current = -10;
     lastSavedWallMsRef.current = 0;
   }, [episodeKey]);
@@ -220,12 +220,23 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       }
 
       const referer = refererHeader || 'https://megavid.buzz/';
-      const playbackUrl =
-        activeSourceUrl.startsWith('http') && !activeSourceUrl.includes(window.location.host)
-          ? resolveApiUrl(
-              `/api/anime/proxy?url=${encodeURIComponent(activeSourceUrl)}&referer=${encodeURIComponent(referer)}`
-            )
-          : activeSourceUrl;
+      const resolvedDirectUrl = resolveApiUrl(activeSourceUrl);
+      const shouldUseProxy =
+        !useDirectFallback &&
+        resolvedDirectUrl.startsWith('http') &&
+        !resolvedDirectUrl.includes(window.location.host);
+      const playbackUrl = shouldUseProxy
+        ? resolveApiUrl(
+            `/api/anime/proxy?url=${encodeURIComponent(resolvedDirectUrl)}&referer=${encodeURIComponent(referer)}`
+          )
+        : resolvedDirectUrl;
+
+      console.info('[KuroStream Video] Initializing playback', {
+        type: activeSourceType,
+        mode: shouldUseProxy ? 'proxy' : 'direct',
+        sourceUrl: activeSourceUrl,
+        playbackUrl,
+      });
 
       const handleLoadedMetadata = () => {
         if (cancelled) return;
@@ -299,6 +310,13 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
             if (cancelled || !data.fatal) return;
 
             const httpCode = data.response?.code;
+            console.warn('[KuroStream Video] HLS fatal error', {
+              type: data.type,
+              details: data.details,
+              httpCode,
+              url: data.url || playbackUrl,
+            });
+
             if (
               data.type === Hls.ErrorTypes.NETWORK_ERROR &&
               (httpCode === 401 || httpCode === 403 || httpCode === 410)
@@ -320,16 +338,16 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
             }
 
             if (
-              !proxyAttemptedRef.current &&
-              !useProxyFallback &&
+              !directAttemptedRef.current &&
+              !useDirectFallback &&
               activeSourceUrl.startsWith('http')
             ) {
-              proxyAttemptedRef.current = true;
+              directAttemptedRef.current = true;
               resumeStateRef.current = {
                 time: video.currentTime || 0,
                 shouldPlay: !video.paused,
               };
-              setUseProxyFallback(true);
+              setUseDirectFallback(true);
               return;
             }
 
@@ -367,7 +385,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         hlsRef.current = null;
       }
     };
-  }, [activeSourceUrl, activeSourceType, refererHeader, useProxyFallback, triggerSignedRefresh, audioMode]);
+  }, [activeSourceUrl, activeSourceType, refererHeader, useDirectFallback, triggerSignedRefresh, audioMode]);
 
   useEffect(() => {
     if (autoNextCountdown === null) return;
@@ -632,17 +650,24 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         ) : activeSource.type === 'embed' ? (
           <iframe
             key={activeSource.url}
-            src={activeSource.url}
+            src={resolveApiUrl(activeSource.url)}
             title={episodeTitle}
             allowFullScreen
-            allow="autoplay; fullscreen; picture-in-picture"
+            referrerPolicy="no-referrer-when-downgrade"
+            allow="autoplay; fullscreen; picture-in-picture; encrypted-media"
+            onLoad={() => {
+              console.info('[KuroStream Video] Embed iframe loaded', { url: activeSource.url });
+            }}
+            onError={() => {
+              console.warn('[KuroStream Video] Embed iframe failed to load', { url: activeSource.url });
+            }}
             className="h-full w-full border-0"
           />
         ) : (
           <>
             <video
               ref={videoRef}
-              crossOrigin="anonymous"
+              crossOrigin={useDirectFallback ? undefined : 'anonymous'}
               playsInline
               preload="auto"
               onClick={togglePlay}
@@ -673,19 +698,27 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                 }
               }}
               onError={async () => {
+                const video = videoRef.current;
+                const mediaErr = video?.error;
+                console.warn('[KuroStream Video] Native video error', {
+                  type: activeSourceType,
+                  code: mediaErr?.code,
+                  message: mediaErr?.message,
+                  src: video?.currentSrc || activeSourceUrl,
+                  useDirectFallback,
+                });
                 if (activeSourceType === 'hls') return;
                 if (
-                  !proxyAttemptedRef.current &&
-                  !useProxyFallback &&
+                  !directAttemptedRef.current &&
+                  !useDirectFallback &&
                   activeSourceUrl.startsWith('http')
                 ) {
-                  proxyAttemptedRef.current = true;
-                  const video = videoRef.current;
+                  directAttemptedRef.current = true;
                   resumeStateRef.current = {
                     time: video?.currentTime || 0,
                     shouldPlay: Boolean(video && !video.paused),
                   };
-                  setUseProxyFallback(true);
+                  setUseDirectFallback(true);
                   return;
                 }
                 const refreshed = await triggerSignedRefresh();
@@ -932,10 +965,10 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                         shouldPlay: !video.paused,
                       };
                     }
-                    proxyAttemptedRef.current = false;
+                    directAttemptedRef.current = false;
                     networkRetryCountRef.current = 0;
                     mediaRetryCountRef.current = 0;
-                    setUseProxyFallback(false);
+                    setUseDirectFallback(false);
                     setSelectedSourceIndex(nextIdx);
                   }}
                   aria-label="Video quality"

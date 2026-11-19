@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { ExtensionManager } from '@/src/components/ExtensionManager';
 import { VideoPlayer } from '@/src/components/VideoPlayer';
+import { resolveApiUrl } from '@/src/config/env';
 import { useAuth } from '@/src/context/AuthContext';
 import { getAnimeDetails, getDisplayTitle } from '@/src/services/anilistApi';
 import { resolveAnimeWorldStreamForAnime } from '@/src/services/animeWorldApi';
@@ -82,7 +83,9 @@ export const WatchPage: React.FC = () => {
   } = useAuth();
 
   const [anime, setAnime] = useState<AnimeDetail | null>(null);
+  const [animeLoadError, setAnimeLoadError] = useState<string | null>(null);
   const [episodes, setEpisodes] = useState<EpisodeItem[]>([]);
+  const [loadingEpisodes, setLoadingEpisodes] = useState(true);
   const [epFilter, setEpFilter] = useState('');
   const [aniZipMalId, setAniZipMalId] = useState<number | null>(null);
   const [aniSkipData, setAniSkipData] = useState<AniSkipResponse | null>(null);
@@ -129,6 +132,8 @@ export const WatchPage: React.FC = () => {
     if (!Number.isFinite(animeId) || animeId <= 0) return;
     let active = true;
     const loadMeta = async () => {
+      setLoadingEpisodes(true);
+      setAnimeLoadError(null);
       try {
         const detail = await getAnimeDetails(animeId);
         if (!active) return;
@@ -137,8 +142,13 @@ export const WatchPage: React.FC = () => {
         if (!active) return;
         setEpisodes(epRes.episodes);
         if (epRes.aniZipMalId) setAniZipMalId(epRes.aniZipMalId);
-      } catch {
-        // handled gracefully in UI
+      } catch (err) {
+        if (!active) return;
+        setAnimeLoadError(
+          err instanceof Error ? err.message : 'Unable to load anime metadata.'
+        );
+      } finally {
+        if (active) setLoadingEpisodes(false);
       }
     };
     loadMeta();
@@ -203,7 +213,16 @@ export const WatchPage: React.FC = () => {
 
     const useAnimeWorld = selectedServer.toLowerCase() === 'animeworld-india';
     if (useAnimeWorld && !anime) {
-      setLoadingStream(true);
+      if (animeLoadError) {
+        setStreamData(null);
+        setStreamError({
+          endpointUrl: resolveApiUrl('/api/anime-world-india/v1/search.php'),
+          message: `Cannot query AnimeWorld India because anime metadata failed to load: ${animeLoadError}`,
+        });
+        setLoadingStream(false);
+      } else {
+        setLoadingStream(true);
+      }
       return;
     }
 
@@ -230,7 +249,7 @@ export const WatchPage: React.FC = () => {
         setStreamError(
           awRes.error || {
             statusCode: 404,
-            endpointUrl: '/api/anime-world-india/v1/stream.php',
+            endpointUrl: resolveApiUrl('/api/anime-world-india/v1/stream.php'),
             message: 'AnimeWorld India returned no playable source for this episode.',
           }
         );
@@ -278,6 +297,7 @@ export const WatchPage: React.FC = () => {
     audioMode,
     animeId,
     anime,
+    animeLoadError,
     resolvedEpNumber,
   ]);
 
@@ -724,9 +744,13 @@ export const WatchPage: React.FC = () => {
           )}
 
           <div className="flex-1 space-y-1.5 overflow-y-auto pr-1">
-            {episodes.length === 0 ? (
+            {loadingEpisodes && episodes.length === 0 ? (
               <p className="py-8 text-center text-xs text-slate-400">
                 Loading episode directory...
+              </p>
+            ) : episodes.length === 0 ? (
+              <p className="py-8 text-center text-xs text-slate-400">
+                No episodes available for this title.
               </p>
             ) : filteredEpisodes.length === 0 ? (
               <p className="py-8 text-center text-xs text-slate-400">

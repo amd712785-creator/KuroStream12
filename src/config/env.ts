@@ -1,4 +1,7 @@
 import { Capacitor } from '@capacitor/core';
+import defaultAvatarImg from '@/src/assets/images/default_avatar_art_1794848733721.jpg';
+import heroFallbackImg from '@/src/assets/images/hero_fallback_backdrop_1794848732685.jpg';
+import posterFallbackImg from '@/src/assets/images/poster_fallback_art_1794848734095.jpg';
 
 const DEFAULT_STREAMING_API = 'https://ashanime-api.vercel.app';
 const DEFAULT_ANILIST_API = 'https://graphql.anilist.co';
@@ -6,10 +9,27 @@ const DEFAULT_BACKEND_ORIGIN = 'https://animeworldbd.vercel.app';
 const OVERRIDE_STORAGE_KEY = 'kurostream_api_override_v1';
 
 export const ASSETS = {
-  heroFallback: '/src/assets/images/hero_fallback_backdrop_1794848732685.jpg',
-  posterFallback: '/src/assets/images/poster_fallback_art_1794848734095.jpg',
-  defaultAvatar: '/src/assets/images/default_avatar_art_1794848733721.jpg',
+  heroFallback: heroFallbackImg,
+  posterFallback: posterFallbackImg,
+  defaultAvatar: defaultAvatarImg,
 };
+
+export function isNativeCapacitorRuntime(): boolean {
+  try {
+    if (Capacitor.isNativePlatform()) return true;
+    const platform = Capacitor.getPlatform();
+    if (platform && platform !== 'web') return true;
+  } catch {
+    // ignore Capacitor bridge absence
+  }
+  if (typeof window !== 'undefined' && window.location) {
+    const proto = window.location.protocol;
+    if (proto === 'capacitor:' || proto === 'ionic:' || proto === 'file:') {
+      return true;
+    }
+  }
+  return false;
+}
 
 export function getBackendApiOrigin(): string {
   const configured = (import.meta.env.VITE_BACKEND_API_URL || DEFAULT_BACKEND_ORIGIN).trim();
@@ -20,14 +40,24 @@ export function resolveApiUrl(pathOrUrl: string): string {
   if (!pathOrUrl) return pathOrUrl;
   if (/^https?:\/\//i.test(pathOrUrl)) return pathOrUrl;
   const normalizedPath = pathOrUrl.startsWith('/') ? pathOrUrl : `/${pathOrUrl}`;
-  try {
-    if (Capacitor.isNativePlatform()) {
-      return `${getBackendApiOrigin()}${normalizedPath}`;
-    }
-  } catch {
-    // ignore in non-Capacitor environments
+  if (isNativeCapacitorRuntime()) {
+    return `${getBackendApiOrigin()}${normalizedPath}`;
   }
   return normalizedPath;
+}
+
+export function logApiDiagnostic(
+  scope: string,
+  url: string,
+  details: { status?: number; message?: string; extra?: Record<string, unknown> }
+): void {
+  const originType = isNativeCapacitorRuntime() ? 'capacitor-native' : 'web';
+  console.warn(`[KuroStream API][${scope}][${originType}]`, {
+    url,
+    status: details.status,
+    message: details.message,
+    ...(details.extra || {}),
+  });
 }
 
 export function getAnilistApiUrl(): string {

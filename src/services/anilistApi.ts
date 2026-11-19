@@ -1,4 +1,4 @@
-import { getAnilistApiUrl, resolveApiUrl } from '@/src/config/env';
+import { getAnilistApiUrl, logApiDiagnostic, resolveApiUrl } from '@/src/config/env';
 import type { AiringScheduleItem, AnimeDetail, AnimeSummary } from '@/src/types/anime';
 
 const cache = new Map<string, { expiresAt: number; data: unknown }>();
@@ -50,6 +50,10 @@ async function gqlFetch<T>(query: string, variables: Record<string, unknown> = {
         );
 
         if (response.status === 429 || response.status >= 500) {
+          logApiDiagnostic('AniList', endpoint, {
+            status: response.status,
+            message: `HTTP ${response.status} on attempt ${attempt + 1}`,
+          });
           lastError = new Error(`AniList metadata request failed with HTTP ${response.status}`);
           if (attempt === 0) {
             await new Promise((r) => setTimeout(r, 450));
@@ -59,11 +63,19 @@ async function gqlFetch<T>(query: string, variables: Record<string, unknown> = {
         }
 
         if (!response.ok) {
+          logApiDiagnostic('AniList', endpoint, {
+            status: response.status,
+            message: `Unexpected HTTP ${response.status}`,
+          });
           throw new Error(`AniList metadata request failed with HTTP ${response.status}`);
         }
 
         const payload = await response.json();
         if (payload?.errors?.length) {
+          logApiDiagnostic('AniList', endpoint, {
+            status: response.status,
+            message: payload.errors[0]?.message || 'AniList GraphQL error',
+          });
           throw new Error(payload.errors[0]?.message || 'AniList GraphQL error');
         }
         if (!payload?.data) {
@@ -73,12 +85,17 @@ async function gqlFetch<T>(query: string, variables: Record<string, unknown> = {
         cache.set(key, { expiresAt: Date.now() + CACHE_TTL_MS, data: payload.data });
         return payload.data as T;
       } catch (err) {
-        lastError =
+        const msg =
           err instanceof Error
             ? err.name === 'AbortError'
-              ? new Error('AniList metadata request timed out. Please check your connection.')
-              : err
-            : new Error('Unable to reach AniList catalog.');
+              ? 'AniList metadata request timed out. Please check your connection.'
+              : err.message
+            : 'Unable to reach AniList catalog.';
+        logApiDiagnostic('AniList', endpoint, {
+          message: msg,
+          extra: { attempt: attempt + 1 },
+        });
+        lastError = new Error(msg);
       }
     }
   }

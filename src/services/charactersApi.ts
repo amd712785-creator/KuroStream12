@@ -1,4 +1,4 @@
-import { getAnilistApiUrl, resolveApiUrl } from '@/src/config/env';
+import { getAnilistApiUrl, logApiDiagnostic, resolveApiUrl } from '@/src/config/env';
 import type { AnimeCharacterAvatar } from '@/src/types/anime';
 
 export interface SeriesFilterOption {
@@ -77,15 +77,26 @@ async function gqlCharacterFetch<T>(
         signal: controller.signal,
       });
       if (!response.ok) {
+        logApiDiagnostic('Characters', endpoint, {
+          status: response.status,
+          message: `HTTP ${response.status}`,
+        });
         lastErr = new Error(`Character catalog request failed (HTTP ${response.status})`);
         continue;
       }
       const payload = await response.json();
       if (payload?.errors?.length) {
-        throw new Error(payload.errors[0]?.message || 'AniList character query failed');
+        const errMsg = payload.errors[0]?.message || 'AniList character query failed';
+        logApiDiagnostic('Characters', endpoint, {
+          status: response.status,
+          message: errMsg,
+        });
+        throw new Error(errMsg);
       }
       return payload.data as T;
     } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Unable to load character avatars.';
+      logApiDiagnostic('Characters', endpoint, { message: msg });
       lastErr = err instanceof Error ? err : new Error('Unable to load character avatars.');
     } finally {
       window.clearTimeout(timer);

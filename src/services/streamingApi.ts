@@ -1,4 +1,9 @@
-import { getDefaultStreamingApiBase, getStreamingApiBase, resolveApiUrl } from '@/src/config/env';
+import {
+  getDefaultStreamingApiBase,
+  getStreamingApiBase,
+  logApiDiagnostic,
+  resolveApiUrl,
+} from '@/src/config/env';
 import { getDisplayTitle, slugifyTitle } from '@/src/services/anilistApi';
 import { fetchAniZipMetadata } from '@/src/services/extensionsApi';
 import {
@@ -27,6 +32,19 @@ export interface EpisodesFetchResult {
 
 function normalizeTrackUrl(raw: string): string {
   return raw.trim().replace(/^https:\/{3,}/i, 'https://').replace(/^http:\/{3,}/i, 'http://');
+}
+
+async function fetchApiWithTimeout(url: string, timeoutMs = 15000): Promise<Response> {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, {
+      headers: { Accept: 'application/json' },
+      signal: controller.signal,
+    });
+  } finally {
+    window.clearTimeout(timer);
+  }
 }
 
 function classifyStreamType(
@@ -84,7 +102,7 @@ export function parseWatchResponse(payload: unknown): ParsedStreamResult {
           : typeof s.streamLink === 'string'
             ? s.streamLink
             : '';
-    const url = normalizeTrackUrl(rawUrl);
+    const url = rawUrl.startsWith('/') ? resolveApiUrl(rawUrl) : normalizeTrackUrl(rawUrl);
     if (!url) continue;
     const isM3U8 = Boolean(s.isM3U8 ?? s.hls ?? url.toLowerCase().includes('.m3u8'));
     const quality =
@@ -333,9 +351,15 @@ export async function fetchAnimeEpisodes(
 
   const queryStr = params.toString();
   const endpointUrl = `/api/anime/info/${anilistId}${queryStr ? `?${queryStr}` : ''}`;
+  const resolvedUrl = resolveApiUrl(endpointUrl);
 
   const [infoRes, aniZip] = await Promise.all([
-    fetch(resolveApiUrl(endpointUrl), { headers: { Accept: 'application/json' } }).catch(() => null),
+    fetchApiWithTimeout(resolvedUrl, 15000).catch((err) => {
+      logApiDiagnostic('AnimeInfo', resolvedUrl, {
+        message: err instanceof Error ? err.message : 'Network request failed',
+      });
+      return null;
+    }),
     fetchAniZipMetadata(anilistId),
   ]);
 
@@ -343,6 +367,12 @@ export async function fetchAnimeEpisodes(
 
   try {
     if (!infoRes || !infoRes.ok) {
+      if (infoRes) {
+        logApiDiagnostic('AnimeInfo', resolvedUrl, {
+          status: infoRes.status,
+          message: `HTTP ${infoRes.status}`,
+        });
+      }
       return {
         episodes: buildMetadataEpisodes(anime, aniZip),
         source: 'metadata-fallback',
@@ -350,11 +380,11 @@ export async function fetchAnimeEpisodes(
         providerError: infoRes
           ? {
               statusCode: infoRes.status,
-              endpointUrl,
+              endpointUrl: resolvedUrl,
               message: `Streaming info API returned HTTP ${infoRes.status}.`,
             }
           : {
-              endpointUrl,
+              endpointUrl: resolvedUrl,
               message: 'Unable to reach streaming info endpoint.',
             },
       };
@@ -370,7 +400,7 @@ export async function fetchAnimeEpisodes(
         providerError: json.upstreamError
           ? extractErrorDetails(
               json.upstreamError,
-              endpointUrl,
+              resolvedUrl,
               undefined,
               'External streaming info endpoint returned no episodes.'
             )
@@ -412,7 +442,7 @@ export async function fetchAnimeEpisodes(
       source: 'metadata-fallback',
       aniZipMalId,
       providerError: {
-        endpointUrl,
+        endpointUrl: resolvedUrl,
         message: err instanceof Error ? err.message : 'Unable to reach streaming info endpoint.',
       },
     };
@@ -428,10 +458,14 @@ export async function fetchEpisodeServers(episodeId: string): Promise<StreamServ
   const endpointUrl = `/api/anime/servers/${encodeURIComponent(episodeId)}${
     queryStr ? `?${queryStr}` : ''
   }`;
+  const resolvedUrl = resolveApiUrl(endpointUrl);
 
   try {
-    const res = await fetch(resolveApiUrl(endpointUrl), { headers: { Accept: 'application/json' } });
-    if (!res.ok) return [];
+    const res = await fetchApiWithTimeout(resolvedUrl, 12000);
+    if (!res.ok) {
+      logApiDiagnostic('Servers', resolvedUrl, { status: res.status, message: `HTTP ${res.status}` });
+      return [];
+    }
     const data = await res.json();
     if (!Array.isArray(data)) return [];
     return data
@@ -491,38 +525,43 @@ export async function fetchEpisodeStream(
   const endpointUrl = `/api/anime/watch/${encodeURIComponent(cleanEpisodeId)}${
     queryStr ? `?${queryStr}` : ''
   }`;
+  const resolvedUrl = resolveApiUrl(endpointUrl);
 
   try {
-    const response = await fetch(resolveApiUrl(endpointUrl), {
-      headers: { Accept: 'application/json' },
-    });
+    const response = await fetchApiWithTimeout(resolvedUrl, 15000);
 
     const parsedResp = await parseSafeJsonResponse<Record<string, unknown>>(response);
     const json = parsedResp.data;
 
     if (!parsedResp.ok) {
-      return {
-        error: extractErrorDetails(
-          json || parsedResp.rawText,
-          endpointUrl,
-          parsedResp.status,
-          `Streaming server returned HTTP ${parsedResp.status}.`
-        ),
-      };
+      const errObj = extractErrorDetails(
+        json || parsedResp.rawText,
+        resolvedUrl,
+        parsedResp.status,
+        `Streaming server returned HTTP ${parsedResp.status}.`
+      );
+      logApiDiagnostic('WatchStream', resolvedUrl, {
+        status: parsedResp.status,
+        message: errObj.message,
+      });
+      return { error: errObj };
     }
 
     const parsed = parseWatchResponse(json);
     const validSources = parsed.sources.filter((s) => isPlayableStreamUrl(s.url));
 
     if (validSources.length === 0) {
-      return {
-        error: extractErrorDetails(
-          json || parsedResp.rawText,
-          endpointUrl,
-          parsedResp.status,
-          'The streaming provider returned no playable stream sources for this episode.'
-        ),
-      };
+      const errObj = extractErrorDetails(
+        json || parsedResp.rawText,
+        resolvedUrl,
+        parsedResp.status,
+        'The streaming provider returned no playable stream sources for this episode.'
+      );
+      logApiDiagnostic('WatchStream', resolvedUrl, {
+        status: parsedResp.status,
+        message: errObj.message,
+      });
+      return { error: errObj };
     }
 
     return {
@@ -532,12 +571,17 @@ export async function fetchEpisodeStream(
       },
     };
   } catch (err) {
+    const isTimeout = err instanceof Error && err.name === 'AbortError';
     const extracted = extractErrorDetails(
-      err,
-      endpointUrl,
+      isTimeout ? 'Streaming backend request timed out after 15 seconds.' : err,
+      resolvedUrl,
       undefined,
       'Network error while contacting streaming backend.'
     );
+    logApiDiagnostic('WatchStream', resolvedUrl, {
+      status: extracted.statusCode,
+      message: extracted.message,
+    });
     return {
       error: {
         ...extracted,

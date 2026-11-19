@@ -7,8 +7,6 @@ import os from 'os';
 import path from 'path';
 import { Readable } from 'stream';
 import { fileURLToPath } from 'url';
-import { cert, getApps, initializeApp as initAdminApp } from 'firebase-admin/app';
-import { getAuth as getAdminAuth } from 'firebase-admin/auth';
 
 const isVercelRuntime = Boolean(
   process.env.VERCEL || process.env.VERCEL_ENV || process.env.AWS_LAMBDA_FUNCTION_NAME
@@ -123,23 +121,49 @@ function loadFirebaseAppletConfig(): FirebaseAppletConfig | null {
 
 const FIREBASE_CONFIG = loadFirebaseAppletConfig();
 
-// Initialize Firebase Admin SDK for server-side token verification and custom claims
-if (getApps().length === 0 && FIREBASE_CONFIG?.projectId) {
+type AdminAuthInstance = {
+  verifyIdToken: (token: string, checkRevoked?: boolean) => Promise<{
+    email?: string;
+    uid?: string;
+    email_verified?: boolean;
+  }>;
+  getUser: (uid: string) => Promise<{ customClaims?: Record<string, unknown> }>;
+  setCustomUserClaims: (uid: string, claims: Record<string, unknown>) => Promise<void>;
+};
+
+let adminAuthCached: AdminAuthInstance | null = null;
+let adminInitAttempted = false;
+
+// Lazily load Firebase Admin SDK so Vercel cold starts never fail on Node < 22 or bundle trace edge cases
+async function getLazyAdminAuth(): Promise<AdminAuthInstance | null> {
+  if (adminAuthCached) return adminAuthCached;
+  if (adminInitAttempted || !FIREBASE_CONFIG?.projectId) return null;
+  adminInitAttempted = true;
   try {
-    const serviceAccountJson = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
-    if (serviceAccountJson && serviceAccountJson.trim()) {
-      const sa = JSON.parse(serviceAccountJson);
-      initAdminApp({
-        credential: cert(sa),
-        projectId: FIREBASE_CONFIG.projectId,
-      });
-    } else {
-      initAdminApp({
-        projectId: FIREBASE_CONFIG.projectId,
-      });
+    const [{ cert, getApps, initializeApp: initAdminApp }, { getAuth: getAdminAuth }] =
+      await Promise.all([
+        import('firebase-admin/app'),
+        import('firebase-admin/auth'),
+      ]);
+    if (getApps().length === 0) {
+      const serviceAccountJson = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
+      if (serviceAccountJson && serviceAccountJson.trim()) {
+        const sa = JSON.parse(serviceAccountJson);
+        initAdminApp({
+          credential: cert(sa),
+          projectId: FIREBASE_CONFIG.projectId,
+        });
+      } else {
+        initAdminApp({
+          projectId: FIREBASE_CONFIG.projectId,
+        });
+      }
     }
+    adminAuthCached = getAdminAuth() as unknown as AdminAuthInstance;
+    return adminAuthCached;
   } catch {
-    // Falls back gracefully to Google Identity Toolkit token verification
+    // Falls back cleanly to Google Identity Toolkit REST token verification
+    return null;
   }
 }
 
@@ -305,10 +329,12 @@ async function verifyAdminRequest(req: Request): Promise<{
   let verifiedUid: string | undefined;
   let isEmailVerified = false;
 
+  const adminAuth = await getLazyAdminAuth();
+
   // 1. Try Firebase Admin SDK verifyIdToken if initialized
-  if (getApps().length > 0) {
+  if (adminAuth) {
     try {
-      const decoded = await getAdminAuth().verifyIdToken(idToken, true);
+      const decoded = await adminAuth.verifyIdToken(idToken, true);
       verifiedEmail = decoded.email;
       verifiedUid = decoded.uid;
       isEmailVerified = decoded.email_verified === true;
@@ -364,9 +390,8 @@ async function verifyAdminRequest(req: Request): Promise<{
   }
 
   // Assign Firebase Admin custom claims { admin: true } to the authorized admin if available
-  if (getApps().length > 0) {
+  if (adminAuth) {
     try {
-      const adminAuth = getAdminAuth();
       const userRec = await adminAuth.getUser(verifiedUid);
       if (!userRec.customClaims?.admin) {
         await adminAuth.setCustomUserClaims(verifiedUid, { admin: true });
@@ -2940,9 +2965,18 @@ export function createExpressApp() {
 
       if (contentType.includes('mpegurl') || lowerPath.endsWith('.m3u8')) {
         const playlist = await upstream.text();
+        const forwardedHost = (req.headers['x-forwarded-host'] || req.headers.host || '')
+          .toString()
+          .split(',')[0]
+          .trim();
+        const forwardedProto = (req.headers['x-forwarded-proto'] || req.protocol || 'https')
+          .toString()
+          .split(',')[0]
+          .trim();
+        const proxyOrigin = forwardedHost ? `${forwardedProto}://${forwardedHost}` : '';
         const proxyHref = (target: string) => {
           const absolute = new URL(target, parsedUrl).toString();
-          return `/api/anime/proxy?url=${encodeURIComponent(absolute)}&referer=${encodeURIComponent(
+          return `${proxyOrigin}/api/anime/proxy?url=${encodeURIComponent(absolute)}&referer=${encodeURIComponent(
             referer
           )}`;
         };

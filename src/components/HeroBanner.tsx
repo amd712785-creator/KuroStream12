@@ -9,9 +9,10 @@ import type { AnimeSummary } from '@/src/types/anime';
 
 interface HeroBannerProps {
   items: AnimeSummary[];
+  loading?: boolean;
 }
 
-export const HeroBanner: React.FC<HeroBannerProps> = ({ items }) => {
+export const HeroBanner: React.FC<HeroBannerProps> = ({ items, loading = false }) => {
   const featured = items.slice(0, 6);
   const [index, setIndex] = useState(0);
   const { isInWatchlist, toggleWatchlist } = useAuth();
@@ -25,6 +26,7 @@ export const HeroBanner: React.FC<HeroBannerProps> = ({ items }) => {
   }, [featured.length]);
 
   if (featured.length === 0) {
+    if (!loading) return null;
     return (
       <section className="relative h-[430px] w-full animate-pulse rounded-3xl border border-white/[0.08] bg-[#10121c] sm:h-[520px]" />
     );
