@@ -1,11 +1,19 @@
 import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import { Capacitor } from '@capacitor/core';
+import { SocialLogin } from '@capgo/capacitor-social-login';
 import {
+  createUserWithEmailAndPassword,
   getRedirectResult,
+  GoogleAuthProvider,
   onAuthStateChanged,
+  sendEmailVerification,
+  sendPasswordResetEmail,
+  signInWithCredential,
+  signInWithEmailAndPassword,
   signInWithPopup,
   signInWithRedirect,
   signOut as firebaseSignOut,
+  updateProfile,
   type User,
 } from 'firebase/auth';
 import {
@@ -26,6 +34,7 @@ import { ASSETS } from '@/src/config/env';
 import {
   auth,
   db,
+  firebaseOAuthClientId,
   googleProvider,
   handleFirestoreError,
   isFirebaseConfigured,
@@ -115,6 +124,88 @@ function getTodayUtcKey(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
+let socialLoginInitPromise: Promise<void> | null = null;
+
+async function ensureNativeSocialLoginInitialized(): Promise<void> {
+  if (!Capacitor.isNativePlatform()) return;
+  if (!firebaseOAuthClientId) {
+    throw new Error('Google Web Client ID is missing in Firebase configuration.');
+  }
+  if (!socialLoginInitPromise) {
+    socialLoginInitPromise = SocialLogin.initialize({
+      google: {
+        webClientId: firebaseOAuthClientId,
+        mode: 'online',
+        skipAuthOnlyAuthorizationAfterSignIn: true,
+      },
+    }).catch((err) => {
+      socialLoginInitPromise = null;
+      throw err;
+    });
+  }
+  await socialLoginInitPromise;
+}
+
+function formatFirebaseAuthError(err: unknown, context: 'google' | 'email'): string {
+  const code = (err as { code?: string } | null)?.code || '';
+  const rawMessage = err instanceof Error ? err.message : String(err || 'Authentication failed.');
+
+  switch (code) {
+    case 'auth/invalid-credential':
+    case 'auth/wrong-password':
+    case 'auth/user-not-found':
+      return context === 'google'
+        ? 'Google credential could not be verified by Firebase. Verify that your Web Client ID and Android OAuth SHA-1/SHA-256 match your Firebase project.'
+        : 'Invalid email or password. Please check your credentials and try again.';
+    case 'auth/email-already-in-use':
+      return 'An account with this email already exists. Switch to Sign In or reset your password.';
+    case 'auth/weak-password':
+      return 'Password is too weak. Please use at least 6 characters.';
+    case 'auth/invalid-email':
+      return 'Please enter a valid email address.';
+    case 'auth/too-many-requests':
+      return 'Too many attempts. Please wait a moment before trying again.';
+    case 'auth/operation-not-allowed':
+      return context === 'google'
+        ? 'Google Sign-In provider is not enabled in Firebase Authentication Console.'
+        : 'Email/Password sign-in is not enabled in Firebase Authentication Console yet.';
+    case 'auth/network-request-failed':
+      return 'Network error while contacting Firebase Authentication. Check your internet connection and try again.';
+    case 'auth/account-exists-with-different-credential':
+      return 'An account already exists with this email using a different sign-in method.';
+    case 'auth/user-disabled':
+      return 'This account has been disabled.';
+    case 'auth/popup-closed-by-user':
+      return '';
+    default:
+      break;
+  }
+
+  const lower = rawMessage.toLowerCase();
+  if (
+    lower.includes('user_cancelled') ||
+    lower.includes('canceled') ||
+    lower.includes('cancelled') ||
+    lower.includes('getcredentialcancellationexception')
+  ) {
+    return '';
+  }
+
+  if (
+    Capacitor.isNativePlatform() &&
+    (lower.includes('nocredential') ||
+      lower.includes('no credentials') ||
+      lower.includes('developer_error') ||
+      lower.includes('developer error') ||
+      lower.includes('10:') ||
+      lower.includes('16:'))
+  ) {
+    return 'Native Google Sign-In could not find a matching Android OAuth credential for com.kurostream.app. Register your APK SHA-1/SHA-256 in Google Cloud / Firebase Console, or sign in with Email/Password or Guest Mode.';
+  }
+
+  return rawMessage || 'Unable to sign in.';
+}
+
 interface AuthContextValue {
   user: User | null;
   authReady: boolean;
@@ -129,9 +220,17 @@ interface AuthContextValue {
   history: WatchHistoryItem[];
   isAuthModalOpen: boolean;
   authError: string | null;
+  authNotice: string | null;
+  authLoading: boolean;
+  clearAuthMessages: () => void;
   openAuthModal: () => void;
   closeAuthModal: () => void;
   signInWithGoogle: () => Promise<void>;
+  signInWithEmail: (email: string, password: string) => Promise<void>;
+  registerWithEmail: (email: string, password: string, displayName?: string) => Promise<void>;
+  resendVerificationEmail: () => Promise<void>;
+  refreshEmailVerification: () => Promise<void>;
+  sendPasswordReset: (email: string) => Promise<void>;
   signOut: () => Promise<void>;
   isInWatchlist: (animeId: number) => boolean;
   isFavorite: (animeId: number) => boolean;
@@ -161,6 +260,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
+  const [authNotice, setAuthNotice] = useState<string | null>(null);
+  const [authLoading, setAuthLoading] = useState(false);
 
   useEffect(() => {
     if (isFirebaseConfigured) {
@@ -174,15 +275,22 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       return;
     }
 
-    getRedirectResult(auth)
-      .then((result) => {
-        if (result?.user) {
-          setIsAuthModalOpen(false);
-        }
-      })
-      .catch((err) => {
-        setAuthError(err instanceof Error ? err.message : 'Unable to complete Google sign-in.');
+    if (Capacitor.isNativePlatform()) {
+      ensureNativeSocialLoginInitialized().catch(() => {
+        // Retry and surface errors during explicit user sign-in
       });
+    } else {
+      getRedirectResult(auth)
+        .then((result) => {
+          if (result?.user) {
+            setIsAuthModalOpen(false);
+          }
+        })
+        .catch((err) => {
+          const msg = formatFirebaseAuthError(err, 'google');
+          if (msg) setAuthError(msg);
+        });
+    }
 
     const unsub = onAuthStateChanged(auth, async (firebaseUser) => {
       setUser(firebaseUser);
@@ -284,7 +392,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, []);
 
   useEffect(() => {
-    if (!authReady || !user || !db) return;
+    if (!authReady || !user || !user.emailVerified || !db) return;
 
     const uid = user.uid;
     const userPath = `users/${uid}`;
@@ -441,46 +549,191 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     });
   }, []);
 
+  const clearAuthMessages = useCallback(() => {
+    setAuthError(null);
+    setAuthNotice(null);
+  }, []);
+
   const signInWithGoogle = useCallback(async () => {
     if (!auth || !googleProvider) {
       setAuthError('Firebase is not configured. Using local Guest Mode.');
       return;
     }
     setAuthError(null);
+    setAuthNotice(null);
+    setAuthLoading(true);
     try {
       if (Capacitor.isNativePlatform()) {
-        await signInWithRedirect(auth, googleProvider);
+        await ensureNativeSocialLoginInitialized();
+        const response = await SocialLogin.login({
+          provider: 'google',
+          options: {
+            style: 'standard',
+          },
+        });
+        const idToken =
+          response.result.responseType === 'online' ? response.result.idToken : null;
+        if (!idToken) {
+          throw new Error('Google Sign-In did not return an ID token.');
+        }
+        const credential = GoogleAuthProvider.credential(idToken);
+        await signInWithCredential(auth, credential);
+        setIsAuthModalOpen(false);
         return;
       }
+
       await signInWithPopup(auth, googleProvider);
       setIsAuthModalOpen(false);
     } catch (err) {
       const code = (err as { code?: string } | null)?.code;
-      const rawMessage = err instanceof Error ? err.message : 'Unable to sign in with Google.';
       if (
-        code === 'auth/popup-blocked' ||
-        code === 'auth/operation-not-supported-in-this-environment'
+        !Capacitor.isNativePlatform() &&
+        (code === 'auth/popup-blocked' ||
+          code === 'auth/operation-not-supported-in-this-environment')
       ) {
         try {
           await signInWithRedirect(auth, googleProvider);
           return;
         } catch (redirectErr) {
-          setAuthError(
-            redirectErr instanceof Error ? redirectErr.message : 'Unable to sign in with Google.'
-          );
+          const msg = formatFirebaseAuthError(redirectErr, 'google');
+          if (msg) setAuthError(msg);
           return;
         }
       }
-      if (
-        Capacitor.isNativePlatform() &&
-        (rawMessage.includes('disallowed_useragent') || code === 'auth/unauthorized-domain')
-      ) {
-        setAuthError(
-          'Google OAuth requires a system browser on Android WebView. You can continue using Local Guest Mode with full watchlist, history, and custom themes saved on this device.'
+      const msg = formatFirebaseAuthError(err, 'google');
+      if (msg) setAuthError(msg);
+    } finally {
+      setAuthLoading(false);
+    }
+  }, []);
+
+  const signInWithEmail = useCallback(async (email: string, password: string) => {
+    if (!auth) {
+      setAuthError('Firebase is not configured. Using local Guest Mode.');
+      return;
+    }
+    const trimmedEmail = email.trim();
+    if (!trimmedEmail || !password) {
+      setAuthError('Please enter both your email and password.');
+      return;
+    }
+    setAuthError(null);
+    setAuthNotice(null);
+    setAuthLoading(true);
+    try {
+      const cred = await signInWithEmailAndPassword(auth, trimmedEmail, password);
+      await cred.user.reload().catch(() => {});
+      if (cred.user.emailVerified) {
+        setIsAuthModalOpen(false);
+      } else {
+        setAuthNotice(
+          'Signed in! Please verify your email address via the link sent to your inbox to enable Firestore cloud sync.'
         );
+      }
+    } catch (err) {
+      const msg = formatFirebaseAuthError(err, 'email');
+      if (msg) setAuthError(msg);
+    } finally {
+      setAuthLoading(false);
+    }
+  }, []);
+
+  const registerWithEmail = useCallback(
+    async (email: string, password: string, displayName?: string) => {
+      if (!auth) {
+        setAuthError('Firebase is not configured. Using local Guest Mode.');
         return;
       }
-      setAuthError(rawMessage);
+      const trimmedEmail = email.trim();
+      const trimmedName = displayName?.trim() || '';
+      if (!trimmedEmail || !password) {
+        setAuthError('Please enter an email address and password.');
+        return;
+      }
+      setAuthError(null);
+      setAuthNotice(null);
+      setAuthLoading(true);
+      try {
+        const cred = await createUserWithEmailAndPassword(auth, trimmedEmail, password);
+        if (trimmedName) {
+          await updateProfile(cred.user, {
+            displayName: trimmedName.slice(0, 80),
+          }).catch(() => {});
+        }
+        await sendEmailVerification(cred.user).catch(() => {});
+        setAuthNotice(
+          'Account created! A verification link has been sent to your email. Verify your email to activate Firestore cloud sync.'
+        );
+      } catch (err) {
+        const msg = formatFirebaseAuthError(err, 'email');
+        if (msg) setAuthError(msg);
+      } finally {
+        setAuthLoading(false);
+      }
+    },
+    []
+  );
+
+  const resendVerificationEmail = useCallback(async () => {
+    if (!auth?.currentUser) return;
+    setAuthError(null);
+    setAuthNotice(null);
+    setAuthLoading(true);
+    try {
+      await sendEmailVerification(auth.currentUser);
+      setAuthNotice('Verification email sent. Check your inbox and spam folder.');
+    } catch (err) {
+      const msg = formatFirebaseAuthError(err, 'email');
+      if (msg) setAuthError(msg);
+    } finally {
+      setAuthLoading(false);
+    }
+  }, []);
+
+  const refreshEmailVerification = useCallback(async () => {
+    if (!auth?.currentUser) return;
+    setAuthError(null);
+    setAuthNotice(null);
+    setAuthLoading(true);
+    try {
+      await auth.currentUser.reload();
+      await auth.currentUser.getIdToken(true);
+      setUser(auth.currentUser);
+      if (auth.currentUser.emailVerified) {
+        setAuthNotice('Email verified! Cloud sync is now active.');
+        setIsAuthModalOpen(false);
+      } else {
+        setAuthError('Email is not verified yet. Please click the link sent to your email first.');
+      }
+    } catch (err) {
+      const msg = formatFirebaseAuthError(err, 'email');
+      if (msg) setAuthError(msg);
+    } finally {
+      setAuthLoading(false);
+    }
+  }, []);
+
+  const sendPasswordReset = useCallback(async (email: string) => {
+    if (!auth) {
+      setAuthError('Firebase is not configured.');
+      return;
+    }
+    const trimmedEmail = email.trim();
+    if (!trimmedEmail) {
+      setAuthError('Enter your email address first to reset your password.');
+      return;
+    }
+    setAuthError(null);
+    setAuthNotice(null);
+    setAuthLoading(true);
+    try {
+      await sendPasswordResetEmail(auth, trimmedEmail);
+      setAuthNotice('Password reset email sent. Check your inbox.');
+    } catch (err) {
+      const msg = formatFirebaseAuthError(err, 'email');
+      if (msg) setAuthError(msg);
+    } finally {
+      setAuthLoading(false);
     }
   }, []);
 
@@ -488,6 +741,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (auth && user) {
       await firebaseSignOut(auth);
       setIsAdmin(false);
+    }
+    if (Capacitor.isNativePlatform()) {
+      await SocialLogin.logout({ provider: 'google' }).catch(() => {});
     }
   }, [user]);
 
@@ -521,7 +777,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const coverImage = (anime.coverImage?.large || anime.coverImage?.extraLarge || '').slice(0, 500);
       const exists = watchlist.some((w) => w.animeId === anime.id);
 
-      if (user && db) {
+      if (user && user.emailVerified && db) {
         const path = `users/${user.uid}/watchlist/${anime.id}`;
         try {
           if (exists) {
@@ -580,7 +836,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const coverImage = (anime.coverImage?.large || anime.coverImage?.extraLarge || '').slice(0, 500);
       const exists = favorites.some((f) => f.animeId === anime.id);
 
-      if (user && db) {
+      if (user && user.emailVerified && db) {
         const path = `users/${user.uid}/favorites/${anime.id}`;
         try {
           if (exists) {
@@ -643,7 +899,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const safeProgress = Math.max(0, Math.floor(item.progressSeconds || 0));
       const safeDuration = Math.max(0, Math.floor(item.durationSeconds || 0));
 
-      if (user && db) {
+      if (user && user.emailVerified && db) {
         const path = `users/${user.uid}/history/${item.animeId}`;
         try {
           const payload: Record<string, unknown> = {
@@ -696,7 +952,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const removeHistoryItem = useCallback(
     async (animeId: number) => {
-      if (user && db) {
+      if (user && user.emailVerified && db) {
         const path = `users/${user.uid}/history/${animeId}`;
         try {
           await deleteDoc(doc(db, path));
@@ -715,7 +971,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   );
 
   const clearHistory = useCallback(async () => {
-    if (user && db) {
+    if (user && user.emailVerified && db) {
       if (cloudHistory.length === 0) return;
       const path = `users/${user.uid}/history`;
       try {
@@ -739,7 +995,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         applyTheme(patch.theme);
       }
 
-      if (user && db) {
+      if (user && user.emailVerified && db) {
         const path = `users/${user.uid}`;
         try {
           const updatePayload: Record<string, unknown> = {
@@ -778,10 +1034,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const recordWatchCompletion = useCallback(
     async (animeId: number, episodeNumber: number) => {
-      const activeStats = user ? cloudWatchStats : guestState.watchStats;
+      const activeStats = user && user.emailVerified ? cloudWatchStats : guestState.watchStats;
       const res = recordEpisodeCompletionLocally(animeId, episodeNumber, activeStats);
 
-      if (user && db) {
+      if (user && user.emailVerified && db) {
         setCloudWatchStats(res.stats);
         const path = `users/${user.uid}`;
         try {
@@ -812,7 +1068,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     [user, cloudWatchStats, guestState.watchStats, updateGuest]
   );
 
-  const activeWatchStats = user ? cloudWatchStats : guestState.watchStats;
+  const hasVerifiedCloudSession = Boolean(user && user.emailVerified);
+  const activePreferences = hasVerifiedCloudSession ? cloudPrefs : guestState.preferences;
+  const activeWatchlist = hasVerifiedCloudSession ? cloudWatchlist : guestState.watchlist;
+  const activeFavorites = hasVerifiedCloudSession ? cloudFavorites : guestState.favorites;
+  const activeHistory = hasVerifiedCloudSession ? cloudHistory : guestState.history;
+  const activeWatchStats = hasVerifiedCloudSession ? cloudWatchStats : guestState.watchStats;
 
   return (
     <AuthContext.Provider
@@ -823,16 +1084,24 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         isAdmin,
         firebaseEnabled: isFirebaseConfigured,
         getIdToken,
-        preferences,
+        preferences: activePreferences,
         watchStats: activeWatchStats,
-        watchlist,
-        favorites,
-        history,
+        watchlist: activeWatchlist,
+        favorites: activeFavorites,
+        history: activeHistory,
         isAuthModalOpen,
         authError,
+        authNotice,
+        authLoading,
+        clearAuthMessages,
         openAuthModal: () => setIsAuthModalOpen(true),
         closeAuthModal: () => setIsAuthModalOpen(false),
         signInWithGoogle,
+        signInWithEmail,
+        registerWithEmail,
+        resendVerificationEmail,
+        refreshEmailVerification,
+        sendPasswordReset,
         signOut,
         isInWatchlist,
         isFavorite,

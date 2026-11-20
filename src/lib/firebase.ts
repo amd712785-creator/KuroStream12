@@ -1,6 +1,7 @@
 import { initializeApp, type FirebaseApp } from 'firebase/app';
 import {
   browserLocalPersistence,
+  browserPopupRedirectResolver,
   getAuth,
   GoogleAuthProvider,
   indexedDBLocalPersistence,
@@ -41,6 +42,11 @@ let auth: Auth | null = null;
 let db: Firestore | null = null;
 let googleProvider: GoogleAuthProvider | null = null;
 
+export const firebaseOAuthClientId =
+  typeof (firebaseConfig as { oAuthClientId?: unknown }).oAuthClientId === 'string'
+    ? (firebaseConfig as { oAuthClientId: string }).oAuthClientId
+    : '';
+
 export const isFirebaseConfigured = Boolean(
   firebaseConfig &&
     firebaseConfig.apiKey &&
@@ -54,6 +60,7 @@ if (isFirebaseConfigured) {
   try {
     auth = initializeAuth(app, {
       persistence: [indexedDBLocalPersistence, browserLocalPersistence],
+      popupRedirectResolver: browserPopupRedirectResolver,
     });
   } catch {
     auth = getAuth(app);
