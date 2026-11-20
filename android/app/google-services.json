@@ -1,0 +1,40 @@
+{
+  "project_info": {
+    "project_number": "688759717327",
+    "firebase_url": "https://gujhhgg-9de27-default-rtdb.firebaseio.com",
+    "project_id": "gujhhgg-9de27",
+    "storage_bucket": "gujhhgg-9de27.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:688759717327:android:cbb78ff0c32136f5dce6ba",
+        "android_client_info": {
+          "package_name": "com.kurostream.app"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "688759717327-ofmcji3oihansg8brpotjqmd7f885c5e.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBLIP4K-mIjlxhbPjZaMMT49Xk4_wx-mug"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "688759717327-ofmcji3oihansg8brpotjqmd7f885c5e.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
