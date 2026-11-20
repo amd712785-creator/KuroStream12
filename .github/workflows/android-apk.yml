@@ -52,17 +52,6 @@ jobs:
       - name: Install dependencies
         run: npm install --legacy-peer-deps --no-audit --no-fund
 
-      - name: Run TypeScript check
-        run: npm run lint
-
-      - name: Build production web bundle
-        env:
-          VITE_BACKEND_API_URL: ${{ github.event.inputs.backend_api_url || vars.VITE_BACKEND_API_URL || 'https://animeworldbd.vercel.app' }}
-        run: npm run build
-
-      - name: Sync Capacitor Android project
-        run: npx cap sync android
-
       - name: Ensure uploaded google-services.json is present in android/app
         run: |
           if [ ! -f android/app/google-services.json ]; then
@@ -85,32 +74,46 @@ jobs:
             node -e "
               const fs = require('fs');
               const gs = JSON.parse(fs.readFileSync('android/app/google-services.json', 'utf8'));
-              const client = gs.client?.[0];
+              const client = gs.client?.find((c) => c.client_info?.android_client_info?.package_name === 'com.kurostream.app') || gs.client?.[0];
               const pkg = client?.client_info?.android_client_info?.package_name;
               if (pkg !== 'com.kurostream.app') {
                 console.error('Invalid package_name:', pkg);
                 process.exit(1);
               }
+              const apiKey = client?.api_key?.[0]?.current_key;
+              const appId = client?.client_info?.mobilesdk_app_id;
+              if (!gs.project_info?.project_id || !apiKey || !appId) {
+                console.error('Missing project_id, api_key, or mobilesdk_app_id in google-services.json');
+                process.exit(1);
+              }
               const oauthClients = Array.isArray(client?.oauth_client) ? client.oauth_client : [];
               const androidClients = oauthClients.filter((c) => c.client_type === 1);
               const webClients = oauthClients.filter((c) => c.client_type === 3);
-              console.log('Verified package_name:', pkg, 'google-services project_id:', gs.project_info?.project_id);
+              console.log('Android APK Firebase project_id:', gs.project_info?.project_id, 'mobilesdk_app_id:', appId, 'package_name:', pkg);
               console.log('google-services oauth_client counts -> Android(type=1):', androidClients.length, 'Web(type=3):', webClients.length);
               if (androidClients.length === 0) {
-                console.log('::warning::android/app/google-services.json has 0 Android OAuth clients (client_type=1). Add your APK SHA-1 and SHA-256 in Firebase Console and re-download google-services.json.');
+                console.log('::warning::android/app/google-services.json has 0 Android OAuth clients (client_type=1). Add your APK SHA-1 and SHA-256 in Firebase Console for project ' + gs.project_info?.project_id + ' and re-download google-services.json for Google Sign-In.');
               }
               if (fs.existsSync('firebase-applet-config.json')) {
                 const webCfg = JSON.parse(fs.readFileSync('firebase-applet-config.json', 'utf8'));
-                console.log('firebase-applet-config projectId:', webCfg.projectId, 'oAuthClientId:', webCfg.oAuthClientId || '(unset)');
-                if (gs.project_info?.project_id !== webCfg.projectId) {
-                  console.log('::warning::Project mismatch: google-services.json project_id (' + gs.project_info?.project_id + ') != firebase-applet-config.json projectId (' + webCfg.projectId + '). Android Credential Manager requires an Android OAuth client (package + APK SHA-1) in the SAME project as webClientId (' + webCfg.oAuthClientId + ').');
-                }
+                console.log('Website Firebase projectId:', webCfg.projectId, '(used only for Web runtime; APK runtime uses google-services.json project_id:', gs.project_info?.project_id + ')');
               }
             "
           else
             echo "Error: google-services.json missing in android/app/"
             exit 1
           fi
+
+      - name: Run TypeScript check
+        run: npm run lint
+
+      - name: Build production web bundle
+        env:
+          VITE_BACKEND_API_URL: ${{ github.event.inputs.backend_api_url || vars.VITE_BACKEND_API_URL || 'https://animeworldbd.vercel.app' }}
+        run: npm run build
+
+      - name: Sync Capacitor Android project
+        run: npx cap sync android
 
       - name: Configure Android debug keystore
         env:

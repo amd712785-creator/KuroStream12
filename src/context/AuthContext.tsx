@@ -34,6 +34,7 @@ import { ASSETS } from '@/src/config/env';
 import {
   auth,
   db,
+  firebaseDiagnostics,
   firebaseOAuthClientId,
   googleProvider,
   handleFirestoreError,
@@ -149,6 +150,7 @@ async function ensureNativeSocialLoginInitialized(): Promise<void> {
 function formatFirebaseAuthError(err: unknown, context: 'google' | 'email'): string {
   const code = (err as { code?: string } | null)?.code || '';
   const rawMessage = err instanceof Error ? err.message : String(err || 'Authentication failed.');
+  const activeProject = auth?.app?.options?.projectId || firebaseDiagnostics.projectId || 'unknown';
 
   switch (code) {
     case 'auth/invalid-credential':
@@ -167,8 +169,8 @@ function formatFirebaseAuthError(err: unknown, context: 'google' | 'email'): str
       return 'Too many attempts. Please wait a moment before trying again.';
     case 'auth/operation-not-allowed':
       return context === 'google'
-        ? 'Google Sign-In provider is not enabled in Firebase Authentication Console.'
-        : 'Email/Password sign-in is not enabled in Firebase Authentication Console yet.';
+        ? `Firebase project "${activeProject}" returned auth/operation-not-allowed for Google Sign-In.`
+        : `Firebase project "${activeProject}" returned auth/operation-not-allowed for Email/Password sign-in.`;
     case 'auth/network-request-failed':
       return 'Network error while contacting Firebase Authentication. Check your internet connection and try again.';
     case 'auth/account-exists-with-different-credential':
@@ -302,6 +304,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
 
     const unsub = onAuthStateChanged(auth, async (firebaseUser) => {
+      console.info('[KuroStream Auth State]', {
+        projectId: auth?.app?.options?.projectId || firebaseDiagnostics.projectId,
+        authInitStatus: firebaseDiagnostics.authInitStatus,
+        signedIn: Boolean(firebaseUser),
+        emailVerified: Boolean(firebaseUser?.emailVerified),
+        providers: firebaseUser?.providerData?.map((p) => p.providerId) || [],
+      });
       setUser(firebaseUser);
       setAuthReady(true);
 
@@ -629,9 +638,19 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setAuthError(null);
     setAuthNotice(null);
     setAuthLoading(true);
+    const projectId = auth.app.options.projectId || firebaseDiagnostics.projectId;
+    console.info('[KuroStream Auth] Attempting Email/Password sign-in', {
+      projectId,
+      runtime: firebaseDiagnostics.runtime,
+      authInitStatus: firebaseDiagnostics.authInitStatus,
+    });
     try {
       const cred = await signInWithEmailAndPassword(auth, trimmedEmail, password);
       await cred.user.reload().catch(() => {});
+      console.info('[KuroStream Auth] Email/Password sign-in succeeded', {
+        projectId,
+        emailVerified: cred.user.emailVerified,
+      });
       if (cred.user.emailVerified) {
         setIsAuthModalOpen(false);
       } else {
@@ -640,6 +659,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         );
       }
     } catch (err) {
+      const code = (err as { code?: string } | null)?.code || 'unknown';
+      console.warn('[KuroStream Auth] Email/Password sign-in error', {
+        projectId,
+        code,
+      });
       const msg = formatFirebaseAuthError(err, 'email');
       if (msg) setAuthError(msg);
     } finally {
@@ -662,6 +686,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setAuthError(null);
       setAuthNotice(null);
       setAuthLoading(true);
+      const projectId = auth.app.options.projectId || firebaseDiagnostics.projectId;
+      console.info('[KuroStream Auth] Attempting Email/Password registration', {
+        projectId,
+        runtime: firebaseDiagnostics.runtime,
+      });
       try {
         const cred = await createUserWithEmailAndPassword(auth, trimmedEmail, password);
         if (trimmedName) {
@@ -670,10 +699,19 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           }).catch(() => {});
         }
         await sendEmailVerification(cred.user).catch(() => {});
+        console.info('[KuroStream Auth] Email/Password registration succeeded', {
+          projectId,
+          emailVerified: cred.user.emailVerified,
+        });
         setAuthNotice(
           'Account created! A verification link has been sent to your email. Verify your email to activate Firestore cloud sync.'
         );
       } catch (err) {
+        const code = (err as { code?: string } | null)?.code || 'unknown';
+        console.warn('[KuroStream Auth] Email/Password registration error', {
+          projectId,
+          code,
+        });
         const msg = formatFirebaseAuthError(err, 'email');
         if (msg) setAuthError(msg);
       } finally {
