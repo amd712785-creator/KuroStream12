@@ -63,10 +63,26 @@ jobs:
       - name: Sync Capacitor Android project
         run: npx cap sync android
 
+      - name: Ensure uploaded google-services.json is present in android/app
+        run: |
+          if [ ! -f android/app/google-services.json ]; then
+            if [ -f public/assets/aistudio/google-services_48e0edfe.json ]; then
+              cp public/assets/aistudio/google-services_48e0edfe.json android/app/google-services.json
+              echo "Copied uploaded google-services.json from public/assets/aistudio/google-services_48e0edfe.json to android/app/google-services.json"
+            else
+              FOUND_GS=$(find public -maxdepth 4 -name "google-services*.json" -type f | head -n 1)
+              if [ -n "$FOUND_GS" ]; then
+                cp "$FOUND_GS" android/app/google-services.json
+                echo "Copied uploaded google-services.json from $FOUND_GS to android/app/google-services.json"
+              fi
+            fi
+          fi
+
       - name: Verify google-services.json for Firebase Android
         run: |
           if [ -f android/app/google-services.json ]; then
             echo "google-services.json found successfully."
+            node -e "const d = JSON.parse(require('fs').readFileSync('android/app/google-services.json', 'utf8')); const pkg = d.client?.[0]?.client_info?.android_client_info?.package_name; if (pkg !== 'com.kurostream.app') { console.error('Invalid package_name:', pkg); process.exit(1); } console.log('Verified package_name:', pkg, 'project_id:', d.project_info?.project_id);"
           else
             echo "Error: google-services.json missing in android/app/"
             exit 1
