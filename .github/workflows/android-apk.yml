@@ -112,27 +112,79 @@ jobs:
             exit 1
           fi
 
-      - name: Configure deterministic Android debug keystore
+      - name: Configure Android debug keystore
         env:
           ANDROID_DEBUG_KEYSTORE_BASE64: ${{ secrets.ANDROID_DEBUG_KEYSTORE_BASE64 }}
+          ANDROID_DEBUG_STORE_PASSWORD: ${{ secrets.ANDROID_DEBUG_STORE_PASSWORD }}
+          ANDROID_DEBUG_KEY_PASSWORD: ${{ secrets.ANDROID_DEBUG_KEY_PASSWORD }}
+          ANDROID_DEBUG_KEY_ALIAS: ${{ secrets.ANDROID_DEBUG_KEY_ALIAS }}
         run: |
-          if [ -n "$ANDROID_DEBUG_KEYSTORE_BASE64" ]; then
-            echo "$ANDROID_DEBUG_KEYSTORE_BASE64" | base64 -d > android/app/debug.keystore
-            echo "Restored android/app/debug.keystore from ANDROID_DEBUG_KEYSTORE_BASE64 secret."
+          set -euo pipefail
+          KEYSTORE_PATH="android/app/debug.keystore"
+          KEY_ALIAS="${ANDROID_DEBUG_KEY_ALIAS:-androiddebugkey}"
+          export DEBUG_STORE_PASS="${ANDROID_DEBUG_STORE_PASSWORD:-android}"
+          export DEBUG_KEY_PASS="${ANDROID_DEBUG_KEY_PASSWORD:-$DEBUG_STORE_PASS}"
+
+          mkdir -p "$(dirname "$KEYSTORE_PATH")"
+
+          STRIPPED_B64=$(printf '%s' "${ANDROID_DEBUG_KEYSTORE_BASE64:-}" | tr -d '[:space:]')
+          if [ -n "$STRIPPED_B64" ]; then
+            printf '%s' "$STRIPPED_B64" | base64 -d > "$KEYSTORE_PATH"
+            if [ ! -f "$KEYSTORE_PATH" ] || [ ! -s "$KEYSTORE_PATH" ]; then
+              echo "Error: Decoded keystore file $KEYSTORE_PATH is missing or empty."
+              exit 1
+            fi
+            echo "Restored $KEYSTORE_PATH from ANDROID_DEBUG_KEYSTORE_BASE64 secret."
+          elif [ -f "$KEYSTORE_PATH" ] && [ -s "$KEYSTORE_PATH" ]; then
+            echo "Using existing repository $KEYSTORE_PATH."
           else
-            echo "Using repository android/app/debug.keystore."
+            echo "No ANDROID_DEBUG_KEYSTORE_BASE64 secret or repository keystore found; generating debug keystore at $KEYSTORE_PATH."
+            keytool -genkeypair \
+              -keystore "$KEYSTORE_PATH" \
+              -storetype PKCS12 \
+              -storepass:env DEBUG_STORE_PASS \
+              -alias "$KEY_ALIAS" \
+              -keypass:env DEBUG_KEY_PASS \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
           fi
-          keytool -list -v -keystore android/app/debug.keystore -alias androiddebugkey -storepass android
+
+          if [ ! -f "$KEYSTORE_PATH" ] || [ ! -s "$KEYSTORE_PATH" ]; then
+            echo "Error: Keystore file does not exist or is empty: $KEYSTORE_PATH"
+            exit 1
+          fi
+
+          echo "Verifying $KEYSTORE_PATH with keytool -list..."
+          keytool -list -v -keystore "$KEYSTORE_PATH" -alias "$KEY_ALIAS" -storepass:env DEBUG_STORE_PASS
 
       - name: Build Android Debug APK
         working-directory: android
+        env:
+          ANDROID_DEBUG_KEYSTORE_PATH: ${{ github.workspace }}/android/app/debug.keystore
+          ANDROID_DEBUG_STORE_PASSWORD: ${{ secrets.ANDROID_DEBUG_STORE_PASSWORD }}
+          ANDROID_DEBUG_KEY_PASSWORD: ${{ secrets.ANDROID_DEBUG_KEY_PASSWORD }}
+          ANDROID_DEBUG_KEY_ALIAS: ${{ secrets.ANDROID_DEBUG_KEY_ALIAS }}
         run: |
+          set -euo pipefail
           chmod +x gradlew
+          if [ ! -f app/debug.keystore ] || [ ! -s app/debug.keystore ]; then
+            echo "Error: android/app/debug.keystore is missing or empty before Gradle build."
+            exit 1
+          fi
           ./gradlew assembleDebug --no-daemon
 
       - name: Print APK Signing SHA-1 / SHA-256 Fingerprints
         run: |
-          keytool -printcert -jarfile android/app/build/outputs/apk/debug/app-debug.apk
+          set -euo pipefail
+          APK_PATH="android/app/build/outputs/apk/debug/app-debug.apk"
+          if [ ! -f "$APK_PATH" ] || [ ! -s "$APK_PATH" ]; then
+            echo "Error: Generated APK not found at $APK_PATH"
+            exit 1
+          fi
+          ls -lh "$APK_PATH"
+          keytool -printcert -jarfile "$APK_PATH"
 
       - name: Upload KuroStream Debug APK Artifact
         uses: actions/upload-artifact@v4
@@ -141,3 +193,4 @@ jobs:
           path: android/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 30
+
