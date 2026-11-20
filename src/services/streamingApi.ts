@@ -1,4 +1,5 @@
 import {
+  getConsumetApiBase,
   getDefaultStreamingApiBase,
   getStreamingApiBase,
   logApiDiagnostic,
@@ -54,19 +55,30 @@ function classifyStreamType(
   explicitType?: unknown
 ): 'hls' | 'mp4' | 'embed' {
   if (explicitType === 'embed') return 'embed';
+  if (explicitType === 'mp4') return 'mp4';
   const lower = url.toLowerCase();
-  if (explicitM3u8 || lower.includes('.m3u8')) return 'hls';
-  if (/\.(mp4|webm)(\?|$)/i.test(lower)) return 'mp4';
+  let inspectUrl = lower;
+  if (lower.includes('/api/anime/proxy') && lower.includes('url=')) {
+    try {
+      const parsed = new URL(url, 'https://localhost');
+      const inner = parsed.searchParams.get('url');
+      if (inner) inspectUrl = inner.toLowerCase();
+    } catch {
+      // keep outer URL
+    }
+  }
+  if (explicitM3u8 || inspectUrl.includes('.m3u8') || inspectUrl.includes('/master.txt')) return 'hls';
+  if (/\.(mp4|webm|mkv)(\?|$)/i.test(inspectUrl)) return 'mp4';
   if (
-    lower.includes('embed') ||
-    lower.includes('iframe') ||
-    lower.includes('/e/') ||
-    lower.includes('abyssplayer') ||
-    lower.includes('ravok') ||
-    lower.includes('short.icu') ||
-    lower.includes('megaplay') ||
-    lower.includes('multi-lang-plyr') ||
-    lower.includes('/video/')
+    inspectUrl.includes('embed') ||
+    inspectUrl.includes('iframe') ||
+    inspectUrl.includes('/e/') ||
+    inspectUrl.includes('abyssplayer') ||
+    inspectUrl.includes('ravok') ||
+    inspectUrl.includes('short.icu') ||
+    inspectUrl.includes('megaplay') ||
+    inspectUrl.includes('multi-lang-plyr') ||
+    inspectUrl.includes('/video/')
   ) {
     return 'embed';
   }
@@ -165,13 +177,19 @@ export function parseWatchResponse(payload: unknown): ParsedStreamResult {
     const t = sub as Record<string, unknown>;
     const rawUrl = typeof t.url === 'string' ? t.url : typeof t.file === 'string' ? t.file : '';
     if (!rawUrl) continue;
-    const url = rawUrl.startsWith('/') ? resolveApiUrl(rawUrl) : normalizeTrackUrl(rawUrl);
     const lang =
       typeof t.lang === 'string'
         ? t.lang
         : typeof t.label === 'string'
           ? t.label
           : 'Subtitles';
+    if (
+      lang.trim().toLowerCase() === 'thumbnails' ||
+      rawUrl.toLowerCase().includes('thumbnails.vtt')
+    ) {
+      continue;
+    }
+    const url = rawUrl.startsWith('/') ? resolveApiUrl(rawUrl) : normalizeTrackUrl(rawUrl);
     subtitles.push({
       url,
       lang,
@@ -495,7 +513,7 @@ export async function fetchEpisodeServers(episodeId: string): Promise<StreamServ
         }
         return null;
       })
-      .filter((x): x is StreamServer => Boolean(x));
+      .filter((x): x is StreamServer => Boolean(x && !x.name.toLowerCase().includes('animeworld')));
   } catch {
     return [];
   }
@@ -527,8 +545,13 @@ export async function fetchEpisodeStream(
   if (options?.anilistId) params.set('anilistId', String(options.anilistId));
   if (options?.malId) params.set('malId', String(options.malId));
   if (options?.episodeNumber) params.set('ep', String(options.episodeNumber));
-  const customBase = getCustomBaseParam();
-  if (customBase) params.set('base', customBase);
+  if (options?.server?.toLowerCase() === 'munchyroll') {
+    const consumetBase = getConsumetApiBase();
+    if (consumetBase) params.set('consumetBase', consumetBase);
+  } else {
+    const customBase = getCustomBaseParam();
+    if (customBase) params.set('base', customBase);
+  }
 
   const queryStr = params.toString();
   const endpointUrl = `/api/anime/watch/${encodeURIComponent(cleanEpisodeId)}${
@@ -536,18 +559,40 @@ export async function fetchEpisodeStream(
   }`;
   const resolvedUrl = resolveApiUrl(endpointUrl);
 
+  const normalizeStreamError = (errObj: StreamFetchError): StreamFetchError => {
+    if (
+      /couldn't find this episode/i.test(errObj.message) ||
+      /may not exist/i.test(errObj.message)
+    ) {
+      const serverName = options?.server || 'this server';
+      const langLabel =
+        options?.category === 'dub'
+          ? 'English (DUB)'
+          : options?.category === 'hindi'
+            ? 'Hindi (DUB)'
+            : 'Japanese (SUB)';
+      return {
+        ...errObj,
+        message: `${langLabel} stream is currently unavailable on ${serverName} for this episode. Try another server or switch audio language.`,
+      };
+    }
+    return errObj;
+  };
+
   try {
-    const response = await fetchApiWithTimeout(resolvedUrl, 15000);
+    const response = await fetchApiWithTimeout(resolvedUrl, 22000);
 
     const parsedResp = await parseSafeJsonResponse<Record<string, unknown>>(response);
     const json = parsedResp.data;
 
     if (!parsedResp.ok) {
-      const errObj = extractErrorDetails(
-        json || parsedResp.rawText,
-        resolvedUrl,
-        parsedResp.status,
-        `Streaming server returned HTTP ${parsedResp.status}.`
+      const errObj = normalizeStreamError(
+        extractErrorDetails(
+          json || parsedResp.rawText,
+          resolvedUrl,
+          parsedResp.status,
+          `Streaming server returned HTTP ${parsedResp.status}.`
+        )
       );
       logApiDiagnostic('WatchStream', resolvedUrl, {
         status: parsedResp.status,
@@ -560,11 +605,13 @@ export async function fetchEpisodeStream(
     const validSources = parsed.sources.filter((s) => isPlayableStreamUrl(s.url));
 
     if (validSources.length === 0) {
-      const errObj = extractErrorDetails(
-        json || parsedResp.rawText,
-        resolvedUrl,
-        parsedResp.status,
-        'The streaming provider returned no playable stream sources for this episode.'
+      const errObj = normalizeStreamError(
+        extractErrorDetails(
+          json || parsedResp.rawText,
+          resolvedUrl,
+          parsedResp.status,
+          'The streaming provider returned no playable stream sources for this episode.'
+        )
       );
       logApiDiagnostic('WatchStream', resolvedUrl, {
         status: parsedResp.status,
@@ -582,7 +629,7 @@ export async function fetchEpisodeStream(
   } catch (err) {
     const isTimeout = err instanceof Error && err.name === 'AbortError';
     const extracted = extractErrorDetails(
-      isTimeout ? 'Streaming backend request timed out after 15 seconds.' : err,
+      isTimeout ? 'Streaming backend request timed out after 22 seconds.' : err,
       resolvedUrl,
       undefined,
       'Network error while contacting streaming backend.'

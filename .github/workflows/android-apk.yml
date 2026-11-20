@@ -112,35 +112,17 @@ jobs:
             exit 1
           fi
 
-      - name: Restore cached debug keystore for stable SHA-1/SHA-256
-        id: cache-debug-keystore
-        uses: actions/cache@v4
-        with:
-          path: ~/.android/debug.keystore
-          key: kurostream-android-debug-keystore-v1
-
-      - name: Ensure persistent Android debug keystore
+      - name: Configure deterministic Android debug keystore
         env:
           ANDROID_DEBUG_KEYSTORE_BASE64: ${{ secrets.ANDROID_DEBUG_KEYSTORE_BASE64 }}
         run: |
-          mkdir -p ~/.android
           if [ -n "$ANDROID_DEBUG_KEYSTORE_BASE64" ]; then
-            echo "$ANDROID_DEBUG_KEYSTORE_BASE64" | base64 -d > ~/.android/debug.keystore
-            echo "Restored debug.keystore from ANDROID_DEBUG_KEYSTORE_BASE64 secret."
-          elif [ ! -f ~/.android/debug.keystore ]; then
-            keytool -genkeypair -v \
-              -keystore ~/.android/debug.keystore \
-              -storepass android \
-              -alias androiddebugkey \
-              -keypass android \
-              -keyalg RSA \
-              -keysize 2048 \
-              -validity 10000 \
-              -dname "CN=Android Debug,O=Android,C=US"
-            echo "Generated new persistent debug.keystore (will be cached across future runs)."
+            echo "$ANDROID_DEBUG_KEYSTORE_BASE64" | base64 -d > android/app/debug.keystore
+            echo "Restored android/app/debug.keystore from ANDROID_DEBUG_KEYSTORE_BASE64 secret."
           else
-            echo "Using cached ~/.android/debug.keystore."
+            echo "Using repository android/app/debug.keystore."
           fi
+          keytool -list -v -keystore android/app/debug.keystore -alias androiddebugkey -storepass android
 
       - name: Build Android Debug APK
         working-directory: android
@@ -150,7 +132,7 @@ jobs:
 
       - name: Print APK Signing SHA-1 / SHA-256 Fingerprints
         run: |
-          keytool -printcert -jarfile android/app/build/outputs/apk/debug/app-debug.apk || true
+          keytool -printcert -jarfile android/app/build/outputs/apk/debug/app-debug.apk
 
       - name: Upload KuroStream Debug APK Artifact
         uses: actions/upload-artifact@v4

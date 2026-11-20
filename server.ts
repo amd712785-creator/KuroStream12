@@ -443,6 +443,16 @@ const PORT = Number(process.env.PORT || 3000);
 const DEFAULT_STREAMING_API = (
   process.env.VITE_STREAMING_API_BASE || 'https://ashanime-api.vercel.app'
 ).replace(/\/+$/, '');
+const DEFAULT_MUNCHYROLL_CONSUMET_API = (
+  process.env.CONSUMET_API_URL ||
+  process.env.VITE_CONSUMET_API_URL ||
+  'https://consumet-public.vercel.app'
+).replace(/\/+$/, '');
+const MUNCHYROLL_CORS_PROXY_URL = (
+  process.env.CORS_PROXY_URL ||
+  process.env.VITE_CORS_PROXY_URL ||
+  ''
+).replace(/\/+$/, '');
 const ANILIST_API_URL = process.env.VITE_ANILIST_API_URL || 'https://graphql.anilist.co';
 const ANIYOMI_REPO_URL =
   'https://gitea.k3vinb5.dev/Backups/kohi-den-extensions/raw/branch/main/index.min.json';
@@ -471,8 +481,7 @@ const primaryUnavailableCache = new Map<
 >();
 let extensionsCache: CacheEntry<Record<string, unknown>> | null = null;
 
-const ALL_STREAM_SERVERS = [
-  { name: 'animeworld-india' },
+const SUB_DUB_STREAM_SERVERS = [
   { name: 'vidstreaming' },
   { name: 'megacloud' },
   { name: 'streamsb' },
@@ -480,7 +489,12 @@ const ALL_STREAM_SERVERS = [
   { name: 'aniwatchtv' },
   { name: 'hianime' },
   { name: 'kaido' },
+  { name: 'munchyroll' },
 ];
+
+const HINDI_STREAM_SERVERS = [{ name: 'animeworld-india' }];
+
+const ALL_STREAM_SERVERS = [...SUB_DUB_STREAM_SERVERS];
 
 interface ResolvedSource {
   url: string;
@@ -573,29 +587,58 @@ async function fetchVerifiedStreamPlaylist(
   url: string,
   referer: string,
   timeoutMs = 3500
-): Promise<{ reachable: boolean; playlistText: string }> {
+): Promise<{ reachable: boolean; playlistText: string; detectedType: 'hls' | 'mp4' | 'embed' }> {
+  const lowerUrl = url.toLowerCase();
+  const isLikelyMp4 = /\.(mp4|webm|mkv)(\?|$)/i.test(lowerUrl);
   try {
     const res = await fetchWithTimeout(
       url,
       {
         method: 'GET',
+        redirect: 'follow',
         headers: {
           Referer: referer,
           'User-Agent': BROWSER_UA,
           Accept: '*/*',
+          ...(isLikelyMp4 ? { Range: 'bytes=0-4095' } : {}),
         },
       },
       timeoutMs
     );
-    if (!res.ok) return { reachable: false, playlistText: '' };
-    const ct = (res.headers.get('content-type') || '').toLowerCase();
-    if (url.toLowerCase().includes('.m3u8') || ct.includes('mpegurl')) {
-      const text = await res.text();
-      return { reachable: text.includes('#EXTM3U'), playlistText: text };
+    if (!res.ok && res.status !== 206) {
+      return { reachable: false, playlistText: '', detectedType: isLikelyMp4 ? 'mp4' : 'hls' };
     }
-    return { reachable: true, playlistText: '' };
+    const ct = (res.headers.get('content-type') || '').toLowerCase();
+    if (ct.includes('video/mp4') || ct.includes('video/webm') || isLikelyMp4) {
+      try {
+        await res.body?.cancel();
+      } catch {
+        // ignore stream cancel error
+      }
+      return { reachable: true, playlistText: '', detectedType: 'mp4' };
+    }
+    if (
+      lowerUrl.includes('.m3u8') ||
+      lowerUrl.includes('.txt') ||
+      ct.includes('mpegurl') ||
+      ct.includes('text/plain')
+    ) {
+      const text = await res.text();
+      if (text.includes('#EXTM3U')) {
+        return { reachable: true, playlistText: text, detectedType: 'hls' };
+      }
+      if (lowerUrl.includes('.m3u8') || ct.includes('mpegurl')) {
+        return { reachable: false, playlistText: '', detectedType: 'hls' };
+      }
+    }
+    try {
+      await res.body?.cancel();
+    } catch {
+      // ignore stream cancel error
+    }
+    return { reachable: true, playlistText: '', detectedType: 'hls' };
   } catch {
-    return { reachable: false, playlistText: '' };
+    return { reachable: false, playlistText: '', detectedType: isLikelyMp4 ? 'mp4' : 'hls' };
   }
 }
 
@@ -1216,6 +1259,27 @@ function logProviderDiagnostic(
   console.info(`[ProviderDiag] provider=${provider} stage=${stage} ${safeParts}`);
 }
 
+function formatMegavidUnavailableMessage(
+  rawMessage: string | undefined,
+  serverLabel: string,
+  category: 'sub' | 'dub',
+  episodeNumber: number
+): string {
+  const langLabel = category === 'dub' ? 'English (DUB)' : 'Japanese (SUB)';
+  const altLangLabel = category === 'dub' ? 'Japanese (SUB)' : 'English (DUB)';
+  const cleaned = (rawMessage || '').trim();
+  const isGenericMissing =
+    !cleaned ||
+    /couldn't find this episode/i.test(cleaned) ||
+    /may not exist/i.test(cleaned) ||
+    /not found on provider/i.test(cleaned);
+
+  if (isGenericMissing) {
+    return `${langLabel} stream is not available on ${serverLabel} for Episode ${episodeNumber}. Try switching to another server or ${altLangLabel}.`;
+  }
+  return cleaned;
+}
+
 async function resolveFromMegavid(
   malId: number,
   episodeNumber: number,
@@ -1239,55 +1303,71 @@ async function resolveFromMegavid(
   const refererUrl = `https://megavid.buzz/mal/${malId}/${episodeNumber}/${catToUse}`;
   const baseSourceUrl = `${refererUrl}/source`;
 
-  // Map each server cleanly to its primary query & verified HLS fallback query on megavid.buzz
-  const serverLower = requestedServer.toLowerCase();
-  const candidateQueries: Array<{ qs: string; label: string }> =
+  // Map each server cleanly to its primary query & verified fallback queries on megavid.buzz
+  const serverLower = (requestedServer || 'vidstreaming').toLowerCase();
+  const displayServer =
     serverLower === 'streamsb'
-      ? [
-          { qs: 'axsv=sora', label: 'Streamsb' },
-          { qs: 'axsv=loli', label: 'Streamsb · HLS' },
-          { qs: 'noax=1', label: 'Megacloud' },
-        ]
+      ? 'Streamsb'
       : serverLower.includes('animepahe')
-        ? [
-            { qs: 'axsv=sora', label: 'AnimePahe' },
-            { qs: 'axsv=loli', label: 'AnimePahe · HLS' },
-            { qs: 'noax=1', label: 'AnimePahe · Fallback' },
-          ]
+        ? 'AnimePahe'
         : serverLower === 'megacloud'
-          ? [
-              { qs: 'axsv=nero', label: 'Megacloud' },
-              { qs: 'noax=1', label: 'Megacloud · HLS' },
-              { qs: 'axsv=loli', label: 'Megacloud · Mirror' },
-            ]
+          ? 'Megacloud'
           : serverLower.includes('aniwatch')
-            ? [
-                { qs: 'axsv=nero', label: 'AniWatchtv' },
-                { qs: 'noax=1', label: 'AniWatchtv · HLS' },
-                { qs: 'axsv=loli', label: 'AniWatchtv · Mirror' },
-              ]
+            ? 'AniWatchtv'
             : serverLower.includes('kaido')
-              ? [
-                  { qs: 'axsv=zuna', label: 'Kaido' },
-                  { qs: 'axsv=loli', label: 'Kaido · HLS' },
-                  { qs: 'noax=1', label: 'Kaido · Mirror' },
-                ]
+              ? 'Kaido'
               : serverLower.includes('hianime') || serverLower.includes('zoro')
-                ? [
-                    { qs: 'noax=1', label: 'HiAnime · HLS' },
-                    { qs: 'axsv=yuki', label: 'HiAnime' },
-                    { qs: 'axsv=loli', label: 'HiAnime · Mirror' },
-                  ]
-                : [
-                    { qs: 'noax=1', label: 'Vidstreaming' },
-                    { qs: 'axsv=loli', label: 'Vidstreaming · HLS' },
-                    { qs: 'axsv=yuki', label: 'Vidstreaming · Mirror' },
-                  ];
+                ? 'HiAnime'
+                : 'Vidstreaming';
 
-  let lastMessage =
-    catToUse === 'dub'
-      ? 'English (DUB) stream is not available for this episode.'
-      : 'Japanese (SUB) stream is not available for this episode.';
+  const primaryCandidates: Array<{ qs: string; label: string }> =
+    serverLower === 'streamsb' || serverLower.includes('animepahe')
+      ? [
+          { qs: 'axsv=sora', label: displayServer },
+          { qs: 'noax=1', label: `${displayServer} · HLS` },
+          { qs: 'axsv=loli', label: `${displayServer} · Mirror` },
+        ]
+      : serverLower === 'megacloud' || serverLower.includes('aniwatch')
+        ? [
+            { qs: 'axsv=nero', label: displayServer },
+            { qs: 'noax=1', label: `${displayServer} · HLS` },
+            { qs: 'axsv=loli', label: `${displayServer} · Mirror` },
+          ]
+        : serverLower.includes('kaido')
+          ? [
+              { qs: 'axsv=zuna', label: displayServer },
+              { qs: 'noax=1', label: `${displayServer} · HLS` },
+              { qs: 'axsv=loli', label: `${displayServer} · Mirror` },
+            ]
+          : serverLower.includes('hianime') || serverLower.includes('zoro')
+            ? [
+                { qs: 'noax=1', label: `${displayServer} · HLS` },
+                { qs: 'axsv=yuki', label: displayServer },
+                { qs: 'axsv=loli', label: `${displayServer} · Mirror` },
+              ]
+            : [
+                { qs: 'noax=1', label: displayServer },
+                { qs: 'axsv=loli', label: `${displayServer} · HLS` },
+                { qs: 'axsv=yuki', label: `${displayServer} · Mirror` },
+              ];
+
+  const fallbackPool: Array<{ qs: string; label: string }> = [
+    { qs: 'noax=1', label: `${displayServer} · HLS` },
+    { qs: 'axsv=loli', label: `${displayServer} · Mirror` },
+    { qs: 'axsv=nero', label: `${displayServer} · Alt` },
+    { qs: 'axsv=sora', label: `${displayServer} · Alt 2` },
+  ];
+
+  const seenQs = new Set<string>();
+  const candidateQueries: Array<{ qs: string; label: string }> = [];
+  for (const item of [...primaryCandidates, ...fallbackPool]) {
+    if (!seenQs.has(item.qs)) {
+      seenQs.add(item.qs);
+      candidateQueries.push(item);
+    }
+  }
+
+  let lastMessage = formatMegavidUnavailableMessage(undefined, displayServer, catToUse, episodeNumber);
   let lastStatus = 404;
 
   for (const candidate of candidateQueries) {
@@ -1303,12 +1383,12 @@ async function resolveFromMegavid(
             Accept: 'application/json',
           },
         },
-        4500
+        4000
       );
 
       if (!res.ok) {
         lastStatus = res.status;
-        lastMessage = `Upstream stream endpoint returned HTTP ${res.status}.`;
+        lastMessage = `${displayServer} upstream returned HTTP ${res.status}.`;
         logProviderDiagnostic('megavid', 'source', {
           server: requestedServer,
           candidate: candidate.qs,
@@ -1331,10 +1411,12 @@ async function resolveFromMegavid(
 
       if (data.status !== 'ok' || !data.source) {
         lastStatus = typeof data.code === 'number' ? data.code : 404;
-        lastMessage =
-          typeof data.message === 'string' && data.message.trim()
-            ? data.message.trim()
-            : 'Episode stream not found on provider.';
+        lastMessage = formatMegavidUnavailableMessage(
+          data.message,
+          displayServer,
+          catToUse,
+          episodeNumber
+        );
         logProviderDiagnostic('megavid', 'source', {
           server: requestedServer,
           candidate: candidate.qs,
@@ -1349,14 +1431,14 @@ async function resolveFromMegavid(
       const cleanSourceUrl = normalizeUrl(data.source);
       if (!isValidHttpUrl(cleanSourceUrl)) {
         lastStatus = 502;
-        lastMessage = 'Provider returned a malformed stream URL.';
+        lastMessage = `${displayServer} returned a malformed stream URL.`;
         continue;
       }
 
       const verifiedPlaylist = await fetchVerifiedStreamPlaylist(
         cleanSourceUrl,
         'https://megavid.buzz/',
-        3500
+        3000
       );
       const isReachable = verifiedPlaylist.reachable;
       let sourceHost = '';
@@ -1370,21 +1452,27 @@ async function resolveFromMegavid(
         candidate: candidate.qs,
         host: sourceHost,
         reachable: isReachable,
+        detectedType: verifiedPlaylist.detectedType,
         latencyMs: Date.now() - started,
         working: isReachable,
       });
       if (!isReachable) {
         lastStatus = 502;
-        lastMessage = `Stream CDN host (${sourceHost || 'unknown'}) is unreachable or returned invalid HLS manifest.`;
+        lastMessage = `Stream CDN host (${sourceHost || 'unknown'}) on ${displayServer} is unreachable. Try another server or retry.`;
         continue;
       }
 
+      const detectedType =
+        data.type === 'mp4' || verifiedPlaylist.detectedType === 'mp4' ? 'mp4' : 'hls';
       const sources: ResolvedSource[] = [
         {
           url: cleanSourceUrl,
-          quality: `${candidate.label} · Auto HLS`,
-          isM3U8: data.type === 'hls' || cleanSourceUrl.includes('.m3u8'),
-          type: 'hls',
+          quality:
+            detectedType === 'mp4'
+              ? `${candidate.label} · MP4`
+              : `${candidate.label} · Auto HLS`,
+          isM3U8: detectedType === 'hls',
+          type: detectedType,
         },
       ];
 
@@ -1451,7 +1539,7 @@ async function resolveFromMegavid(
         payload: {
           sources,
           subtitles,
-          servers: ALL_STREAM_SERVERS,
+          servers: SUB_DUB_STREAM_SERVERS,
           headers: { Referer: 'https://megavid.buzz/' },
           hasHindiAudio: false,
           audioLanguages: [catToUse === 'dub' ? 'English' : 'Japanese'],
@@ -1474,7 +1562,12 @@ async function resolveFromMegavid(
         },
       };
     } catch (err) {
-      lastMessage = err instanceof Error ? err.message : 'Failed to reach streaming resolver.';
+      lastMessage =
+        err instanceof Error && err.name === 'AbortError'
+          ? `${displayServer} request timed out. Try switching servers or retry.`
+          : err instanceof Error
+            ? err.message
+            : 'Failed to reach streaming resolver.';
     }
   }
 
@@ -1483,6 +1576,501 @@ async function resolveFromMegavid(
     statusCode: lastStatus,
     message: lastMessage,
   };
+}
+
+function resolveSafeConsumetBase(rawOverride?: unknown): {
+  ok: true;
+  url: string;
+} | {
+  ok: false;
+  message: string;
+} {
+  const candidate =
+    typeof rawOverride === 'string' && rawOverride.trim()
+      ? rawOverride.trim().replace(/\/+$/, '')
+      : DEFAULT_MUNCHYROLL_CONSUMET_API;
+
+  if (!candidate) {
+    return {
+      ok: false,
+      message: 'Munchyroll Consumet API URL is not configured (set CONSUMET_API_URL).',
+    };
+  }
+  try {
+    const parsed = new URL(candidate);
+    if (!['http:', 'https:'].includes(parsed.protocol) || isBlockedPrivateHost(parsed.hostname)) {
+      return {
+        ok: false,
+        message: 'Invalid or blocked Munchyroll Consumet API base URL.',
+      };
+    }
+    return { ok: true, url: candidate };
+  } catch {
+    return {
+      ok: false,
+      message: 'Malformed Munchyroll Consumet API base URL.',
+    };
+  }
+}
+
+function formatConsumetHttpError(base: string, status: number, bodyText: string, endpointUrl: string): string {
+  const vercelErr = bodyText.includes('DEPLOYMENT_DISABLED') ? 'DEPLOYMENT_DISABLED' : '';
+  if (status === 402 || vercelErr === 'DEPLOYMENT_DISABLED') {
+    return `Munchyroll Consumet backend (${base}) returned HTTP 402 (DEPLOYMENT_DISABLED). Configure CONSUMET_API_URL with a live Consumet API backend to use Munchyroll.`;
+  }
+  if (status === 451) {
+    return `Munchyroll Consumet backend (${base}) returned HTTP 451 (Unavailable For Legal Reasons).`;
+  }
+  return `Munchyroll Consumet backend returned HTTP ${status} from ${endpointUrl}${
+    bodyText ? `: ${bodyText.slice(0, 140)}` : ''
+  }`;
+}
+
+interface ConsumetEpisodeEntry {
+  id: string;
+  number: number;
+  title?: string;
+  isFiller?: boolean;
+  isDubbed?: boolean;
+}
+
+async function fetchMunchyrollConsumetEpisodes(options: {
+  consumetBase: string;
+  anilistId: number;
+  category: 'sub' | 'dub';
+}): Promise<{
+  ok: boolean;
+  statusCode: number;
+  endpointUrl: string;
+  episodes: ConsumetEpisodeEntry[];
+  providerUsed: 'zoro' | 'default';
+  message?: string;
+}> {
+  const { consumetBase, anilistId, category } = options;
+  const dubQuery = category === 'dub' ? '&dub=true' : '';
+  const zoroUrl = `${consumetBase}/meta/anilist/episodes/${encodeURIComponent(
+    String(anilistId)
+  )}?provider=zoro${dubQuery}`;
+  const defaultUrl = `${consumetBase}/meta/anilist/episodes/${encodeURIComponent(String(anilistId))}${
+    category === 'dub' ? '?dub=true' : ''
+  }`;
+  const dataFallbackUrl = `${consumetBase}/meta/anilist/data/${encodeURIComponent(
+    String(anilistId)
+  )}?provider=zoro${dubQuery}`;
+
+  const tryFetchEpisodes = async (url: string): Promise<{
+    ok: boolean;
+    status: number;
+    episodes: ConsumetEpisodeEntry[];
+    errorMsg?: string;
+  }> => {
+    const res = await fetchWithTimeout(
+      url,
+      {
+        headers: {
+          Accept: 'application/json',
+          'User-Agent': BROWSER_UA,
+        },
+      },
+      7500
+    );
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      return {
+        ok: false,
+        status: res.status,
+        episodes: [],
+        errorMsg: formatConsumetHttpError(consumetBase, res.status, text, url),
+      };
+    }
+    const json = (await res.json()) as unknown;
+    const rawList = Array.isArray(json)
+      ? json
+      : json && typeof json === 'object' && Array.isArray((json as { episodes?: unknown }).episodes)
+        ? ((json as { episodes: unknown[] }).episodes)
+        : [];
+    const parsed: ConsumetEpisodeEntry[] = rawList
+      .map((item): ConsumetEpisodeEntry | null => {
+        if (!item || typeof item !== 'object') return null;
+        const ep = item as Record<string, unknown>;
+        const id = typeof ep.id === 'string' ? ep.id.trim() : '';
+        if (!id) return null;
+        const number = typeof ep.number === 'number' ? ep.number : Number(ep.number || 0);
+        if (!Number.isFinite(number) || number <= 0) return null;
+        return {
+          id,
+          number,
+          title: typeof ep.title === 'string' ? ep.title : undefined,
+          isFiller: Boolean(ep.isFiller),
+          isDubbed: typeof ep.isDubbed === 'boolean' ? ep.isDubbed : undefined,
+        };
+      })
+      .filter((x): x is ConsumetEpisodeEntry => Boolean(x));
+
+    return { ok: true, status: res.status, episodes: parsed };
+  };
+
+  try {
+    // 1. Primary Munchyroll call: /meta/anilist/episodes/${id}?provider=zoro
+    const first = await tryFetchEpisodes(zoroUrl);
+    if (first.ok && first.episodes.length > 0) {
+      return {
+        ok: true,
+        statusCode: 200,
+        endpointUrl: zoroUrl,
+        episodes: first.episodes,
+        providerUsed: 'zoro',
+      };
+    }
+
+    // 2. If Consumet returned empty for ?provider=zoro, Munchyroll falls back to /meta/anilist/episodes/${id}
+    if (first.ok && first.episodes.length === 0) {
+      const second = await tryFetchEpisodes(defaultUrl);
+      if (second.ok && second.episodes.length > 0) {
+        return {
+          ok: true,
+          statusCode: 200,
+          endpointUrl: defaultUrl,
+          episodes: second.episodes,
+          providerUsed: 'default',
+        };
+      }
+      const third = await tryFetchEpisodes(dataFallbackUrl);
+      if (third.ok && third.episodes.length > 0) {
+        return {
+          ok: true,
+          statusCode: 200,
+          endpointUrl: dataFallbackUrl,
+          episodes: third.episodes,
+          providerUsed: 'zoro',
+        };
+      }
+      return {
+        ok: false,
+        statusCode: third.ok ? 404 : third.status,
+        endpointUrl: defaultUrl,
+        episodes: [],
+        providerUsed: 'default',
+        message:
+          third.errorMsg ||
+          `Munchyroll Consumet returned no ${category === 'dub' ? 'English (DUB)' : 'Japanese (SUB)'} episodes for AniList ID ${anilistId}.`,
+      };
+    }
+
+    return {
+      ok: false,
+      statusCode: first.status || 502,
+      endpointUrl: zoroUrl,
+      episodes: [],
+      providerUsed: 'zoro',
+      message: first.errorMsg || 'Munchyroll Consumet episode lookup failed.',
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      statusCode: err instanceof Error && err.name === 'AbortError' ? 504 : 502,
+      endpointUrl: zoroUrl,
+      episodes: [],
+      providerUsed: 'zoro',
+      message:
+        err instanceof Error
+          ? `Munchyroll Consumet request failed: ${err.message}`
+          : 'Unable to reach Munchyroll Consumet API backend.',
+    };
+  }
+}
+
+async function resolveFromMunchyroll(options: {
+  consumetBase: string;
+  anilistId: number;
+  malId?: number;
+  episodeId: string;
+  episodeNumber: number;
+  category: 'sub' | 'dub' | 'hindi';
+}): Promise<{
+  ok: boolean;
+  statusCode: number;
+  endpointUrl: string;
+  message?: string;
+  payload?: Record<string, unknown>;
+}> {
+  const { consumetBase, anilistId, malId, episodeId, episodeNumber, category } = options;
+
+  if (category === 'hindi') {
+    return {
+      ok: false,
+      statusCode: 404,
+      endpointUrl: `${consumetBase}/meta/anilist/watch`,
+      message:
+        'Hindi (DUB) audio track is not available on Munchyroll. Munchyroll serves Japanese (SUB) and English (DUB) streams via Consumet (Zoro / Gogoanime); switch to AnimeWorld-India for Hindi DUB.',
+    };
+  }
+
+  let consumetEpisodeId = '';
+  let resolvedEndpointUrl = '';
+
+  // Use incoming ID directly only if it is already a Consumet Zoro ID (contains "$") or Gogoanime slug
+  const trimmedIncoming = (episodeId || '').trim();
+  const isNativeConsumetZoroId =
+    trimmedIncoming.includes('$episode$') &&
+    (category === 'sub' ? !trimmedIncoming.includes('$dub') : trimmedIncoming.includes('$dub') || trimmedIncoming.includes('$both'));
+
+  if (isNativeConsumetZoroId) {
+    consumetEpisodeId = trimmedIncoming;
+  } else if (anilistId > 0) {
+    const epLookup = await fetchMunchyrollConsumetEpisodes({
+      consumetBase,
+      anilistId,
+      category,
+    });
+    resolvedEndpointUrl = epLookup.endpointUrl;
+    if (!epLookup.ok) {
+      return {
+        ok: false,
+        statusCode: epLookup.statusCode,
+        endpointUrl: epLookup.endpointUrl,
+        message: epLookup.message || 'Munchyroll Consumet episode lookup failed.',
+      };
+    }
+
+    const matchedEp =
+      epLookup.episodes.find((ep) => ep.number === episodeNumber) ||
+      (epLookup.episodes.length === 1 && episodeNumber === 1 ? epLookup.episodes[0] : undefined);
+
+    if (!matchedEp) {
+      return {
+        ok: false,
+        statusCode: 404,
+        endpointUrl: epLookup.endpointUrl,
+        message: `Episode ${episodeNumber} (${category === 'dub' ? 'English DUB' : 'Japanese SUB'}) was not found on Munchyroll Consumet.`,
+      };
+    }
+    if (category === 'dub' && matchedEp.isDubbed === false) {
+      return {
+        ok: false,
+        statusCode: 404,
+        endpointUrl: epLookup.endpointUrl,
+        message: `English (DUB) audio is not available for Episode ${episodeNumber} on Munchyroll.`,
+      };
+    }
+    consumetEpisodeId = matchedEp.id;
+  } else {
+    return {
+      ok: false,
+      statusCode: 400,
+      endpointUrl: `${consumetBase}/meta/anilist/watch`,
+      message: 'Missing AniList ID for Munchyroll Consumet episode resolution.',
+    };
+  }
+
+  // Exact Munchyroll provider switch from VideoPlayer.jsx: "$" -> zoro, else gogoanime
+  const watchProvider: 'zoro' | 'gogoanime' = consumetEpisodeId.includes('$') ? 'zoro' : 'gogoanime';
+  const watchUrl = `${consumetBase}/meta/anilist/watch/${encodeURIComponent(
+    consumetEpisodeId
+  )}?provider=${watchProvider}`;
+  resolvedEndpointUrl = watchUrl;
+
+  try {
+    const watchRes = await fetchWithTimeout(
+      watchUrl,
+      {
+        headers: {
+          Accept: 'application/json',
+          'User-Agent': BROWSER_UA,
+        },
+      },
+      9000
+    );
+
+    if (!watchRes.ok) {
+      const bodyText = await watchRes.text().catch(() => '');
+      return {
+        ok: false,
+        statusCode: watchRes.status,
+        endpointUrl: watchUrl,
+        message: formatConsumetHttpError(consumetBase, watchRes.status, bodyText, watchUrl),
+      };
+    }
+
+    const data = (await watchRes.json()) as {
+      headers?: Record<string, string>;
+      sources?: Array<{ url?: string; quality?: string; isM3U8?: boolean }>;
+      subtitles?: Array<{ url?: string; lang?: string }>;
+      intro?: { start?: number; end?: number };
+      outro?: { start?: number; end?: number };
+      download?: string;
+    };
+
+    const rawSources = Array.isArray(data.sources) ? data.sources : [];
+    const parsedSources: ResolvedSource[] = [];
+    for (const src of rawSources) {
+      if (!src || typeof src.url !== 'string') continue;
+      const cleanUrl = normalizeUrl(src.url);
+      if (!isValidHttpUrl(cleanUrl)) continue;
+      const isM3U8 = Boolean(src.isM3U8 ?? cleanUrl.toLowerCase().includes('.m3u8'));
+      const quality =
+        typeof src.quality === 'string' && src.quality.trim()
+          ? src.quality.trim()
+          : isM3U8
+            ? 'Auto HLS'
+            : 'Default';
+      parsedSources.push({
+        url: MUNCHYROLL_CORS_PROXY_URL
+          ? `${MUNCHYROLL_CORS_PROXY_URL}/${cleanUrl}`
+          : cleanUrl,
+        quality,
+        isM3U8,
+        type: isM3U8 ? 'hls' : /\.(mp4|webm|mkv)(\?|$)/i.test(cleanUrl) ? 'mp4' : 'hls',
+      });
+    }
+
+    if (parsedSources.length === 0) {
+      return {
+        ok: false,
+        statusCode: 404,
+        endpointUrl: watchUrl,
+        message: 'Munchyroll Consumet API returned no playable video sources for this episode.',
+      };
+    }
+
+    // Mirror Munchyroll VideoPlayer.jsx default selection: put "default" or "auto" first while preserving all qualities
+    parsedSources.sort((a, b) => {
+      const score = (q: string) => {
+        const lower = q.toLowerCase();
+        if (lower === 'default' || lower === 'auto' || lower === 'auto hls') return 0;
+        if (lower.includes('1080')) return 1;
+        if (lower.includes('720')) return 2;
+        if (lower.includes('480')) return 3;
+        return 4;
+      };
+      return score(a.quality) - score(b.quality);
+    });
+
+    const upstreamReferer =
+      data.headers && typeof data.headers === 'object'
+        ? data.headers.Referer || data.headers.referer || ''
+        : '';
+    const proxyRefererParam = upstreamReferer.startsWith('http') ? upstreamReferer : 'none';
+
+    const rawSubtitles = Array.isArray(data.subtitles) ? data.subtitles : [];
+    const parsedSubtitles: ResolvedSubtitle[] = rawSubtitles
+      .filter((t) => {
+        if (!t || typeof t.url !== 'string' || !t.url.trim()) return false;
+        const langLower = (t.lang || '').trim().toLowerCase();
+        if (langLower === 'thumbnails' || t.url.toLowerCase().includes('thumbnails.vtt')) {
+          return false;
+        }
+        return true;
+      })
+      .map((t) => {
+        const cleanSubUrl = normalizeUrl(t.url!);
+        const lang = (t.lang || 'Subtitles').trim();
+        return {
+          url: `/api/anime/proxy?url=${encodeURIComponent(cleanSubUrl)}&referer=${encodeURIComponent(
+            proxyRefererParam
+          )}`,
+          lang,
+          label: lang,
+        };
+      })
+      .sort((a, b) => {
+        const aEn = a.lang.toLowerCase().includes('english') ? 0 : 1;
+        const bEn = b.lang.toLowerCase().includes('english') ? 0 : 1;
+        return aEn - bEn;
+      });
+
+    let downloadUrl = typeof data.download === 'string' && isValidHttpUrl(data.download)
+      ? data.download
+      : undefined;
+
+    if (!downloadUrl && watchProvider === 'gogoanime') {
+      try {
+        const gogoExtRes = await fetchWithTimeout(
+          `${consumetBase}/anime/gogoanime/watch/${encodeURIComponent(consumetEpisodeId)}?server=gogocdn`,
+          { headers: { Accept: 'application/json', 'User-Agent': BROWSER_UA } },
+          4000
+        );
+        if (gogoExtRes.ok) {
+          const gogoJson = (await gogoExtRes.json()) as { download?: string };
+          if (typeof gogoJson.download === 'string' && isValidHttpUrl(gogoJson.download)) {
+            downloadUrl = gogoJson.download;
+          }
+        }
+      } catch {
+        // optional download link lookup non-fatal
+      }
+    }
+
+    type SkipIntervalEntry = { start: number; end: number; type?: string; source?: string };
+    let intro: SkipIntervalEntry | undefined =
+      data.intro &&
+      typeof data.intro.start === 'number' &&
+      typeof data.intro.end === 'number' &&
+      data.intro.end > data.intro.start
+        ? { start: data.intro.start, end: data.intro.end, type: 'op', source: 'provider' }
+        : undefined;
+    let outro: SkipIntervalEntry | undefined =
+      data.outro &&
+      typeof data.outro.start === 'number' &&
+      typeof data.outro.end === 'number' &&
+      data.outro.end > data.outro.start
+        ? { start: data.outro.start, end: data.outro.end, type: 'ed', source: 'provider' }
+        : undefined;
+    let recap: SkipIntervalEntry | undefined;
+
+    if ((!intro || !outro) && malId && malId > 0) {
+      const aniSkip = await fetchAniSkipTimestamps(malId, episodeNumber);
+      if (!intro && aniSkip.intro) intro = aniSkip.intro;
+      if (!outro && aniSkip.outro) outro = aniSkip.outro;
+      if (aniSkip.recap) recap = aniSkip.recap;
+    }
+
+    logProviderDiagnostic('munchyroll', 'watch', {
+      provider: watchProvider,
+      consumetBase,
+      episodeId: consumetEpisodeId,
+      sourcesCount: parsedSources.length,
+      subtitlesCount: parsedSubtitles.length,
+      working: true,
+    });
+
+    return {
+      ok: true,
+      statusCode: 200,
+      endpointUrl: watchUrl,
+      payload: {
+        source: 'munchyroll',
+        sources: parsedSources,
+        subtitles: parsedSubtitles,
+        servers: SUB_DUB_STREAM_SERVERS,
+        headers: upstreamReferer ? { Referer: upstreamReferer } : undefined,
+        download: downloadUrl,
+        intro,
+        outro,
+        recap,
+        hasHindiAudio: false,
+        audioLanguages: [category === 'dub' ? 'English' : 'Japanese'],
+        requestedLanguage: category,
+        providerMeta: {
+          source: 'munchyroll',
+          activeServer: 'munchyroll',
+          consumetProvider: watchProvider,
+          consumetBase,
+          consumetEpisodeId,
+        },
+      },
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      statusCode: err instanceof Error && err.name === 'AbortError' ? 504 : 502,
+      endpointUrl: resolvedEndpointUrl || watchUrl,
+      message:
+        err instanceof Error
+          ? `Munchyroll Consumet watch request failed: ${err.message}`
+          : 'Unable to reach Munchyroll Consumet watch endpoint.',
+    };
+  }
 }
 
 async function checkMegavidAudioAvailability(
@@ -1557,6 +2145,7 @@ async function probeAnimeWorldHindiAvailability(options: {
     .replace(/:\s*(the\s+)?final\s+season.*$/i, '')
     .replace(/\s*[-–:]\s*season\s*\d+.*$/i, '')
     .replace(/\s+\d+(?:st|nd|rd|th)\s+season.*$/i, '')
+    .replace(/^crayon\s+shin[\s-]*chan$/i, 'Shinchan')
     .trim();
 
   const searchRes = await fetchAnimeWorldHtml(
@@ -1589,6 +2178,15 @@ async function probeAnimeWorldHindiAvailability(options: {
   }
 
   const isMovie = (options.format || '').toUpperCase() === 'MOVIE';
+  if (!isMovie && cards.length >= 10 && !cards.some((c) => Boolean(c.seriesId))) {
+    const page2Res = await fetchAnimeWorldHtml(
+      `${ANIMEWORLD_UPSTREAM}/page/2/?s=${encodeURIComponent(cleanedQuery || queryTitle)}`
+    );
+    if (page2Res.ok && page2Res.html) {
+      const $2 = cheerio.load(page2Res.html);
+      cards.push(...parseAnimeWorldCards($2));
+    }
+  }
   const targetNorm = (cleanedQuery || queryTitle).toLowerCase().replace(/[^a-z0-9\s]/g, ' ').trim();
   let best = cards[0];
   let bestScore = -1;
@@ -1761,6 +2359,7 @@ export function createExpressApp() {
       timestamp: new Date().toISOString(),
       providers: {
         consumetBase: DEFAULT_STREAMING_API,
+        munchyrollConsumetBase: DEFAULT_MUNCHYROLL_CONSUMET_API,
         animeWorldUpstream: ANIMEWORLD_UPSTREAM,
         anilistUrl: ANILIST_API_URL,
       },
@@ -1809,6 +2408,7 @@ export function createExpressApp() {
 
     const [
       consumetRes,
+      munchyrollConsumetRes,
       megavidPrimaryRes,
       megavidSoraRes,
       megavidNeroRes,
@@ -1820,6 +2420,12 @@ export function createExpressApp() {
       probeUrl(
         'consumet-primary',
         `${DEFAULT_STREAMING_API}/meta/anilist/info/20`,
+        { headers: { Accept: 'application/json', 'User-Agent': BROWSER_UA } },
+        4000
+      ),
+      probeUrl(
+        'munchyroll-consumet',
+        `${DEFAULT_MUNCHYROLL_CONSUMET_API}/meta/anilist/episodes/21?provider=zoro`,
         { headers: { Accept: 'application/json', 'User-Agent': BROWSER_UA } },
         4000
       ),
@@ -2082,6 +2688,20 @@ export function createExpressApp() {
           upstreamHeaderError: consumetVercelErr,
           note: !consumetRes.ok
             ? 'Consumet primary host is unavailable; KuroStream resolves streams via verified Megavid + AniZip + AniSkip.'
+            : undefined,
+        },
+        munchyroll: {
+          consumetBase: DEFAULT_MUNCHYROLL_CONSUMET_API,
+          status: munchyrollConsumetRes.status,
+          ok: munchyrollConsumetRes.ok,
+          working: munchyrollConsumetRes.ok,
+          latencyMs: munchyrollConsumetRes.latencyMs,
+          upstreamHeaderError:
+            munchyrollConsumetRes.response?.headers.get('x-vercel-error') || undefined,
+          error: !munchyrollConsumetRes.ok
+            ? munchyrollConsumetRes.status === 402
+              ? 'Configured Consumet backend returned HTTP 402 (DEPLOYMENT_DISABLED). Set CONSUMET_API_URL to a live Consumet instance.'
+              : munchyrollConsumetRes.error || `HTTP ${munchyrollConsumetRes.status}`
             : undefined,
         },
         animeWorldIndia: {
@@ -3138,7 +3758,26 @@ export function createExpressApp() {
         if (upstream.ok) {
           const data = await upstream.json();
           if (Array.isArray(data) && data.length > 0) {
-            res.json(data);
+            const filtered = data.filter((s) => {
+              const name =
+                typeof s === 'string'
+                  ? s
+                  : s && typeof s === 'object' && typeof (s as { name?: unknown }).name === 'string'
+                    ? (s as { name: string }).name
+                    : '';
+              return !name.toLowerCase().includes('animeworld');
+            });
+            const hasMunchyroll = filtered.some((s) => {
+              const name =
+                typeof s === 'string'
+                  ? s
+                  : s && typeof s === 'object' && typeof (s as { name?: unknown }).name === 'string'
+                    ? (s as { name: string }).name
+                    : '';
+              return name.toLowerCase() === 'munchyroll';
+            });
+            const resultList = hasMunchyroll ? filtered : [...filtered, { name: 'munchyroll' }];
+            res.json(resultList.length > 0 ? resultList : SUB_DUB_STREAM_SERVERS);
             return;
           }
         } else if (upstream.status === 402 || upstream.status === 502 || upstream.status === 503) {
@@ -3155,7 +3794,108 @@ export function createExpressApp() {
       }
     }
 
-    res.json(ALL_STREAM_SERVERS);
+    res.json(SUB_DUB_STREAM_SERVERS);
+  });
+
+  app.get('/api/munchyroll/search', async (req: Request, res: Response) => {
+    const query = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+    const count = Math.min(25, Math.max(1, Number(req.query.perPage || 10)));
+    if (!query) {
+      res.status(400).json({ message: 'Query parameter "q" is required.' });
+      return;
+    }
+    const baseRes = resolveSafeConsumetBase(req.query.consumetBase);
+    if (!baseRes.ok) {
+      res.status(400).json({ message: baseRes.message });
+      return;
+    }
+    const searchUrl = `${baseRes.url}/meta/anilist/${encodeURIComponent(query)}?page=1&perPage=${count}`;
+    try {
+      const upstream = await fetchWithTimeout(
+        searchUrl,
+        { headers: { Accept: 'application/json', 'User-Agent': BROWSER_UA } },
+        7500
+      );
+      if (!upstream.ok) {
+        const text = await upstream.text().catch(() => '');
+        res.status(upstream.status).json({
+          message: formatConsumetHttpError(baseRes.url, upstream.status, text, searchUrl),
+          endpointUrl: searchUrl,
+        });
+        return;
+      }
+      res.json(await upstream.json());
+    } catch (err) {
+      res.status(502).json({
+        message: err instanceof Error ? err.message : 'Munchyroll search failed.',
+        endpointUrl: searchUrl,
+      });
+    }
+  });
+
+  app.get('/api/munchyroll/episodes/:anilistId', async (req: Request, res: Response) => {
+    const anilistId = Number(req.params.anilistId || 0);
+    if (!Number.isFinite(anilistId) || anilistId <= 0) {
+      res.status(400).json({ message: 'A valid numeric AniList ID is required.' });
+      return;
+    }
+    const baseRes = resolveSafeConsumetBase(req.query.consumetBase);
+    if (!baseRes.ok) {
+      res.status(400).json({ message: baseRes.message });
+      return;
+    }
+    const category = req.query.dub === 'true' || req.query.category === 'dub' ? 'dub' : 'sub';
+    const lookup = await fetchMunchyrollConsumetEpisodes({
+      consumetBase: baseRes.url,
+      anilistId,
+      category,
+    });
+    if (!lookup.ok) {
+      res.status(lookup.statusCode || 502).json({
+        message: lookup.message,
+        endpointUrl: lookup.endpointUrl,
+        episodes: [],
+      });
+      return;
+    }
+    res.json({
+      source: 'munchyroll',
+      provider: lookup.providerUsed,
+      endpointUrl: lookup.endpointUrl,
+      episodes: lookup.episodes,
+    });
+  });
+
+  app.get('/api/munchyroll/watch', async (req: Request, res: Response) => {
+    const baseRes = resolveSafeConsumetBase(req.query.consumetBase);
+    if (!baseRes.ok) {
+      res.status(400).json({ message: baseRes.message });
+      return;
+    }
+    const anilistId = Number(req.query.anilistId || 0);
+    const malId = Number(req.query.malId || 0) || undefined;
+    const episodeId = typeof req.query.episodeId === 'string' ? req.query.episodeId : '';
+    const episodeNumber = Math.max(1, Number(req.query.ep || 1));
+    const category: 'sub' | 'dub' | 'hindi' =
+      req.query.category === 'hindi' ? 'hindi' : req.query.category === 'dub' ? 'dub' : 'sub';
+
+    const result = await resolveFromMunchyroll({
+      consumetBase: baseRes.url,
+      anilistId,
+      malId,
+      episodeId,
+      episodeNumber,
+      category,
+    });
+
+    if (!result.ok || !result.payload) {
+      res.status(result.statusCode || 502).json({
+        message: result.message || 'Munchyroll stream unavailable.',
+        endpointUrl: result.endpointUrl,
+      });
+      return;
+    }
+    res.json(result.payload);
   });
 
   app.get('/api/anime/watch/:episodeId', async (req: Request, res: Response) => {
@@ -3189,6 +3929,34 @@ export function createExpressApp() {
     if (category === 'hindi') {
       res.status(404).json({
         message: `Hindi (DUB) audio track is not available on ${server || 'this server'}. Only Japanese (SUB) and English (DUB) are served here — switch to AnimeWorld-India for verified Hindi audio, or choose Japanese (SUB) / English (DUB).`,
+      });
+      return;
+    }
+
+    if (serverLower === 'munchyroll') {
+      const baseRes = resolveSafeConsumetBase(req.query.consumetBase);
+      if (!baseRes.ok) {
+        res.status(400).json({ message: baseRes.message });
+        return;
+      }
+      const epMatch = episodeId.match(/(?:episode|ep)[-_]?(\d+)/i);
+      const episodeNumber = epQuery > 0 ? epQuery : epMatch ? Number(epMatch[1]) : 1;
+      const munchRes = await resolveFromMunchyroll({
+        consumetBase: baseRes.url,
+        anilistId,
+        malId: malId > 0 ? malId : undefined,
+        episodeId,
+        episodeNumber,
+        category,
+      });
+      if (munchRes.ok && munchRes.payload) {
+        res.json(munchRes.payload);
+        return;
+      }
+      res.status(munchRes.statusCode || 502).json({
+        message: munchRes.message || 'Munchyroll Consumet stream unavailable.',
+        endpointUrl: munchRes.endpointUrl,
+        source: 'munchyroll',
       });
       return;
     }
@@ -3313,11 +4081,14 @@ export function createExpressApp() {
     res.status(204).end();
   });
 
-  app.get('/api/anime/proxy', async (req: Request, res: Response) => {
+  const handleProxyRequest = async (req: Request, res: Response) => {
     const rawUrl = typeof req.query.url === 'string' ? req.query.url : '';
-    const referer =
-      typeof req.query.referer === 'string' && req.query.referer.startsWith('http')
-        ? req.query.referer
+    const rawReferer = typeof req.query.referer === 'string' ? req.query.referer.trim() : '';
+    const disableReferer = rawReferer.toLowerCase() === 'none';
+    const referer = disableReferer
+      ? ''
+      : rawReferer.startsWith('http')
+        ? rawReferer
         : 'https://megavid.buzz/';
 
     if (!rawUrl) {
@@ -3339,10 +4110,12 @@ export function createExpressApp() {
     }
 
     const upstreamHeaders: Record<string, string> = {
-      Referer: referer,
       'User-Agent': BROWSER_UA,
       Accept: '*/*',
     };
+    if (referer) {
+      upstreamHeaders.Referer = referer;
+    }
     if (typeof req.headers.range === 'string' && req.headers.range.trim()) {
       upstreamHeaders.Range = req.headers.range;
     }
@@ -3354,6 +4127,8 @@ export function createExpressApp() {
       const upstream = await fetchWithTimeout(
         parsedUrl.toString(),
         {
+          method: req.method === 'HEAD' ? 'HEAD' : 'GET',
+          redirect: 'follow',
           headers: upstreamHeaders,
         },
         25000
@@ -3364,12 +4139,18 @@ export function createExpressApp() {
         return;
       }
 
-      const lowerPath = parsedUrl.pathname.toLowerCase();
+      const finalUrl = upstream.url ? new URL(upstream.url) : parsedUrl;
+      const lowerPath = finalUrl.pathname.toLowerCase();
       let contentType = upstream.headers.get('content-type') || 'application/octet-stream';
-      if (lowerPath.endsWith('.ts') && (!contentType || contentType.includes('linguist') || contentType.includes('octet-stream'))) {
+      if (
+        lowerPath.endsWith('.ts') &&
+        (!contentType || contentType.includes('linguist') || contentType.includes('octet-stream'))
+      ) {
         contentType = 'video/mp2t';
       } else if (lowerPath.endsWith('.mp4') && contentType.includes('octet-stream')) {
         contentType = 'video/mp4';
+      } else if (lowerPath.endsWith('.webm') && contentType.includes('octet-stream')) {
+        contentType = 'video/webm';
       }
 
       res.setHeader('Access-Control-Allow-Origin', '*');
@@ -3380,6 +4161,19 @@ export function createExpressApp() {
         'Content-Length, Content-Range, Accept-Ranges, Content-Type'
       );
 
+      if (req.method === 'HEAD') {
+        res.status(upstream.status);
+        res.setHeader('Content-Type', contentType);
+        const acceptRanges = upstream.headers.get('accept-ranges') || 'bytes';
+        res.setHeader('Accept-Ranges', acceptRanges);
+        const len = upstream.headers.get('content-length');
+        if (len && !upstream.headers.get('content-encoding')) {
+          res.setHeader('Content-Length', len);
+        }
+        res.end();
+        return;
+      }
+
       if (lowerPath.endsWith('.srt') || contentType.includes('subrip')) {
         const srtText = await upstream.text();
         res.setHeader('Content-Type', 'text/vtt; charset=utf-8');
@@ -3387,37 +4181,48 @@ export function createExpressApp() {
         return;
       }
 
-      if (contentType.includes('mpegurl') || lowerPath.endsWith('.m3u8')) {
-        const playlist = await upstream.text();
-        const forwardedHost = (req.headers['x-forwarded-host'] || req.headers.host || '')
-          .toString()
-          .split(',')[0]
-          .trim();
-        const forwardedProto = (req.headers['x-forwarded-proto'] || req.protocol || 'https')
-          .toString()
-          .split(',')[0]
-          .trim();
-        const proxyOrigin = forwardedHost ? `${forwardedProto}://${forwardedHost}` : '';
-        const proxyHref = (target: string) => {
-          const absolute = new URL(target, parsedUrl).toString();
-          return `${proxyOrigin}/api/anime/proxy?url=${encodeURIComponent(absolute)}&referer=${encodeURIComponent(
-            referer
-          )}`;
-        };
-        const rewritten = playlist
-          .split(/\r?\n/)
-          .map((line) => {
-            const trimmed = line.trim();
-            if (!trimmed) return line;
-            if (trimmed.startsWith('#')) {
-              return line.replace(/URI="([^"]+)"/gi, (_m, uri: string) => `URI="${proxyHref(uri)}"`);
-            }
-            return proxyHref(trimmed);
-          })
-          .join('\n');
-        res.setHeader('Content-Type', 'application/vnd.apple.mpegurl; charset=utf-8');
-        res.setHeader('Cache-Control', 'no-cache');
-        res.send(rewritten);
+      const maybePlaylist =
+        contentType.toLowerCase().includes('mpegurl') ||
+        lowerPath.endsWith('.m3u8') ||
+        lowerPath.endsWith('.m3u') ||
+        lowerPath.endsWith('.txt');
+
+      if (maybePlaylist) {
+        const textBody = await upstream.text();
+        if (textBody.includes('#EXTM3U')) {
+          const forwardedHost = (req.headers['x-forwarded-host'] || req.headers.host || '')
+            .toString()
+            .split(',')[0]
+            .trim();
+          const forwardedProto = (req.headers['x-forwarded-proto'] || req.protocol || 'https')
+            .toString()
+            .split(',')[0]
+            .trim();
+          const proxyOrigin = forwardedHost ? `${forwardedProto}://${forwardedHost}` : '';
+          const proxyHref = (target: string) => {
+            const absolute = new URL(target, finalUrl).toString();
+            return `${proxyOrigin}/api/anime/proxy?url=${encodeURIComponent(absolute)}&referer=${encodeURIComponent(
+              referer || 'none'
+            )}`;
+          };
+          const rewritten = textBody
+            .split(/\r?\n/)
+            .map((line) => {
+              const trimmed = line.trim();
+              if (!trimmed) return line;
+              if (trimmed.startsWith('#')) {
+                return line.replace(/URI="([^"]+)"/gi, (_m, uri: string) => `URI="${proxyHref(uri)}"`);
+              }
+              return proxyHref(trimmed);
+            })
+            .join('\n');
+          res.setHeader('Content-Type', 'application/vnd.apple.mpegurl; charset=utf-8');
+          res.setHeader('Cache-Control', 'no-cache');
+          res.send(rewritten);
+          return;
+        }
+        res.setHeader('Content-Type', contentType);
+        res.send(textBody);
         return;
       }
 
@@ -3426,7 +4231,10 @@ export function createExpressApp() {
       const acceptRanges = upstream.headers.get('accept-ranges') || 'bytes';
       res.setHeader('Accept-Ranges', acceptRanges);
 
-      const passthroughHeaders = ['content-range', 'content-length', 'cache-control', 'etag', 'last-modified'];
+      const hasCompression = Boolean(upstream.headers.get('content-encoding'));
+      const passthroughHeaders = hasCompression
+        ? ['content-range', 'cache-control', 'etag', 'last-modified']
+        : ['content-range', 'content-length', 'cache-control', 'etag', 'last-modified'];
       for (const h of passthroughHeaders) {
         const val = upstream.headers.get(h);
         if (val) res.setHeader(h, val);
@@ -3454,7 +4262,10 @@ export function createExpressApp() {
         res.status(502).send(err instanceof Error ? err.message : 'Proxy fetch failed.');
       }
     }
-  });
+  };
+
+  app.get('/api/anime/proxy', handleProxyRequest);
+  app.head('/api/anime/proxy', handleProxyRequest);
 
   // Ensure unknown /api/* paths always return structured JSON (never HTML)
   app.all('/api/*', (req: Request, res: Response) => {

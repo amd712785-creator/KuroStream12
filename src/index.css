@@ -367,60 +367,55 @@
   background: #4c1d95;
 }
 
-/* Cinematic startup splash intro animations (GPU-composited transform & opacity) */
-@keyframes kuroSplashGlowPurple {
+/* Cinematic 4-second startup splash intro animations (GPU-composited transform & opacity) */
+@keyframes kuroSplashAtmosphere {
   0% {
     opacity: 0;
-    transform: translate3d(-6%, -6%, 0) scale(0.85);
+    transform: scale(0.92);
   }
-  45% {
-    opacity: 0.92;
-    transform: translate3d(0%, 0%, 0) scale(1.04);
-  }
-  100% {
+  18% {
     opacity: 0.72;
-    transform: translate3d(3%, 2%, 0) scale(1);
+    transform: scale(1);
   }
-}
-
-@keyframes kuroSplashGlowRed {
-  0% {
-    opacity: 0;
-    transform: translate3d(6%, 6%, 0) scale(0.85);
+  62% {
+    opacity: 0.95;
+    transform: scale(1.05);
   }
-  50% {
-    opacity: 0.88;
-    transform: translate3d(0%, 0%, 0) scale(1.05);
-  }
-  100% {
-    opacity: 0.68;
-    transform: translate3d(-2%, -3%, 0) scale(1);
-  }
-}
-
-@keyframes kuroSplashHorizon {
-  0% {
-    opacity: 0;
-    transform: translateY(-50%) scaleX(0.15);
-  }
-  45% {
+  85% {
     opacity: 0.75;
-    transform: translateY(-50%) scaleX(1);
+    transform: scale(1.02);
   }
   100% {
-    opacity: 0.22;
-    transform: translateY(-50%) scaleX(1.08);
+    opacity: 0;
+    transform: scale(1);
+  }
+}
+
+@keyframes kuroSplashSweep {
+  0% {
+    opacity: 0;
+    transform: translate3d(-120%, 0, 0);
+  }
+  20% {
+    opacity: 0.85;
+  }
+  55% {
+    opacity: 0.95;
+  }
+  100% {
+    opacity: 0;
+    transform: translate3d(120%, 0, 0);
   }
 }
 
 @keyframes kuroSplashLogoReveal {
   0% {
     opacity: 0;
-    transform: translate3d(0, 14px, 0) scale(0.82);
+    transform: translate3d(0, 12px, 0) scale(0.84);
   }
-  60% {
+  68% {
     opacity: 1;
-    transform: translate3d(0, -1px, 0) scale(1.018);
+    transform: translate3d(0, -1px, 0) scale(1.015);
   }
   100% {
     opacity: 1;
@@ -438,98 +433,76 @@
 }
 
 @keyframes kuroSplashHalo {
-  0%,
-  100% {
-    opacity: 0.48;
-    transform: scale(0.96);
+  0% {
+    opacity: 0;
+    transform: scale(0.86);
   }
-  50% {
-    opacity: 0.86;
+  32% {
+    opacity: 0.92;
     transform: scale(1.06);
   }
-}
-
-@keyframes kuroSplashNeonOutline {
-  0% {
-    stroke-dasharray: 845;
-    stroke-dashoffset: 845;
-    opacity: 0.25;
-  }
-  65% {
-    stroke-dasharray: 845;
-    stroke-dashoffset: 0;
-    opacity: 1;
+  68% {
+    opacity: 0.68;
+    transform: scale(1.01);
   }
   100% {
-    stroke-dasharray: 845;
-    stroke-dashoffset: 0;
-    opacity: 0.85;
-  }
-}
-
-@keyframes kuroSplashTextSweep {
-  0%,
-  26% {
-    opacity: 0;
-    transform: translate3d(-150%, 0, 0);
-  }
-  40% {
-    opacity: 0.95;
-  }
-  72% {
-    opacity: 0.9;
-    transform: translate3d(210%, 0, 0);
-  }
-  100% {
-    opacity: 0;
-    transform: translate3d(210%, 0, 0);
+    opacity: 0.18;
+    transform: scale(0.96);
   }
 }
 
 @keyframes kuroSplashPlayPulse {
-  0%,
-  28% {
-    opacity: 0.15;
-    transform: scale(0.86);
+  0% {
+    opacity: 0;
+    transform: scale(0.72);
   }
-  56% {
-    opacity: 0.95;
+  42% {
+    opacity: 0.92;
     transform: scale(1.22);
   }
-  82% {
-    opacity: 0.45;
-    transform: scale(0.98);
-  }
   100% {
-    opacity: 0.8;
-    transform: scale(1.12);
+    opacity: 0;
+    transform: scale(0.96);
   }
 }
 
 @keyframes kuroSplashParticle {
   0% {
     opacity: 0;
-    transform: translate3d(0, 12px, 0) scale(0.5);
+    transform: translate3d(0, 14px, 0) scale(0.45);
   }
-  25% {
-    opacity: 0.9;
+  22% {
+    opacity: 0.92;
   }
-  80% {
+  78% {
     opacity: 0.55;
   }
   100% {
     opacity: 0;
-    transform: translate3d(8px, -110px, 0) scale(1.05);
+    transform: translate3d(10px, -115px, 0) scale(1.08);
+  }
+}
+
+@keyframes kuroSplashRingParticle {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, 0, 0) scale(0.5);
+  }
+  30% {
+    opacity: 0.95;
+    transform: translate3d(calc(var(--tx, 18px) * 0.45), calc(var(--ty, -18px) * 0.45), 0) scale(1.05);
+  }
+  100% {
+    opacity: 0;
+    transform: translate3d(var(--tx, 18px), var(--ty, -18px), 0) scale(0.65);
   }
 }
 
 @keyframes kuroSplashTagline {
-  0%,
-  36% {
+  0% {
     opacity: 0;
     transform: translate3d(0, 10px, 0);
   }
-  75%,
   100% {
     opacity: 1;
     transform: translate3d(0, 0, 0);
@@ -543,51 +516,37 @@
   }
   to {
     opacity: 0;
-    transform: scale(1.03);
+    transform: scale(1.025);
   }
 }
 
-.kuro-splash-glow-purple {
+.kuro-splash-atmosphere {
   will-change: transform, opacity;
-  animation: kuroSplashGlowPurple 2.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  animation: kuroSplashAtmosphere 4000ms cubic-bezier(0.22, 1, 0.36, 1) forwards;
 }
 
-.kuro-splash-glow-red {
+.kuro-splash-sweep {
   will-change: transform, opacity;
-  animation: kuroSplashGlowRed 2.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
-}
-
-.kuro-splash-horizon {
-  will-change: transform, opacity;
-  animation: kuroSplashHorizon 1.9s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  animation: kuroSplashSweep 850ms cubic-bezier(0.25, 1, 0.5, 1) 700ms both;
 }
 
 .kuro-splash-logo-reveal {
   will-change: transform, opacity;
-  animation: kuroSplashLogoReveal 950ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  animation: kuroSplashLogoReveal 800ms cubic-bezier(0.16, 1, 0.3, 1) 700ms both;
 }
 
 .kuro-splash-logo-reduced {
-  animation: kuroSplashLogoReduced 250ms ease-out both;
+  animation: kuroSplashLogoReduced 350ms ease-out 200ms both;
 }
 
 .kuro-splash-halo {
   will-change: transform, opacity;
-  animation: kuroSplashHalo 2.2s ease-in-out infinite;
-}
-
-.kuro-splash-neon-outline {
-  animation: kuroSplashNeonOutline 1.5s cubic-bezier(0.22, 1, 0.36, 1) 0.15s both;
-}
-
-.kuro-splash-text-sweep {
-  will-change: transform, opacity;
-  animation: kuroSplashTextSweep 2.1s cubic-bezier(0.25, 1, 0.5, 1) both;
+  animation: kuroSplashHalo 1900ms cubic-bezier(0.22, 1, 0.36, 1) 1500ms both;
 }
 
 .kuro-splash-play-pulse {
   will-change: transform, opacity;
-  animation: kuroSplashPlayPulse 1.9s ease-in-out 0.25s infinite;
+  animation: kuroSplashPlayPulse 900ms cubic-bezier(0.16, 1, 0.3, 1) 1550ms both;
 }
 
 .kuro-splash-particle {
@@ -597,18 +556,26 @@
   animation-iteration-count: infinite;
 }
 
+.kuro-splash-ring-particle {
+  will-change: transform, opacity;
+  animation-name: kuroSplashRingParticle;
+  animation-duration: 1000ms;
+  animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+  animation-fill-mode: both;
+}
+
 .kuro-splash-tagline {
   will-change: transform, opacity;
-  animation: kuroSplashTagline 1.5s cubic-bezier(0.16, 1, 0.3, 1) both;
+  animation: kuroSplashTagline 850ms cubic-bezier(0.16, 1, 0.3, 1) 2500ms both;
 }
 
 .kuro-splash-tagline-reduced {
-  animation: kuroSplashLogoReduced 250ms ease-out both;
+  animation: kuroSplashLogoReduced 350ms ease-out 300ms both;
 }
 
 .kuro-splash-exit {
   will-change: transform, opacity;
-  animation: kuroSplashExit 460ms cubic-bezier(0.22, 1, 0.36, 1) forwards;
+  animation: kuroSplashExit 600ms cubic-bezier(0.22, 1, 0.36, 1) forwards;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -620,15 +587,13 @@
     animation: none;
   }
 
-  .kuro-splash-glow-purple,
-  .kuro-splash-glow-red,
-  .kuro-splash-horizon,
+  .kuro-splash-atmosphere,
+  .kuro-splash-sweep,
   .kuro-splash-logo-reveal,
   .kuro-splash-halo,
-  .kuro-splash-neon-outline,
-  .kuro-splash-text-sweep,
   .kuro-splash-play-pulse,
   .kuro-splash-particle,
+  .kuro-splash-ring-particle,
   .kuro-splash-tagline {
     animation: none;
   }

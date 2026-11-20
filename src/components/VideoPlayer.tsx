@@ -19,7 +19,14 @@ import {
   Volume2,
   VolumeX,
 } from 'lucide-react';
-import { getStreamingApiBase, resolveApiUrl, setStreamingApiOverride } from '@/src/config/env';
+import {
+  getConsumetApiBase,
+  getStreamingApiBase,
+  isNativeCapacitorRuntime,
+  resolveApiUrl,
+  setConsumetApiOverride,
+  setStreamingApiOverride,
+} from '@/src/config/env';
 import { extractErrorMessage } from '@/src/utils/errorUtils';
 import type {
   ParsedStreamResult,
@@ -135,14 +142,24 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [cssFullscreen, setCssFullscreen] = useState(false);
   const [mediaError, setMediaError] = useState<string | null>(null);
   const [showCustomEndpoint, setShowCustomEndpoint] = useState(false);
-  const [customEndpoint, setCustomEndpoint] = useState(() => getStreamingApiBase());
+  const isMunchyrollSelected = (selectedServer || '').toLowerCase() === 'munchyroll';
+  const [customEndpoint, setCustomEndpoint] = useState(() =>
+    (selectedServer || '').toLowerCase() === 'munchyroll'
+      ? getConsumetApiBase()
+      : getStreamingApiBase()
+  );
   const [autoNextCountdown, setAutoNextCountdown] = useState<number | null>(null);
   const [useDirectFallback, setUseDirectFallback] = useState(false);
   const [hindiAudioWarning, setHindiAudioWarning] = useState<string | null>(null);
   const [audioTracks, setAudioTracks] = useState<Array<{ id: number; name: string; lang: string }>>([]);
   const [selectedAudioTrackIndex, setSelectedAudioTrackIndex] = useState<number>(-1);
+  const [iframeLoading, setIframeLoading] = useState(false);
+  const [iframeSlowWarning, setIframeSlowWarning] = useState(false);
+
+  const effectiveFullscreen = isFullscreen || cssFullscreen;
 
   const sources: StreamSource[] = useMemo(() => streamData?.sources || [], [streamData]);
   const activeSource = sources[selectedSourceIndex] || sources[0];
@@ -180,6 +197,26 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     networkRetryCountRef.current = 0;
     mediaRetryCountRef.current = 0;
   }, [streamData]);
+
+  useEffect(() => {
+    setCustomEndpoint(
+      isMunchyrollSelected ? getConsumetApiBase() : getStreamingApiBase()
+    );
+  }, [isMunchyrollSelected]);
+
+  useEffect(() => {
+    if (activeSourceType !== 'embed' || !activeSourceUrl) {
+      setIframeLoading(false);
+      setIframeSlowWarning(false);
+      return;
+    }
+    setIframeLoading(true);
+    setIframeSlowWarning(false);
+    const timer = window.setTimeout(() => {
+      setIframeSlowWarning(true);
+    }, 12000);
+    return () => window.clearTimeout(timer);
+  }, [activeSourceType, activeSourceUrl]);
 
   useEffect(() => {
     playbackRateRef.current = playbackRate;
@@ -221,12 +258,14 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         if (refreshed || cancelled) return;
       }
 
-      const referer = refererHeader || 'https://megavid.buzz/';
+      const referer =
+        refererHeader || (isMunchyrollSelected ? 'none' : 'https://megavid.buzz/');
       const resolvedDirectUrl = resolveApiUrl(activeSourceUrl);
+      const isAlreadyProxied = resolvedDirectUrl.includes('/api/anime/proxy');
       const shouldUseProxy =
         !useDirectFallback &&
-        resolvedDirectUrl.startsWith('http') &&
-        !resolvedDirectUrl.includes(window.location.host);
+        !isAlreadyProxied &&
+        resolvedDirectUrl.startsWith('http');
       const playbackUrl = shouldUseProxy
         ? resolveApiUrl(
             `/api/anime/proxy?url=${encodeURIComponent(resolvedDirectUrl)}&referer=${encodeURIComponent(referer)}`
@@ -235,7 +274,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
       console.info('[KuroStream Video] Initializing playback', {
         type: activeSourceType,
-        mode: shouldUseProxy ? 'proxy' : 'direct',
+        mode: shouldUseProxy || isAlreadyProxied ? 'proxy' : 'direct',
+        nativeWebView: isNativeCapacitorRuntime(),
         sourceUrl: activeSourceUrl,
         playbackUrl,
       });
@@ -267,14 +307,21 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
       if (activeSourceType === 'hls') {
         if (Hls.isSupported()) {
+          const isNativeWebView = isNativeCapacitorRuntime();
           const hls = new Hls({
-            enableWorker: true,
+            enableWorker: !isNativeWebView,
             lowLatencyMode: false,
+            startFragPrefetch: true,
             maxBufferLength: 30,
             maxMaxBufferLength: 60,
-            fragLoadingMaxRetry: 3,
-            manifestLoadingMaxRetry: 2,
-            levelLoadingMaxRetry: 2,
+            maxBufferHole: 0.5,
+            nudgeMaxRetry: 5,
+            manifestLoadingTimeOut: 15000,
+            manifestLoadingMaxRetry: 3,
+            levelLoadingTimeOut: 15000,
+            levelLoadingMaxRetry: 3,
+            fragLoadingTimeOut: 25000,
+            fragLoadingMaxRetry: 4,
           });
           hlsRef.current = hls;
           hls.loadSource(playbackUrl);
@@ -327,14 +374,21 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               if (refreshed) return;
             }
 
-            if (data.type === Hls.ErrorTypes.NETWORK_ERROR && networkRetryCountRef.current < 1) {
+            if (data.type === Hls.ErrorTypes.NETWORK_ERROR && networkRetryCountRef.current < 2) {
               networkRetryCountRef.current += 1;
-              hls.startLoad();
+              window.setTimeout(() => {
+                if (!cancelled && hlsRef.current === hls) {
+                  hls.startLoad();
+                }
+              }, networkRetryCountRef.current * 450);
               return;
             }
 
-            if (data.type === Hls.ErrorTypes.MEDIA_ERROR && mediaRetryCountRef.current < 1) {
+            if (data.type === Hls.ErrorTypes.MEDIA_ERROR && mediaRetryCountRef.current < 2) {
               mediaRetryCountRef.current += 1;
+              if (mediaRetryCountRef.current === 2) {
+                hls.swapAudioCodec();
+              }
               hls.recoverMediaError();
               return;
             }
@@ -342,7 +396,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
             if (
               !directAttemptedRef.current &&
               !useDirectFallback &&
-              activeSourceUrl.startsWith('http')
+              !isAlreadyProxied &&
+              activeSourceUrl.startsWith('http') &&
+              !refererHeader
             ) {
               directAttemptedRef.current = true;
               resumeStateRef.current = {
@@ -354,7 +410,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
             }
 
             setIsBuffering(false);
-            setMediaError(`HLS playback error (${data.details}). Try another server or retry.`);
+            setMediaError(
+              `HLS playback failed (${data.details}). Try switching to another server or tapping Retry.`
+            );
           });
         } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
           video.src = playbackUrl;
@@ -387,7 +445,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         hlsRef.current = null;
       }
     };
-  }, [activeSourceUrl, activeSourceType, refererHeader, useDirectFallback, triggerSignedRefresh, audioMode]);
+  }, [activeSourceUrl, activeSourceType, refererHeader, useDirectFallback, triggerSignedRefresh, audioMode, isMunchyrollSelected]);
 
   useEffect(() => {
     if (autoNextCountdown === null) return;
@@ -424,37 +482,77 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       webkitFullscreenElement?: Element | null;
       webkitExitFullscreen?: () => Promise<void> | void;
     };
-    try {
-      if (!document.fullscreenElement && !doc.webkitFullscreenElement) {
+    const orientationApi = screen.orientation as
+      | (ScreenOrientation & { lock?: (orientation: string) => Promise<void>; unlock?: () => void })
+      | undefined;
+
+    const currentlyFullscreen = Boolean(
+      document.fullscreenElement || doc.webkitFullscreenElement || cssFullscreen
+    );
+
+    if (!currentlyFullscreen) {
+      let nativeEntered = false;
+      try {
         if (el.requestFullscreen) {
           await el.requestFullscreen();
+          nativeEntered = Boolean(document.fullscreenElement || doc.webkitFullscreenElement);
         } else if (el.webkitRequestFullscreen) {
           await el.webkitRequestFullscreen();
-        } else if (video?.webkitEnterFullscreen) {
-          video.webkitEnterFullscreen();
+          nativeEntered = Boolean(document.fullscreenElement || doc.webkitFullscreenElement);
         }
-      } else {
-        if (document.exitFullscreen) {
-          await document.exitFullscreen();
-        } else if (doc.webkitExitFullscreen) {
-          await doc.webkitExitFullscreen();
-        }
+      } catch {
+        nativeEntered = false;
       }
-    } catch {
-      if (video?.webkitEnterFullscreen) {
+
+      if (!nativeEntered && video?.webkitEnterFullscreen && activeSourceType !== 'embed') {
         try {
           video.webkitEnterFullscreen();
+          nativeEntered = true;
         } catch {
-          // ignore fullscreen errors
+          nativeEntered = false;
         }
       }
+
+      if (!nativeEntered) {
+        setCssFullscreen(true);
+      }
+      try {
+        await orientationApi?.lock?.('landscape');
+      } catch {
+        // ignore orientation lock restrictions outside native fullscreen
+      }
+    } else {
+      setCssFullscreen(false);
+      try {
+        if (document.fullscreenElement && document.exitFullscreen) {
+          await document.exitFullscreen();
+        } else if (doc.webkitFullscreenElement && doc.webkitExitFullscreen) {
+          await doc.webkitExitFullscreen();
+        }
+      } catch {
+        // ignore exit errors
+      }
+      try {
+        orientationApi?.unlock?.();
+      } catch {
+        // ignore orientation unlock errors
+      }
     }
-  }, []);
+  }, [cssFullscreen, activeSourceType]);
 
   useEffect(() => {
     const doc = document as Document & { webkitFullscreenElement?: Element | null };
-    const onFsChange = () =>
-      setIsFullscreen(Boolean(document.fullscreenElement || doc.webkitFullscreenElement));
+    const onFsChange = () => {
+      const active = Boolean(document.fullscreenElement || doc.webkitFullscreenElement);
+      setIsFullscreen(active);
+      if (!active) {
+        try {
+          (screen.orientation as ScreenOrientation & { unlock?: () => void })?.unlock?.();
+        } catch {
+          // ignore orientation unlock errors
+        }
+      }
+    };
     document.addEventListener('fullscreenchange', onFsChange);
     document.addEventListener('webkitfullscreenchange', onFsChange);
     return () => {
@@ -546,7 +644,11 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
   const handleSaveCustomEndpoint = (e: React.FormEvent) => {
     e.preventDefault();
-    setStreamingApiOverride(customEndpoint);
+    if (isMunchyrollSelected) {
+      setConsumetApiOverride(customEndpoint);
+    } else {
+      setStreamingApiOverride(customEndpoint);
+    }
     setShowCustomEndpoint(false);
     onRetry();
   };
@@ -554,13 +656,15 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   return (
     <div
       ref={containerRef}
-      className={`relative overflow-hidden bg-[#05060a] shadow-2xl shadow-violet-950/25 ${
-        isFullscreen
-          ? 'flex h-full w-full flex-col justify-center rounded-none border-0'
-          : 'rounded-3xl border border-white/[0.1]'
+      className={`overflow-hidden bg-[#05060a] shadow-2xl shadow-violet-950/25 ${
+        cssFullscreen
+          ? 'fixed inset-0 z-[9999] flex h-screen w-screen flex-col justify-center rounded-none border-0'
+          : isFullscreen
+            ? 'relative flex h-full w-full flex-col justify-center rounded-none border-0'
+            : 'relative rounded-3xl border border-white/[0.1]'
       }`}
     >
-      <div className={`relative w-full bg-black ${isFullscreen ? 'flex-1 min-h-0' : 'aspect-video'}`}>
+      <div className={`relative w-full bg-black ${effectiveFullscreen ? 'flex-1 min-h-0' : 'aspect-video'}`}>
         {loading ? (
           <div className="flex h-full w-full flex-col items-center justify-center gap-3.5 bg-gradient-to-br from-[#090b13] via-[#0e0b1a] to-[#07080d] text-slate-200 px-4 text-center">
             <div className="flex h-14 w-14 items-center justify-center rounded-2xl border border-violet-500/30 bg-violet-600/15 shadow-lg shadow-violet-900/30">
@@ -613,20 +717,22 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                 className="kuro-btn-glass inline-flex min-h-[40px] items-center gap-2 rounded-2xl px-4 py-2 text-xs sm:text-sm font-semibold"
               >
                 <Settings2 className="h-4 w-4" />
-                <span>Provider URL</span>
+                <span>{isMunchyrollSelected ? 'Consumet URL' : 'Provider URL'}</span>
               </button>
             </div>
 
-            {onSelectAudioMode && audioMode !== 'sub' && (
+            {onSelectAudioMode && (
               <div className="mt-3 flex flex-wrap items-center justify-center gap-2">
                 <span className="text-xs text-slate-400 mr-1">Switch Audio:</span>
-                <button
-                  type="button"
-                  onClick={() => onSelectAudioMode('sub')}
-                  className="kuro-btn-glass min-h-[34px] rounded-xl px-3 py-1 text-xs font-semibold"
-                >
-                  Japanese (SUB)
-                </button>
+                {audioMode !== 'sub' && (
+                  <button
+                    type="button"
+                    onClick={() => onSelectAudioMode('sub')}
+                    className="kuro-btn-glass min-h-[34px] rounded-xl px-3 py-1 text-xs font-semibold"
+                  >
+                    Japanese (SUB)
+                  </button>
+                )}
                 {audioMode !== 'dub' && (
                   <button
                     type="button"
@@ -634,6 +740,15 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                     className="kuro-btn-glass min-h-[34px] rounded-xl px-3 py-1 text-xs font-semibold"
                   >
                     English (DUB)
+                  </button>
+                )}
+                {audioMode !== 'hindi' && (
+                  <button
+                    type="button"
+                    onClick={() => onSelectAudioMode('hindi')}
+                    className="kuro-btn-glass min-h-[34px] rounded-xl px-3 py-1 text-xs font-semibold"
+                  >
+                    Hindi (DUB)
                   </button>
                 )}
               </div>
@@ -683,21 +798,38 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
             Select an episode to start streaming.
           </div>
         ) : activeSource.type === 'embed' ? (
-          <iframe
-            key={activeSource.url}
-            src={resolveApiUrl(activeSource.url)}
-            title={episodeTitle}
-            allowFullScreen
-            referrerPolicy="no-referrer-when-downgrade"
-            allow="autoplay; fullscreen; picture-in-picture; encrypted-media"
-            onLoad={() => {
-              console.info('[KuroStream Video] Embed iframe loaded', { url: activeSource.url });
-            }}
-            onError={() => {
-              console.warn('[KuroStream Video] Embed iframe failed to load', { url: activeSource.url });
-            }}
-            className="h-full w-full border-0"
-          />
+          <div className="relative h-full w-full bg-black">
+            <iframe
+              key={activeSource.url}
+              src={resolveApiUrl(activeSource.url)}
+              title={episodeTitle}
+              allowFullScreen
+              referrerPolicy="no-referrer"
+              allow="autoplay; fullscreen; picture-in-picture; encrypted-media"
+              onLoad={() => {
+                setIframeLoading(false);
+                setIframeSlowWarning(false);
+                console.info('[KuroStream Video] Embed iframe loaded', { url: activeSource.url });
+              }}
+              onError={() => {
+                setIframeLoading(false);
+                setMediaError('Embed player could not load. Please switch mirror/language or retry.');
+                console.warn('[KuroStream Video] Embed iframe failed to load', { url: activeSource.url });
+              }}
+              className="h-full w-full border-0"
+            />
+            {iframeLoading && (
+              <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/55 px-4 text-center">
+                <Loader2 className="h-8 w-8 animate-spin text-violet-400" />
+                <p className="text-xs font-medium text-slate-200">Loading player mirror...</p>
+                {iframeSlowWarning && (
+                  <p className="text-[11px] text-amber-300">
+                    Taking longer than usual — you can wait or switch stream mirror below.
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
         ) : (
           <>
             <video
@@ -718,8 +850,10 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                 }
               }}
               onWaiting={() => setIsBuffering(true)}
+              onStalled={() => setIsBuffering(true)}
               onSeeking={() => setIsBuffering(true)}
               onSeeked={() => setIsBuffering(false)}
+              onLoadedData={() => setIsBuffering(false)}
               onCanPlay={() => setIsBuffering(false)}
               onTimeUpdate={handleTimeUpdate}
               onEnded={() => {
@@ -742,11 +876,13 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                   src: video?.currentSrc || activeSourceUrl,
                   useDirectFallback,
                 });
-                if (activeSourceType === 'hls') return;
+                if (activeSourceType === 'hls' && hlsRef.current) return;
                 if (
                   !directAttemptedRef.current &&
                   !useDirectFallback &&
-                  activeSourceUrl.startsWith('http')
+                  activeSourceUrl.startsWith('http') &&
+                  !activeSourceUrl.includes('/api/anime/proxy') &&
+                  !refererHeader
                 ) {
                   directAttemptedRef.current = true;
                   resumeStateRef.current = {
@@ -1036,10 +1172,10 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               <button
                 type="button"
                 onClick={toggleFullscreen}
-                aria-label={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
+                aria-label={effectiveFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
                 className="kuro-btn-glass flex h-9 w-9 items-center justify-center rounded-xl"
               >
-                {isFullscreen ? (
+                {effectiveFullscreen ? (
                   <Minimize className="h-4 w-4" />
                 ) : (
                   <Maximize className="h-4 w-4" />
@@ -1130,10 +1266,10 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               <button
                 type="button"
                 onClick={toggleFullscreen}
-                aria-label={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
+                aria-label={effectiveFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
                 className="kuro-btn-glass flex h-9 w-9 items-center justify-center rounded-xl"
               >
-                {isFullscreen ? (
+                {effectiveFullscreen ? (
                   <Minimize className="h-4 w-4" />
                 ) : (
                   <Maximize className="h-4 w-4" />

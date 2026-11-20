@@ -577,9 +577,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         const response = await SocialLogin.login({
           provider: 'google',
           options: {
-            style: 'bottom',
-            filterByAuthorizedAccounts: false,
-            autoSelectEnabled: false,
+            style: 'standard',
           },
         });
         const idToken =

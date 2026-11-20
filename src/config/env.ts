@@ -7,6 +7,7 @@ const DEFAULT_STREAMING_API = 'https://ashanime-api.vercel.app';
 const DEFAULT_ANILIST_API = 'https://graphql.anilist.co';
 const DEFAULT_BACKEND_ORIGIN = 'https://animeworldbd.vercel.app';
 const OVERRIDE_STORAGE_KEY = 'kurostream_api_override_v1';
+const CONSUMET_OVERRIDE_STORAGE_KEY = 'kurostream_consumet_api_override_v1';
 
 export const ASSETS = {
   heroFallback: heroFallbackImg,
@@ -92,3 +93,32 @@ export function setStreamingApiOverride(url: string | null): void {
 export function getDefaultStreamingApiBase(): string {
   return (import.meta.env.VITE_STREAMING_API_BASE || DEFAULT_STREAMING_API).replace(/\/+$/, '');
 }
+
+export function getDefaultConsumetApiBase(): string {
+  return (import.meta.env.VITE_CONSUMET_API_URL || '').trim().replace(/\/+$/, '');
+}
+
+export function getConsumetApiBase(): string {
+  try {
+    const override = localStorage.getItem(CONSUMET_OVERRIDE_STORAGE_KEY);
+    if (override && override.trim().startsWith('http')) {
+      return override.trim().replace(/\/+$/, '');
+    }
+  } catch {
+    // ignore storage errors
+  }
+  return getDefaultConsumetApiBase();
+}
+
+export function setConsumetApiOverride(url: string | null): void {
+  try {
+    if (!url || !url.trim()) {
+      localStorage.removeItem(CONSUMET_OVERRIDE_STORAGE_KEY);
+    } else {
+      localStorage.setItem(CONSUMET_OVERRIDE_STORAGE_KEY, url.trim().replace(/\/+$/, ''));
+    }
+  } catch {
+    // ignore storage errors
+  }
+}
+

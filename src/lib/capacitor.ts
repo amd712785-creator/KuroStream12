@@ -18,7 +18,7 @@ export async function initCapacitorNativeUI(): Promise<void> {
       StatusBar.setOverlaysWebView({ overlay: false }),
       StatusBar.setStyle({ style: Style.Dark }),
       StatusBar.setBackgroundColor({ color: '#08090d' }),
-      SplashScreen.hide({ fadeOutDuration: 250 }),
+      SplashScreen.hide({ fadeOutDuration: 150 }),
     ]);
   } catch {
     // No-op in web browsers / SSR

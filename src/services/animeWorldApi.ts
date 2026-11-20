@@ -466,7 +466,17 @@ export async function resolveAnimeWorldStreamForAnime(options: {
           bestItem = item;
         }
       }
-      if (bestScore >= 95) break;
+      if (!isMovie && (searchRes.results?.length || 0) >= 10 && (!bestItem?.seriesId || bestScore < 85)) {
+        const page2Res = await searchAnimeWorld(q, 2).catch(() => null);
+        for (const item of page2Res?.results || []) {
+          const s = scoreSearchItem(item, targetTitles, isMovie, seasonYear);
+          if (s > bestScore) {
+            bestScore = s;
+            bestItem = item;
+          }
+        }
+      }
+      if (bestScore >= 95 && (isMovie || Boolean(bestItem?.seriesId))) break;
     }
   } catch (err) {
     const extracted = extractErrorDetails(
@@ -698,16 +708,7 @@ export async function resolveAnimeWorldStreamForAnime(options: {
       audioLanguages: detectedLanguages,
       requestedLanguage: effectiveLang,
       providerSource: streamPayload.source || streamEndpoint,
-      servers: [
-        { name: 'animeworld-india' },
-        { name: 'vidstreaming' },
-        { name: 'megacloud' },
-        { name: 'streamsb' },
-        { name: 'animepahe' },
-        { name: 'aniwatchtv' },
-        { name: 'hianime' },
-        { name: 'kaido' },
-      ],
+      servers: [{ name: 'animeworld-india' }],
     },
   };
 }

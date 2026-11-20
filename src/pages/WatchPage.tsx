@@ -49,6 +49,7 @@ const SUB_DUB_FALLBACK_SERVERS: StreamServer[] = [
   { name: 'aniwatchtv' },
   { name: 'hianime' },
   { name: 'kaido' },
+  { name: 'munchyroll' },
 ];
 
 const HINDI_FALLBACK_SERVERS: StreamServer[] = [
@@ -255,13 +256,27 @@ export const WatchPage: React.FC = () => {
   }, [animeId, effectiveMalId, resolvedEpNumber, anime]);
 
   const episodeKey = `${animeId}:${effectiveEpisodeId || decodedEpisodeId}:${selectedServer}:${audioMode}`;
+  const streamRequestIdRef = useRef(0);
+  const fetchedServersEpRef = useRef('');
+
+  const animeTitle = anime ? anime.title.english || anime.title.romaji : '';
+  const animeRomajiTitle = anime?.title.romaji || '';
+  const animeFormat = anime?.format;
+  const animeSeasonYear = anime?.seasonYear;
+  const hasAnimeMeta = Boolean(anime);
 
   const loadStream = useCallback(async () => {
     const epIdToUse = effectiveEpisodeId || decodedEpisodeId;
     if (!epIdToUse || epIdToUse === 'EPISODE_ID') return;
 
+    // Wait for initial anime metadata/episodes so malId and dubId are populated cleanly
+    if (!hasAnimeMeta && loadingEpisodes && !animeLoadError) {
+      setLoadingStream(true);
+      return;
+    }
+
     const useAnimeWorld = audioMode === 'hindi';
-    if (useAnimeWorld && !anime) {
+    if (useAnimeWorld && !hasAnimeMeta) {
       if (animeLoadError) {
         setStreamData(null);
         setStreamError({
@@ -275,20 +290,22 @@ export const WatchPage: React.FC = () => {
       return;
     }
 
+    const requestId = ++streamRequestIdRef.current;
     setLoadingStream(true);
     setStreamError(null);
 
-    if (useAnimeWorld && anime) {
+    if (useAnimeWorld && hasAnimeMeta) {
       const awRes = await resolveAnimeWorldStreamForAnime({
-        title: anime.title.english || anime.title.romaji,
-        romajiTitle: anime.title.romaji,
-        format: anime.format,
-        seasonYear: anime.seasonYear,
+        title: animeTitle,
+        romajiTitle: animeRomajiTitle,
+        format: animeFormat,
+        seasonYear: animeSeasonYear,
         episodeNumber: resolvedEpNumber,
         preferHindi: true,
         preferLang: 'hindi',
       });
 
+      if (streamRequestIdRef.current !== requestId) return;
       setServers(HINDI_FALLBACK_SERVERS);
 
       if (awRes.data) {
@@ -308,6 +325,7 @@ export const WatchPage: React.FC = () => {
       return;
     }
 
+    const shouldFetchServers = fetchedServersEpRef.current !== epIdToUse;
     const [streamRes, serverList] = await Promise.all([
       fetchEpisodeStream(epIdToUse, {
         server: selectedServer || 'vidstreaming',
@@ -316,15 +334,22 @@ export const WatchPage: React.FC = () => {
         malId: malIdRef.current,
         episodeNumber: resolvedEpNumber,
       }),
-      fetchEpisodeServers(epIdToUse),
+      shouldFetchServers ? fetchEpisodeServers(epIdToUse) : Promise.resolve<StreamServer[] | null>(null),
     ]);
 
-    if (serverList.length > 0) {
-      setServers(ensureStandardServers(serverList));
+    if (streamRequestIdRef.current !== requestId) return;
+
+    if (serverList !== null) {
+      fetchedServersEpRef.current = epIdToUse;
+      if (serverList.length > 0) {
+        setServers(ensureStandardServers(serverList));
+      } else if (streamRes.data?.servers?.length) {
+        setServers(ensureStandardServers(streamRes.data.servers));
+      } else {
+        setServers(SUB_DUB_FALLBACK_SERVERS);
+      }
     } else if (streamRes.data?.servers?.length) {
       setServers(ensureStandardServers(streamRes.data.servers));
-    } else {
-      setServers(SUB_DUB_FALLBACK_SERVERS);
     }
 
     if (streamRes.data) {
@@ -346,7 +371,12 @@ export const WatchPage: React.FC = () => {
     selectedServer,
     audioMode,
     animeId,
-    anime,
+    hasAnimeMeta,
+    loadingEpisodes,
+    animeTitle,
+    animeRomajiTitle,
+    animeFormat,
+    animeSeasonYear,
     animeLoadError,
     resolvedEpNumber,
   ]);
@@ -356,12 +386,12 @@ export const WatchPage: React.FC = () => {
     if (!epIdToUse || epIdToUse === 'EPISODE_ID') return false;
 
     if (audioMode === 'hindi') {
-      if (!anime) return false;
+      if (!hasAnimeMeta) return false;
       const awRes = await resolveAnimeWorldStreamForAnime({
-        title: anime.title.english || anime.title.romaji,
-        romajiTitle: anime.title.romaji,
-        format: anime.format,
-        seasonYear: anime.seasonYear,
+        title: animeTitle,
+        romajiTitle: animeRomajiTitle,
+        format: animeFormat,
+        seasonYear: animeSeasonYear,
         episodeNumber: resolvedEpNumber,
         preferHindi: true,
         preferLang: 'hindi',
@@ -387,7 +417,19 @@ export const WatchPage: React.FC = () => {
       return true;
     }
     return false;
-  }, [effectiveEpisodeId, decodedEpisodeId, selectedServer, audioMode, animeId, anime, resolvedEpNumber]);
+  }, [
+    effectiveEpisodeId,
+    decodedEpisodeId,
+    selectedServer,
+    audioMode,
+    animeId,
+    hasAnimeMeta,
+    animeTitle,
+    animeRomajiTitle,
+    animeFormat,
+    animeSeasonYear,
+    resolvedEpNumber,
+  ]);
 
   useEffect(() => {
     loadStream();
