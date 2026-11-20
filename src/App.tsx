@@ -6,6 +6,7 @@ import { Footer } from '@/src/components/Footer';
 import { MobileBottomNav } from '@/src/components/MobileBottomNav';
 import { Navbar } from '@/src/components/Navbar';
 import { PopupBannerModal } from '@/src/components/PopupBannerModal';
+import { StartupSplashIntro } from '@/src/components/StartupSplashIntro';
 import { AuthProvider, useAuth } from '@/src/context/AuthContext';
 import { AnimeDetailPage } from '@/src/pages/AnimeDetailPage';
 import { CatalogPage } from '@/src/pages/CatalogPage';
@@ -144,6 +145,7 @@ export default function App() {
             <MobileBottomNav />
             <AuthModal />
             <PopupBannerModal />
+            <StartupSplashIntro />
           </div>
         </AuthProvider>
       </BrowserRouter>
