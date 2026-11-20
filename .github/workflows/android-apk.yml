@@ -176,15 +176,52 @@ jobs:
           ./gradlew assembleDebug --no-daemon
 
       - name: Print APK Signing SHA-1 / SHA-256 Fingerprints
+        if: success()
         run: |
           set -euo pipefail
-          APK_PATH="android/app/build/outputs/apk/debug/app-debug.apk"
+          APK_DIR="android/app/build/outputs/apk/debug"
+          APK_FILE="app-debug.apk"
+          APK_PATH="$APK_DIR/$APK_FILE"
+
           if [ ! -f "$APK_PATH" ] || [ ! -s "$APK_PATH" ]; then
             echo "Error: Generated APK not found at $APK_PATH"
             exit 1
           fi
+
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          if [ -z "$SDK_ROOT" ] || [ ! -d "$SDK_ROOT/build-tools" ]; then
+            echo "Error: \$ANDROID_HOME/build-tools directory not found."
+            exit 1
+          fi
+
+          APKSIGNER_BIN=$(find "$SDK_ROOT/build-tools" -maxdepth 2 \( -type f -o -type l \) -name "apksigner" | sort -V | tail -n 1)
+          if [ -z "$APKSIGNER_BIN" ] || [ ! -x "$APKSIGNER_BIN" ]; then
+            echo "Error: apksigner binary not found under $SDK_ROOT/build-tools"
+            exit 1
+          fi
+
+          echo "Using apksigner: $APKSIGNER_BIN"
           ls -lh "$APK_PATH"
-          keytool -printcert -jarfile "$APK_PATH"
+
+          CERT_OUTPUT=$(cd "$APK_DIR" && "$APKSIGNER_BIN" verify --print-certs "$APK_FILE")
+          echo "$CERT_OUTPUT"
+
+          SHA1_HEX=$(printf '%s\n' "$CERT_OUTPUT" | sed -n 's/.*SHA-1 digest:[[:space:]]*\([0-9a-fA-F]*\).*/\1/p' | head -n 1)
+          SHA256_HEX=$(printf '%s\n' "$CERT_OUTPUT" | sed -n 's/.*SHA-256 digest:[[:space:]]*\([0-9a-fA-F]*\).*/\1/p' | head -n 1)
+
+          if [ -z "$SHA1_HEX" ] || [ -z "$SHA256_HEX" ]; then
+            echo "Error: Failed to extract both SHA-1 and SHA-256 fingerprints from apksigner output."
+            exit 1
+          fi
+
+          SHA1_COLON=$(printf '%s' "$SHA1_HEX" | tr '[:lower:]' '[:upper:]' | sed 's/../&:/g; s/:$//')
+          SHA256_COLON=$(printf '%s' "$SHA256_HEX" | tr '[:lower:]' '[:upper:]' | sed 's/../&:/g; s/:$//')
+
+          echo "=============================================="
+          echo "APK Signing Certificate Fingerprints ($APK_FILE)"
+          echo "SHA-1   : $SHA1_COLON"
+          echo "SHA-256 : $SHA256_COLON"
+          echo "=============================================="
 
       - name: Upload KuroStream Debug APK Artifact
         uses: actions/upload-artifact@v4
