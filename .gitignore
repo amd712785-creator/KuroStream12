@@ -14,4 +14,4 @@ android/app/build/
 android/local.properties
 android/app/src/main/assets/public/
 android/app/src/main/res/raw/
-
+!android/app/google-services.json
