@@ -193,14 +193,23 @@ function formatFirebaseAuthError(err: unknown, context: 'google' | 'email'): str
 
   if (
     Capacitor.isNativePlatform() &&
+    (lower.includes('[16]') || lower.includes('account reauth failed'))
+  ) {
+    return 'Google Sign-In failed: [16] Account reauth failed. Ensure com.kurostream.app + APK SHA-1/SHA-256 and Web Client ID belong to the same Google Cloud/Firebase project, OAuth consent screen is External (or your account is a Test User), or sign in with Email/Password or Guest Mode.';
+  }
+
+  if (
+    Capacitor.isNativePlatform() &&
     (lower.includes('nocredential') ||
       lower.includes('no credentials') ||
       lower.includes('developer_error') ||
       lower.includes('developer error') ||
+      lower.includes('28404') ||
+      lower.includes('28444') ||
       lower.includes('10:') ||
       lower.includes('16:'))
   ) {
-    return 'Native Google Sign-In could not find a matching Android OAuth credential for com.kurostream.app. Register your APK SHA-1/SHA-256 in Google Cloud / Firebase Console, or sign in with Email/Password or Guest Mode.';
+    return 'Native Google Sign-In failed (' + rawMessage + '). Verify com.kurostream.app + APK SHA-1/SHA-256 and Web Client ID match your Firebase/Google Cloud project, or use Email/Password or Guest Mode.';
   }
 
   return rawMessage || 'Unable to sign in.';
@@ -568,7 +577,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         const response = await SocialLogin.login({
           provider: 'google',
           options: {
-            style: 'standard',
+            style: 'bottom',
+            filterByAuthorizedAccounts: false,
+            autoSelectEnabled: false,
           },
         });
         const idToken =

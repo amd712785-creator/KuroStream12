@@ -78,14 +78,68 @@ jobs:
             fi
           fi
 
-      - name: Verify google-services.json for Firebase Android
+      - name: Verify google-services.json and Firebase OAuth alignment
         run: |
           if [ -f android/app/google-services.json ]; then
             echo "google-services.json found successfully."
-            node -e "const d = JSON.parse(require('fs').readFileSync('android/app/google-services.json', 'utf8')); const pkg = d.client?.[0]?.client_info?.android_client_info?.package_name; if (pkg !== 'com.kurostream.app') { console.error('Invalid package_name:', pkg); process.exit(1); } console.log('Verified package_name:', pkg, 'project_id:', d.project_info?.project_id);"
+            node -e "
+              const fs = require('fs');
+              const gs = JSON.parse(fs.readFileSync('android/app/google-services.json', 'utf8'));
+              const client = gs.client?.[0];
+              const pkg = client?.client_info?.android_client_info?.package_name;
+              if (pkg !== 'com.kurostream.app') {
+                console.error('Invalid package_name:', pkg);
+                process.exit(1);
+              }
+              const oauthClients = Array.isArray(client?.oauth_client) ? client.oauth_client : [];
+              const androidClients = oauthClients.filter((c) => c.client_type === 1);
+              const webClients = oauthClients.filter((c) => c.client_type === 3);
+              console.log('Verified package_name:', pkg, 'google-services project_id:', gs.project_info?.project_id);
+              console.log('google-services oauth_client counts -> Android(type=1):', androidClients.length, 'Web(type=3):', webClients.length);
+              if (androidClients.length === 0) {
+                console.log('::warning::android/app/google-services.json has 0 Android OAuth clients (client_type=1). Add your APK SHA-1 and SHA-256 in Firebase Console and re-download google-services.json.');
+              }
+              if (fs.existsSync('firebase-applet-config.json')) {
+                const webCfg = JSON.parse(fs.readFileSync('firebase-applet-config.json', 'utf8'));
+                console.log('firebase-applet-config projectId:', webCfg.projectId, 'oAuthClientId:', webCfg.oAuthClientId || '(unset)');
+                if (gs.project_info?.project_id !== webCfg.projectId) {
+                  console.log('::warning::Project mismatch: google-services.json project_id (' + gs.project_info?.project_id + ') != firebase-applet-config.json projectId (' + webCfg.projectId + '). Android Credential Manager requires an Android OAuth client (package + APK SHA-1) in the SAME project as webClientId (' + webCfg.oAuthClientId + ').');
+                }
+              }
+            "
           else
             echo "Error: google-services.json missing in android/app/"
             exit 1
+          fi
+
+      - name: Restore cached debug keystore for stable SHA-1/SHA-256
+        id: cache-debug-keystore
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: kurostream-android-debug-keystore-v1
+
+      - name: Ensure persistent Android debug keystore
+        env:
+          ANDROID_DEBUG_KEYSTORE_BASE64: ${{ secrets.ANDROID_DEBUG_KEYSTORE_BASE64 }}
+        run: |
+          mkdir -p ~/.android
+          if [ -n "$ANDROID_DEBUG_KEYSTORE_BASE64" ]; then
+            echo "$ANDROID_DEBUG_KEYSTORE_BASE64" | base64 -d > ~/.android/debug.keystore
+            echo "Restored debug.keystore from ANDROID_DEBUG_KEYSTORE_BASE64 secret."
+          elif [ ! -f ~/.android/debug.keystore ]; then
+            keytool -genkeypair -v \
+              -keystore ~/.android/debug.keystore \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+            echo "Generated new persistent debug.keystore (will be cached across future runs)."
+          else
+            echo "Using cached ~/.android/debug.keystore."
           fi
 
       - name: Build Android Debug APK
