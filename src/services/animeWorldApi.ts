@@ -1,4 +1,5 @@
 import { logApiDiagnostic, resolveApiUrl } from '@/src/config/env';
+import { authorizedApiFetch } from '@/src/services/authorizedFetch';
 import { parseWatchResponse } from '@/src/services/streamingApi';
 import {
   extractErrorDetails,
@@ -83,22 +84,8 @@ async function fetchAwWithTimeout(endpointUrl: string, timeoutMs = 15000): Promi
   res: Response;
 }> {
   const resolvedUrl = resolveApiUrl(endpointUrl);
-  const controller = new AbortController();
-  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const res = await fetch(resolvedUrl, {
-      headers: { Accept: 'application/json' },
-      signal: controller.signal,
-    });
-    return { resolvedUrl, res };
-  } catch (err) {
-    logApiDiagnostic('AnimeWorld', resolvedUrl, {
-      message: err instanceof Error ? err.message : 'Network failure',
-    });
-    throw err;
-  } finally {
-    window.clearTimeout(timer);
-  }
+  const res = await authorizedApiFetch(resolvedUrl, { timeoutMs });
+  return { resolvedUrl, res };
 }
 
 export async function fetchAnimeWorldHome(): Promise<AnimeWorldHomeResponse> {

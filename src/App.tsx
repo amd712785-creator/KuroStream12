@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { AuthModal } from '@/src/components/AuthModal';
 import { ErrorBoundary } from '@/src/components/ErrorBoundary';
@@ -125,28 +125,67 @@ function AnimatedRoutes() {
   );
 }
 
+function AppShell() {
+  const { user, authReady } = useAuth();
+  const navigate = useNavigate();
+  const wasUnauthenticatedRef = useRef(false);
+
+  const isAuthenticated = Boolean(user && user.emailVerified);
+
+  useEffect(() => {
+    if (!authReady) return;
+    if (!isAuthenticated) {
+      wasUnauthenticatedRef.current = true;
+    } else if (wasUnauthenticatedRef.current) {
+      wasUnauthenticatedRef.current = false;
+      navigate('/', { replace: true });
+    }
+  }, [authReady, isAuthenticated, navigate]);
+
+  if (!authReady) {
+    return (
+      <div className="relative flex min-h-screen flex-col items-center justify-center bg-[#07080d] text-slate-100">
+        <StartupSplashIntro />
+      </div>
+    );
+  }
+
+  if (!isAuthenticated) {
+    return (
+      <div className="relative flex min-h-screen flex-col items-center justify-center overflow-hidden bg-[#07080d] text-slate-100">
+        <AuthModal mandatory />
+        <StartupSplashIntro />
+      </div>
+    );
+  }
+
+  return (
+    <div className="relative flex min-h-screen flex-col overflow-x-clip bg-[var(--theme-bg,#07080d)] text-slate-100">
+      {/* Subtle ambient violet aura behind viewport */}
+      <div
+        aria-hidden="true"
+        className="pointer-events-none fixed inset-x-0 -top-40 h-96 bg-[radial-gradient(ellipse_at_top,rgba(124,58,237,0.16),transparent_65%)]"
+      />
+      <Navbar />
+      <main className="relative z-10 flex-1 pb-[calc(6rem+env(safe-area-inset-bottom))]">
+        <AnimatedRoutes />
+      </main>
+      <Footer />
+      <MobileBottomNav />
+      <AuthModal />
+      <PopupBannerModal />
+      <StartupSplashIntro />
+    </div>
+  );
+}
+
 export default function App() {
   return (
     <ErrorBoundary fallbackTitle="KuroStream encountered an unexpected error">
       <BrowserRouter>
         <AuthProvider>
           <PresenceTracker />
-          <div className="relative flex min-h-screen flex-col overflow-x-clip bg-[var(--theme-bg,#07080d)] text-slate-100">
-            {/* Subtle ambient violet aura behind viewport */}
-            <div
-              aria-hidden="true"
-              className="pointer-events-none fixed inset-x-0 -top-40 h-96 bg-[radial-gradient(ellipse_at_top,rgba(124,58,237,0.16),transparent_65%)]"
-            />
-            <Navbar />
-            <main className="relative z-10 flex-1 pb-[calc(6rem+env(safe-area-inset-bottom))]">
-              <AnimatedRoutes />
-            </main>
-            <Footer />
-            <MobileBottomNav />
-            <AuthModal />
-            <PopupBannerModal />
-            <StartupSplashIntro />
-          </div>
+          <AppShell />
         </AuthProvider>
       </BrowserRouter>
     </ErrorBoundary>

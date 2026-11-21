@@ -60,7 +60,11 @@ const GoogleLogoSvg: React.FC<{ className?: string }> = ({ className = 'h-5 w-5'
   </svg>
 );
 
-export const AuthModal: React.FC = () => {
+export interface AuthModalProps {
+  mandatory?: boolean;
+}
+
+export const AuthModal: React.FC<AuthModalProps> = ({ mandatory = false }) => {
   const {
     user,
     isAuthModalOpen,
@@ -87,6 +91,9 @@ export const AuthModal: React.FC = () => {
   const [pendingAction, setPendingAction] = useState<'google' | 'email' | 'reset' | null>(null);
   const [reducedMotion, setReducedMotion] = useState(false);
 
+  const isAuthenticated = Boolean(user && user.emailVerified);
+  const shouldShow = mandatory || !isAuthenticated ? (!isAuthenticated ? true : isAuthModalOpen) : isAuthModalOpen;
+
   useEffect(() => {
     if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
     const media = window.matchMedia('(prefers-reduced-motion: reduce)');
@@ -103,7 +110,7 @@ export const AuthModal: React.FC = () => {
   }, [authLoading]);
 
   useEffect(() => {
-    if (!isAuthModalOpen) return;
+    if (!shouldShow || mandatory) return;
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape' && !authLoading) {
         closeAuthModal();
@@ -111,9 +118,9 @@ export const AuthModal: React.FC = () => {
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isAuthModalOpen, authLoading, closeAuthModal]);
+  }, [shouldShow, mandatory, authLoading, closeAuthModal]);
 
-  if (!isAuthModalOpen) return null;
+  if (!shouldShow) return null;
 
   const isPendingEmailVerification = Boolean(user && !user.emailVerified);
 
@@ -225,14 +232,16 @@ export const AuthModal: React.FC = () => {
           />
 
           {/* Dismiss / Close button */}
-          <button
-            type="button"
-            onClick={closeAuthModal}
-            aria-label="Close sign in dialog"
-            className="kuro-btn-glass absolute right-4 top-4 z-20 flex h-11 w-11 items-center justify-center rounded-2xl text-slate-300 hover:text-white"
-          >
-            <X className="h-4.5 w-4.5" />
-          </button>
+          {!mandatory && (
+            <button
+              type="button"
+              onClick={closeAuthModal}
+              aria-label="Close sign in dialog"
+              className="kuro-btn-glass absolute right-4 top-4 z-20 flex h-11 w-11 items-center justify-center rounded-2xl text-slate-300 hover:text-white"
+            >
+              <X className="h-4.5 w-4.5" />
+            </button>
+          )}
 
           {/* Official KuroStream Brand Header */}
           <div className="flex flex-col items-center text-center">

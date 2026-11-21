@@ -411,15 +411,170 @@ function peekJwtAudience(token: string): string | null {
   }
 }
 
-async function verifyAdminRequest(req: Request): Promise<{
+interface VerifiedFirebaseUserResult {
   ok: boolean;
   status: number;
   code?: string;
   error?: string;
   uid?: string;
   email?: string;
+  isEmailVerified?: boolean;
   projectId?: string;
-}> {
+}
+
+const EPHEMERAL_STREAM_PROXY_SECRET = crypto.randomBytes(32);
+
+function getStreamProxyHmacKey(): Buffer {
+  const configured =
+    process.env.STREAM_PROXY_SECRET?.trim() ||
+    process.env.FIREBASE_SERVICE_ACCOUNT_JSON?.trim();
+  if (configured) {
+    return crypto.createHash('sha256').update(configured, 'utf8').digest();
+  }
+  return EPHEMERAL_STREAM_PROXY_SECRET;
+}
+
+const STREAM_SESSION_COOKIE_NAME = 'kuro_stream_sess';
+const STREAM_SESSION_TTL_SEC = 4 * 60 * 60;
+
+function signStreamSessionToken(uid: string, projectId: string): string {
+  const exp = Math.floor(Date.now() / 1000) + STREAM_SESSION_TTL_SEC;
+  const payloadB64 = Buffer.from(JSON.stringify({ uid, projectId, exp }), 'utf8').toString('base64url');
+  const sig = crypto.createHmac('sha256', getStreamProxyHmacKey()).update(payloadB64).digest('base64url');
+  return `${payloadB64}.${sig}`;
+}
+
+function parseCookieHeader(cookieHeader: string | undefined): Record<string, string> {
+  const result: Record<string, string> = {};
+  if (!cookieHeader) return result;
+  for (const part of cookieHeader.split(';')) {
+    const eqIdx = part.indexOf('=');
+    if (eqIdx <= 0) continue;
+    const key = part.slice(0, eqIdx).trim();
+    const val = part.slice(eqIdx + 1).trim();
+    if (key) {
+      try {
+        result[key] = decodeURIComponent(val);
+      } catch {
+        result[key] = val;
+      }
+    }
+  }
+  return result;
+}
+
+function verifyStreamSessionCookie(req: Request): { valid: boolean; uid?: string; projectId?: string } {
+  const cookies = parseCookieHeader(req.headers.cookie);
+  const token = cookies[STREAM_SESSION_COOKIE_NAME];
+  if (!token) return { valid: false };
+  const dotIdx = token.indexOf('.');
+  if (dotIdx <= 0) return { valid: false };
+  const payloadB64 = token.slice(0, dotIdx);
+  const sigB64 = token.slice(dotIdx + 1);
+  if (!payloadB64 || !sigB64) return { valid: false };
+
+  const expectedSig = crypto
+    .createHmac('sha256', getStreamProxyHmacKey())
+    .update(payloadB64)
+    .digest('base64url');
+
+  const sigBuf = Buffer.from(sigB64, 'utf8');
+  const expectedBuf = Buffer.from(expectedSig, 'utf8');
+  if (sigBuf.length !== expectedBuf.length || !crypto.timingSafeEqual(sigBuf, expectedBuf)) {
+    return { valid: false };
+  }
+
+  try {
+    const parsed = JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf8')) as {
+      uid?: unknown;
+      projectId?: unknown;
+      exp?: unknown;
+    };
+    const nowSec = Math.floor(Date.now() / 1000);
+    if (
+      typeof parsed.uid === 'string' &&
+      parsed.uid &&
+      typeof parsed.projectId === 'string' &&
+      typeof parsed.exp === 'number' &&
+      parsed.exp > nowSec
+    ) {
+      return { valid: true, uid: parsed.uid, projectId: parsed.projectId };
+    }
+  } catch {
+    // invalid cookie payload
+  }
+  return { valid: false };
+}
+
+function getExtraAllowedOrigins(): string[] {
+  const raw = process.env.ALLOWED_ORIGINS || '';
+  return raw
+    .split(',')
+    .map((o) => o.trim().replace(/\/+$/, ''))
+    .filter(Boolean);
+}
+
+function isAllowedAppOrigin(req: Request, requestOrigin: string): boolean {
+  if (!requestOrigin) return true;
+  if (
+    requestOrigin === 'https://localhost' ||
+    requestOrigin === 'http://localhost' ||
+    requestOrigin === 'capacitor://localhost' ||
+    requestOrigin === 'ionic://localhost' ||
+    /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(requestOrigin) ||
+    /^https:\/\/[a-z0-9.-]+\.(run\.app|vercel\.app|web\.app|firebaseapp\.com|googleusercontent\.com|usercontent\.goog)$/i.test(
+      requestOrigin
+    )
+  ) {
+    return true;
+  }
+
+  if (getExtraAllowedOrigins().includes(requestOrigin)) {
+    return true;
+  }
+
+  const forwardedHost = (req.headers['x-forwarded-host'] || req.headers.host || '')
+    .toString()
+    .split(',')[0]
+    .trim()
+    .toLowerCase();
+  if (forwardedHost) {
+    try {
+      if (new URL(requestOrigin).host.toLowerCase() === forwardedHost) {
+        return true;
+      }
+    } catch {
+      // ignore malformed Origin
+    }
+  }
+  return false;
+}
+
+function applyProtectedCorsHeaders(
+  req: Request,
+  res: Response,
+  options: { methods?: string; allowCredentials?: boolean } = {}
+): void {
+  const requestOrigin = typeof req.headers.origin === 'string' ? req.headers.origin.trim() : '';
+  if (requestOrigin && isAllowedAppOrigin(req, requestOrigin)) {
+    res.setHeader('Access-Control-Allow-Origin', requestOrigin);
+    res.setHeader('Vary', 'Origin');
+    if (options.allowCredentials) {
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
+    }
+  }
+  res.setHeader(
+    'Access-Control-Allow-Methods',
+    options.methods || 'GET, HEAD, POST, DELETE, OPTIONS'
+  );
+  res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, Range, If-Range');
+  res.setHeader(
+    'Access-Control-Expose-Headers',
+    'Content-Length, Content-Range, Accept-Ranges, Content-Type'
+  );
+}
+
+async function verifyFirebaseUserRequest(req: Request): Promise<VerifiedFirebaseUserResult> {
   if (FIREBASE_PROJECTS.length === 0) {
     return { ok: false, status: 503, error: 'Firebase configuration is unavailable on server.' };
   }
@@ -427,7 +582,7 @@ async function verifyAdminRequest(req: Request): Promise<{
   const authHeader = req.headers.authorization || '';
   const match = authHeader.match(/^Bearer\s+(.+)$/i);
   if (!match || !match[1]) {
-    return { ok: false, status: 401, code: 'MISSING_TOKEN', error: 'Missing Authorization Bearer token.' };
+    return { ok: false, status: 401, code: 'MISSING_TOKEN', error: 'Authentication required. Missing Authorization Bearer token.' };
   }
   const idToken = match[1].trim();
   if (!idToken || idToken === 'undefined' || idToken === 'null' || idToken.split('.').length !== 3) {
@@ -447,7 +602,7 @@ async function verifyAdminRequest(req: Request): Promise<{
     : FIREBASE_PROJECTS;
 
   if (hintedAud && candidateProjects.length === 0) {
-    console.warn('[AdminAuth] Rejected token with unrecognized Firebase project aud:', hintedAud);
+    console.warn('[FirebaseAuth] Rejected token with unrecognized Firebase project aud:', hintedAud);
     return {
       ok: false,
       status: 401,
@@ -465,7 +620,7 @@ async function verifyAdminRequest(req: Request): Promise<{
   for (const project of candidateProjects) {
     const adminAuth = await getLazyAdminAuth(project.projectId);
 
-    // 1. Verify signature, expiry, issuer, and audience using Firebase Admin SDK (no IAM needed when checkRevoked=false)
+    // 1. Verify signature, expiry, issuer, and audience using Firebase Admin SDK
     if (adminAuth) {
       try {
         const useRevocationCheck = hasServiceAccountCredentials();
@@ -530,7 +685,7 @@ async function verifyAdminRequest(req: Request): Promise<{
       ok: false,
       status: 401,
       code: 'TOKEN_EXPIRED',
-      error: 'Authentication token expired. Refreshing session...',
+      error: 'Authentication token expired. Please sign in again.',
     };
   }
 
@@ -543,11 +698,52 @@ async function verifyAdminRequest(req: Request): Promise<{
     };
   }
 
-  if (!isEmailVerified) {
+  return {
+    ok: true,
+    status: 200,
+    uid: verifiedUid,
+    email: verifiedEmail,
+    isEmailVerified,
+    projectId: verifiedProjectId,
+  };
+}
+
+async function requireFirebaseAuth(req: Request, res: Response, next: NextFunction): Promise<void> {
+  const authCheck = await verifyFirebaseUserRequest(req);
+  if (!authCheck.ok) {
+    res.status(authCheck.status).json({
+      success: false,
+      error: authCheck.error,
+      message: authCheck.error,
+      code: authCheck.code,
+    });
+    return;
+  }
+
+  if (!authCheck.isEmailVerified) {
+    res.status(401).json({
+      success: false,
+      error: 'Email verification is required to access streaming content.',
+      message: 'Email verification is required to access streaming content.',
+      code: 'EMAIL_UNVERIFIED',
+    });
+    return;
+  }
+
+  next();
+}
+
+async function verifyAdminRequest(req: Request): Promise<VerifiedFirebaseUserResult> {
+  const authCheck = await verifyFirebaseUserRequest(req);
+  if (!authCheck.ok) {
+    return authCheck;
+  }
+
+  if (!authCheck.isEmailVerified) {
     return { ok: false, status: 403, code: 'EMAIL_UNVERIFIED', error: 'Verified email authentication is required.' };
   }
 
-  const normalizedEmail = verifiedEmail.toLowerCase();
+  const normalizedEmail = (authCheck.email || '').toLowerCase();
   if (normalizedEmail !== AUTHORIZED_ADMIN_EMAIL.toLowerCase()) {
     return {
       ok: false,
@@ -558,13 +754,13 @@ async function verifyAdminRequest(req: Request): Promise<{
   }
 
   // Only attempt custom claims mutation when a service account credential with IAM access is configured
-  if (hasServiceAccountCredentials()) {
-    const adminAuth = await getLazyAdminAuth(verifiedProjectId);
+  if (hasServiceAccountCredentials() && authCheck.projectId && authCheck.uid) {
+    const adminAuth = await getLazyAdminAuth(authCheck.projectId);
     if (adminAuth) {
       try {
-        const userRec = await adminAuth.getUser(verifiedUid);
+        const userRec = await adminAuth.getUser(authCheck.uid);
         if (!userRec.customClaims?.admin) {
-          await adminAuth.setCustomUserClaims(verifiedUid, { admin: true });
+          await adminAuth.setCustomUserClaims(authCheck.uid, { admin: true });
         }
       } catch {
         // non-fatal if IAM permissions do not allow modifying custom claims
@@ -572,7 +768,7 @@ async function verifyAdminRequest(req: Request): Promise<{
     }
   }
 
-  return { ok: true, status: 200, uid: verifiedUid, email: verifiedEmail, projectId: verifiedProjectId };
+  return authCheck;
 }
 
 function detectVerifiedImageFormat(buffer: Buffer): { mime: string; ext: string } | null {
@@ -2505,36 +2701,28 @@ export function createExpressApp() {
     rawJsonParser(req, res, next);
   };
 
-  // Standard CORS support for /api routes (explicit origin allowlist on authenticated /api/admin routes)
+  // CORS policy for /api routes: explicit origin allowlist on all authenticated endpoints
   app.use('/api', (req: Request, res: Response, next: NextFunction) => {
-    const requestOrigin = typeof req.headers.origin === 'string' ? req.headers.origin.trim() : '';
-    const isAdminRoute = req.path.startsWith('/admin');
+    const isAuthenticatedRoute =
+      req.path.startsWith('/admin') ||
+      req.path.startsWith('/anime') ||
+      req.path.startsWith('/munchyroll') ||
+      req.path.startsWith('/anilist') ||
+      req.path.startsWith('/extensions') ||
+      req.path.startsWith('/streaming');
 
-    if (isAdminRoute) {
-      const isAllowedAdminOrigin =
-        !requestOrigin ||
-        requestOrigin === 'https://localhost' ||
-        requestOrigin === 'http://localhost' ||
-        requestOrigin === 'capacitor://localhost' ||
-        requestOrigin === 'ionic://localhost' ||
-        /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(requestOrigin) ||
-        /^https:\/\/[a-z0-9.-]+\.(run\.app|vercel\.app|web\.app|firebaseapp\.com)$/i.test(
-          requestOrigin
-        );
-      if (isAllowedAdminOrigin && requestOrigin) {
-        res.setHeader('Access-Control-Allow-Origin', requestOrigin);
-        res.setHeader('Vary', 'Origin');
-      }
+    if (isAuthenticatedRoute) {
+      applyProtectedCorsHeaders(req, res, { allowCredentials: true });
     } else {
       res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, POST, DELETE, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, Range, If-Range');
+      res.setHeader(
+        'Access-Control-Expose-Headers',
+        'Content-Length, Content-Range, Accept-Ranges, Content-Type'
+      );
     }
 
-    res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, POST, DELETE, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, Range, If-Range');
-    res.setHeader(
-      'Access-Control-Expose-Headers',
-      'Content-Length, Content-Range, Accept-Ranges, Content-Type'
-    );
     if (req.method === 'OPTIONS') {
       res.status(204).end();
       return;
@@ -2559,7 +2747,55 @@ export function createExpressApp() {
     });
   });
 
-  app.get('/api/streaming/diagnostics', async (req: Request, res: Response) => {
+  // Short-lived HttpOnly stream session cookie for native <video src> MP4 / Safari HLS playback
+  app.post('/api/anime/stream-session', async (req: Request, res: Response) => {
+    const authCheck = await verifyFirebaseUserRequest(req);
+    if (!authCheck.ok || !authCheck.uid || !authCheck.projectId) {
+      res.status(authCheck.status || 401).json({
+        success: false,
+        error: authCheck.error || 'Authentication required.',
+        code: authCheck.code || 'MISSING_TOKEN',
+      });
+      return;
+    }
+    if (!authCheck.isEmailVerified) {
+      res.status(401).json({
+        success: false,
+        error: 'Email verification is required to access streaming content.',
+        code: 'EMAIL_UNVERIFIED',
+      });
+      return;
+    }
+
+    const token = signStreamSessionToken(authCheck.uid, authCheck.projectId);
+    const forwardedProto = (req.headers['x-forwarded-proto'] || req.protocol || 'http')
+      .toString()
+      .split(',')[0]
+      .trim()
+      .toLowerCase();
+    const requestOrigin = typeof req.headers.origin === 'string' ? req.headers.origin.trim() : '';
+    const isSecure = forwardedProto === 'https' || req.secure || requestOrigin.startsWith('https://');
+    const isCrossOrigin =
+      Boolean(requestOrigin) &&
+      (requestOrigin.startsWith('capacitor://') ||
+        requestOrigin.startsWith('ionic://') ||
+        requestOrigin === 'https://localhost');
+    const sameSite = isCrossOrigin && isSecure ? 'None' : 'Lax';
+    const parts = [
+      `${STREAM_SESSION_COOKIE_NAME}=${encodeURIComponent(token)}`,
+      'Path=/api/anime/proxy',
+      `Max-Age=${STREAM_SESSION_TTL_SEC}`,
+      'HttpOnly',
+      `SameSite=${sameSite}`,
+    ];
+    if (isSecure) {
+      parts.push('Secure');
+    }
+    res.setHeader('Set-Cookie', parts.join('; '));
+    res.json({ ok: true, expiresIn: STREAM_SESSION_TTL_SEC });
+  });
+
+  app.get('/api/streaming/diagnostics', requireFirebaseAuth, async (req: Request, res: Response) => {
     const malId = Math.max(1, Number(req.query.malId || 20));
     const ep = Math.max(1, Number(req.query.ep || 1));
     const searchQuery =
@@ -3192,7 +3428,7 @@ export function createExpressApp() {
     res.json({ ok: true });
   });
 
-  app.get('/api/extensions/repos', async (_req: Request, res: Response) => {
+  app.get('/api/extensions/repos', requireFirebaseAuth, async (_req: Request, res: Response) => {
     try {
       const catalog = await fetchExtensionsCatalog();
       res.json(catalog);
@@ -3205,8 +3441,8 @@ export function createExpressApp() {
     }
   });
 
-  // Actual AnimeWorld India PHP API v1 endpoints
-  app.get('/api/anime-world-india/v1/home.php', async (_req: Request, res: Response) => {
+  // Actual AnimeWorld India PHP API v1 endpoints (protected by Firebase authentication)
+  app.get('/api/anime-world-india/v1/home.php', requireFirebaseAuth, async (_req: Request, res: Response) => {
     try {
       const { ok, status, html, blockedByUpstream } = await fetchAnimeWorldHtml(`${ANIMEWORLD_UPSTREAM}/`);
       if (!ok || !html) {
@@ -3235,7 +3471,7 @@ export function createExpressApp() {
     }
   });
 
-  app.get('/api/anime-world-india/v1/series.php', async (req: Request, res: Response) => {
+  app.get('/api/anime-world-india/v1/series.php', requireFirebaseAuth, async (req: Request, res: Response) => {
     const page = Math.max(1, Number(req.query.p || 1));
     const targetUrl =
       page > 1 ? `${ANIMEWORLD_UPSTREAM}/series/page/${page}/` : `${ANIMEWORLD_UPSTREAM}/series/`;
@@ -3276,7 +3512,7 @@ export function createExpressApp() {
     }
   });
 
-  app.get('/api/anime-world-india/v1/search.php', async (req: Request, res: Response) => {
+  app.get('/api/anime-world-india/v1/search.php', requireFirebaseAuth, async (req: Request, res: Response) => {
     const query = typeof req.query.query === 'string' ? req.query.query.trim() : '';
     const page = Math.max(1, Number(req.query.p || 1));
     if (!query) {
@@ -3314,7 +3550,7 @@ export function createExpressApp() {
     }
   });
 
-  app.get('/api/anime-world-india/v1/seasons.php', async (req: Request, res: Response) => {
+  app.get('/api/anime-world-india/v1/seasons.php', requireFirebaseAuth, async (req: Request, res: Response) => {
     const seriesID =
       typeof req.query.seriesID === 'string'
         ? req.query.seriesID.trim()
@@ -3412,7 +3648,7 @@ export function createExpressApp() {
     }
   });
 
-  app.get('/api/anime-world-india/v1/episodes.php', async (req: Request, res: Response) => {
+  app.get('/api/anime-world-india/v1/episodes.php', requireFirebaseAuth, async (req: Request, res: Response) => {
     const seasonId = typeof req.query.seasonId === 'string' ? req.query.seasonId.trim() : '';
     if (!seasonId) {
       res.status(400).json({ success: false, error: 'Missing seasonId parameter' });
@@ -3533,7 +3769,7 @@ export function createExpressApp() {
     }
   });
 
-  app.get('/api/anime-world-india/v1/stream.php', async (req: Request, res: Response) => {
+  app.get('/api/anime-world-india/v1/stream.php', requireFirebaseAuth, async (req: Request, res: Response) => {
     const episodeId = typeof req.query.episodeId === 'string' ? req.query.episodeId.trim() : '';
     const movieId = typeof req.query.movieId === 'string' ? req.query.movieId.trim() : '';
     const requestedLang = typeof req.query.lang === 'string' ? req.query.lang.trim().toLowerCase() : 'hindi';
@@ -3743,7 +3979,7 @@ export function createExpressApp() {
     }
   });
 
-  app.post('/api/anilist', jsonParser, async (req: Request, res: Response) => {
+  app.post('/api/anilist', requireFirebaseAuth, jsonParser, async (req: Request, res: Response) => {
     const body = req.body && typeof req.body === 'object' ? (req.body as Record<string, unknown>) : {};
     const query = typeof body.query === 'string' ? body.query.trim() : '';
     const variables =
@@ -3779,7 +4015,7 @@ export function createExpressApp() {
     }
   });
 
-  app.get('/api/anime/anizip/:anilistId', async (req: Request, res: Response) => {
+  app.get('/api/anime/anizip/:anilistId', requireFirebaseAuth, async (req: Request, res: Response) => {
     const anilistId = Number(req.params.anilistId);
     if (!Number.isFinite(anilistId) || anilistId <= 0) {
       res.status(400).json({ found: false, error: 'Invalid AniList ID.' });
@@ -3789,7 +4025,7 @@ export function createExpressApp() {
     res.json(data);
   });
 
-  app.get('/api/anime/skip/:malId/:episodeNumber', async (req: Request, res: Response) => {
+  app.get('/api/anime/skip/:malId/:episodeNumber', requireFirebaseAuth, async (req: Request, res: Response) => {
     const malId = Number(req.params.malId);
     const episodeNumber = Number(req.params.episodeNumber);
     const episodeLength = Number(req.query.length || 0);
@@ -3801,7 +4037,7 @@ export function createExpressApp() {
     res.json(data);
   });
 
-  app.get('/api/anime/info/:id', async (req: Request, res: Response) => {
+  app.get('/api/anime/info/:id', requireFirebaseAuth, async (req: Request, res: Response) => {
     const anilistId = req.params.id;
     const base =
       typeof req.query.base === 'string' && req.query.base.startsWith('http')
@@ -3870,7 +4106,7 @@ export function createExpressApp() {
     }
   });
 
-  app.get('/api/anime/audio-availability', async (req: Request, res: Response) => {
+  app.get('/api/anime/audio-availability', requireFirebaseAuth, async (req: Request, res: Response) => {
     const anilistId = Number(req.query.anilistId || 0);
     let malId = Number(req.query.malId || 0);
     const ep = Math.max(1, Number(req.query.ep || 1));
@@ -3931,7 +4167,7 @@ export function createExpressApp() {
     res.json(payload);
   });
 
-  app.get('/api/anime/servers/:episodeId', async (req: Request, res: Response) => {
+  app.get('/api/anime/servers/:episodeId', requireFirebaseAuth, async (req: Request, res: Response) => {
     const episodeId = req.params.episodeId;
     const base =
       typeof req.query.base === 'string' && req.query.base.startsWith('http')
@@ -3989,7 +4225,7 @@ export function createExpressApp() {
     res.json(SUB_DUB_STREAM_SERVERS);
   });
 
-  app.get('/api/munchyroll/search', async (req: Request, res: Response) => {
+  app.get('/api/munchyroll/search', requireFirebaseAuth, async (req: Request, res: Response) => {
     const query = typeof req.query.q === 'string' ? req.query.q.trim() : '';
     const count = Math.min(25, Math.max(1, Number(req.query.perPage || 10)));
     if (!query) {
@@ -4025,7 +4261,7 @@ export function createExpressApp() {
     }
   });
 
-  app.get('/api/munchyroll/episodes/:anilistId', async (req: Request, res: Response) => {
+  app.get('/api/munchyroll/episodes/:anilistId', requireFirebaseAuth, async (req: Request, res: Response) => {
     const anilistId = Number(req.params.anilistId || 0);
     if (!Number.isFinite(anilistId) || anilistId <= 0) {
       res.status(400).json({ message: 'A valid numeric AniList ID is required.' });
@@ -4058,7 +4294,7 @@ export function createExpressApp() {
     });
   });
 
-  app.get('/api/munchyroll/watch', async (req: Request, res: Response) => {
+  app.get('/api/munchyroll/watch', requireFirebaseAuth, async (req: Request, res: Response) => {
     const baseRes = resolveSafeConsumetBase(req.query.consumetBase);
     if (!baseRes.ok) {
       res.status(400).json({ message: baseRes.message });
@@ -4090,7 +4326,7 @@ export function createExpressApp() {
     res.json(result.payload);
   });
 
-  app.get('/api/anime/watch/:episodeId', async (req: Request, res: Response) => {
+  app.get('/api/anime/watch/:episodeId', requireFirebaseAuth, async (req: Request, res: Response) => {
     const episodeId = (req.params.episodeId || '').trim();
     if (!episodeId || episodeId === 'EPISODE_ID') {
       res.status(400).json({
@@ -4262,18 +4498,47 @@ export function createExpressApp() {
     });
   });
 
-  app.options('/api/anime/proxy', (_req: Request, res: Response) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Range, If-Range, Content-Type');
-    res.setHeader(
-      'Access-Control-Expose-Headers',
-      'Content-Length, Content-Range, Accept-Ranges, Content-Type'
-    );
+  app.options('/api/anime/proxy', (req: Request, res: Response) => {
+    applyProtectedCorsHeaders(req, res, { methods: 'GET, HEAD, OPTIONS', allowCredentials: true });
     res.status(204).end();
   });
 
   const handleProxyRequest = async (req: Request, res: Response) => {
+    applyProtectedCorsHeaders(req, res, { methods: 'GET, HEAD, OPTIONS', allowCredentials: true });
+
+    let isAuthorizedProxyCaller = false;
+    let proxyAuthStatus = 401;
+    let proxyAuthCode = 'MISSING_TOKEN';
+    let proxyAuthError = 'Authentication required for video stream access.';
+
+    if (req.headers.authorization) {
+      const bearerCheck = await verifyFirebaseUserRequest(req);
+      if (bearerCheck.ok && bearerCheck.isEmailVerified) {
+        isAuthorizedProxyCaller = true;
+      } else {
+        proxyAuthStatus = bearerCheck.ok ? 401 : bearerCheck.status;
+        proxyAuthCode = bearerCheck.ok ? 'EMAIL_UNVERIFIED' : bearerCheck.code || 'INVALID_TOKEN';
+        proxyAuthError = bearerCheck.ok
+          ? 'Email verification is required to access streaming content.'
+          : bearerCheck.error || 'Invalid or expired authentication token.';
+      }
+    } else {
+      const cookieSession = verifyStreamSessionCookie(req);
+      if (cookieSession.valid) {
+        isAuthorizedProxyCaller = true;
+      }
+    }
+
+    if (!isAuthorizedProxyCaller) {
+      res.status(proxyAuthStatus).json({
+        success: false,
+        error: proxyAuthError,
+        message: proxyAuthError,
+        code: proxyAuthCode,
+      });
+      return;
+    }
+
     const rawUrl = typeof req.query.url === 'string' ? req.query.url : '';
     const rawReferer = typeof req.query.referer === 'string' ? req.query.referer.trim() : '';
     const disableReferer = rawReferer.toLowerCase() === 'none';
@@ -4344,14 +4609,6 @@ export function createExpressApp() {
       } else if (lowerPath.endsWith('.webm') && contentType.includes('octet-stream')) {
         contentType = 'video/webm';
       }
-
-      res.setHeader('Access-Control-Allow-Origin', '*');
-      res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
-      res.setHeader('Access-Control-Allow-Headers', 'Range, If-Range, Content-Type');
-      res.setHeader(
-        'Access-Control-Expose-Headers',
-        'Content-Length, Content-Range, Accept-Ranges, Content-Type'
-      );
 
       if (req.method === 'HEAD') {
         res.status(upstream.status);

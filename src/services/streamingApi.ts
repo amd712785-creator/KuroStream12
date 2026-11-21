@@ -6,6 +6,7 @@ import {
   resolveApiUrl,
 } from '@/src/config/env';
 import { getDisplayTitle, slugifyTitle } from '@/src/services/anilistApi';
+import { authorizedApiFetch } from '@/src/services/authorizedFetch';
 import { fetchAniZipMetadata } from '@/src/services/extensionsApi';
 import {
   extractErrorDetails,
@@ -381,7 +382,7 @@ export async function fetchAnimeEpisodes(
   const resolvedUrl = resolveApiUrl(endpointUrl);
 
   const [infoRes, aniZip] = await Promise.all([
-    fetchApiWithTimeout(resolvedUrl, 15000).catch((err) => {
+    authorizedApiFetch(resolvedUrl, { timeoutMs: 15000 }).catch((err) => {
       logApiDiagnostic('AnimeInfo', resolvedUrl, {
         message: err instanceof Error ? err.message : 'Network request failed',
       });
@@ -488,7 +489,7 @@ export async function fetchEpisodeServers(episodeId: string): Promise<StreamServ
   const resolvedUrl = resolveApiUrl(endpointUrl);
 
   try {
-    const res = await fetchApiWithTimeout(resolvedUrl, 12000);
+    const res = await authorizedApiFetch(resolvedUrl, { timeoutMs: 12000 });
     if (!res.ok) {
       logApiDiagnostic('Servers', resolvedUrl, { status: res.status, message: `HTTP ${res.status}` });
       return [];
@@ -580,7 +581,7 @@ export async function fetchEpisodeStream(
   };
 
   try {
-    const response = await fetchApiWithTimeout(resolvedUrl, 22000);
+    const response = await authorizedApiFetch(resolvedUrl, { timeoutMs: 22000 });
 
     const parsedResp = await parseSafeJsonResponse<Record<string, unknown>>(response);
     const json = parsedResp.data;
@@ -669,7 +670,7 @@ export async function fetchAudioAvailability(options: {
 
   const resolvedUrl = resolveApiUrl(`/api/anime/audio-availability?${params.toString()}`);
   try {
-    const res = await fetchApiWithTimeout(resolvedUrl, 12000);
+    const res = await authorizedApiFetch(resolvedUrl, { timeoutMs: 12000 });
     if (!res.ok) {
       logApiDiagnostic('AudioAvailability', resolvedUrl, { status: res.status });
       return null;

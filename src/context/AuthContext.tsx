@@ -44,6 +44,7 @@ import {
   testFirestoreConnection,
 } from '@/src/lib/firebase';
 import { getDisplayTitle } from '@/src/services/anilistApi';
+import { SESSION_EXPIRED_EVENT } from '@/src/services/authorizedFetch';
 import {
   DEFAULT_WATCH_STATS,
   getStoredWatchStats,
@@ -236,6 +237,21 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (isFirebaseConfigured) {
       testFirestoreConnection();
     }
+  }, []);
+
+  useEffect(() => {
+    const handleSessionExpired = (e: Event) => {
+      const detail = (e as CustomEvent<{ message?: string }>).detail;
+      const msg = detail?.message || 'Your session has expired. Please sign in again.';
+      setAuthError(msg);
+      if (auth && auth.currentUser) {
+        firebaseSignOut(auth).catch(() => {});
+      }
+      setIsAdmin(false);
+      setIsAuthModalOpen(true);
+    };
+    window.addEventListener(SESSION_EXPIRED_EVENT, handleSessionExpired);
+    return () => window.removeEventListener(SESSION_EXPIRED_EVENT, handleSessionExpired);
   }, []);
 
   useEffect(() => {

@@ -3,10 +3,12 @@ import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import {
   AlertTriangle,
   ArrowLeft,
+  ArrowUpRight,
   Bookmark,
   Check,
   ChevronLeft,
   ChevronRight,
+  Download,
   Keyboard,
   Languages,
   Package,
@@ -14,10 +16,12 @@ import {
   Server,
   X,
 } from 'lucide-react';
+import { DownloadManagerModal } from '@/src/components/DownloadManagerModal';
 import { ExtensionManager } from '@/src/components/ExtensionManager';
 import { VideoPlayer } from '@/src/components/VideoPlayer';
-import { resolveApiUrl } from '@/src/config/env';
+import { isNativeCapacitorRuntime, resolveApiUrl } from '@/src/config/env';
 import { useAuth } from '@/src/context/AuthContext';
+import { startDownloadEpisode } from '@/src/services/downloadService';
 import { getAnimeDetails, getDisplayTitle } from '@/src/services/anilistApi';
 import { resolveAnimeWorldStreamForAnime } from '@/src/services/animeWorldApi';
 import {
@@ -129,6 +133,29 @@ export const WatchPage: React.FC = () => {
   const [checkingAudio, setCheckingAudio] = useState(false);
   const [showShortcuts, setShowShortcuts] = useState(false);
   const [showSourceManager, setShowSourceManager] = useState(false);
+  const [showDownloadManager, setShowDownloadManager] = useState(false);
+
+  const handleDownloadCurrentEpisode = () => {
+    const primarySource = streamData?.sources?.[0]?.url;
+    if (!primarySource) return;
+    const downloadId = `${animeId}-${effectiveEpisodeId}`;
+    startDownloadEpisode(
+      {
+        id: downloadId,
+        animeId,
+        animeTitle: displayTitle,
+        coverImage: anime?.coverImage?.large || anime?.coverImage?.extraLarge || '',
+        episodeId: effectiveEpisodeId,
+        episodeNumber: epNumber,
+        episodeTitle: epTitle,
+        audioMode,
+        streamUrl: primarySource,
+        fileSize: 0,
+      },
+      () => {}
+    );
+    setShowDownloadManager(true);
+  };
 
   // Load enabled compatible Aniyomi source adapters
   useEffect(() => {
@@ -619,6 +646,48 @@ export const WatchPage: React.FC = () => {
             onRetry={loadStream}
           />
 
+          {/* Facebook Community Section Banner */}
+          <div className="kuro-fb-banner relative overflow-hidden rounded-2xl px-4 py-3.5 sm:px-5 sm:py-4">
+            <div
+              aria-hidden="true"
+              className="kuro-fb-banner-glow pointer-events-none absolute -inset-x-6 -inset-y-4"
+              style={{
+                background:
+                  'radial-gradient(circle at 15% 50%, rgba(59, 130, 246, 0.28) 0%, rgba(37, 99, 235, 0.09) 45%, transparent 75%)',
+              }}
+            />
+            <div
+              aria-hidden="true"
+              className="pointer-events-none absolute inset-x-6 top-0 h-px bg-gradient-to-r from-transparent via-blue-400/50 to-transparent"
+            />
+            <div className="relative z-10 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3.5">
+              <div className="flex items-center gap-3.5 min-w-0">
+                <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl border border-blue-400/40 bg-blue-600/20 text-blue-400 shadow-[0_0_20px_-3px_rgba(59,130,246,0.55)]">
+                  <svg className="h-6 w-6 fill-current" viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"/>
+                  </svg>
+                </div>
+                <div className="min-w-0 space-y-0.5">
+                  <h3 className="text-sm sm:text-base font-bold text-white tracking-tight">
+                    Join Our Facebook Group
+                  </h3>
+                  <p className="text-xs text-slate-300 leading-relaxed line-clamp-2">
+                    Join the KuroStream community for updates, announcements and support.
+                  </p>
+                </div>
+              </div>
+              <a
+                href="https://facebook.com/groups/4577806405820098/"
+                target={isNativeCapacitorRuntime() ? undefined : '_blank'}
+                rel="noopener noreferrer"
+                className="kuro-btn-primary inline-flex min-h-[40px] shrink-0 items-center justify-center gap-2 rounded-xl px-4 py-2 text-xs font-semibold text-white shadow-lg shadow-blue-900/30"
+              >
+                <span>Join Group</span>
+                <ArrowUpRight className="h-4 w-4" />
+              </a>
+            </div>
+          </div>
+
           {/* Playback Troubleshooting Notice Banner */}
           <div
             role="note"
@@ -685,6 +754,15 @@ export const WatchPage: React.FC = () => {
             </div>
 
             <div className="flex flex-wrap items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={handleDownloadCurrentEpisode}
+                className="kuro-btn-glass inline-flex min-h-[40px] items-center gap-1.5 rounded-xl px-3.5 py-2 text-xs font-semibold text-violet-200"
+              >
+                <Download className="h-4 w-4" />
+                <span>Download</span>
+              </button>
+
               <button
                 type="button"
                 onClick={() => {
@@ -997,6 +1075,11 @@ export const WatchPage: React.FC = () => {
           </div>
         </div>
       )}
+
+      <DownloadManagerModal
+        isOpen={showDownloadManager}
+        onClose={() => setShowDownloadManager(false)}
+      />
     </div>
   );
 };

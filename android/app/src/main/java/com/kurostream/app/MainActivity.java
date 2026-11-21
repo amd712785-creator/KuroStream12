@@ -119,6 +119,17 @@ public class MainActivity extends BridgeActivity implements ModifiedMainActivity
                     }
                     Uri url = request.getUrl();
                     String scheme = url.getScheme() != null ? url.getScheme().toLowerCase() : "";
+                    if (request.isForMainFrame()) {
+                        String host = url.getHost() != null ? url.getHost().toLowerCase() : "";
+                        if (host.equals("facebook.com") || host.endsWith(".facebook.com") || host.equals("fb.com") || host.endsWith(".fb.com")) {
+                            try {
+                                Intent intent = new Intent(Intent.ACTION_VIEW, url);
+                                startActivity(intent);
+                                return true;
+                            } catch (Exception ignored) {
+                            }
+                        }
+                    }
                     if (!request.isForMainFrame()) {
                         if ("http".equals(scheme)
                                 || "https".equals(scheme)

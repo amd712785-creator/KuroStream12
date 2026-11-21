@@ -1,4 +1,5 @@
 import { logApiDiagnostic, resolveApiUrl } from '@/src/config/env';
+import { authorizedApiFetch } from '@/src/services/authorizedFetch';
 import { extractErrorMessage, parseSafeJsonResponse } from '@/src/utils/errorUtils';
 import type {
   AniSkipResponse,
@@ -31,7 +32,7 @@ async function fetchJsonWithTimeout(url: string, timeoutMs = 10000): Promise<Res
 
 export async function fetchExtensionsCatalog(): Promise<ExtensionsCatalogResponse> {
   const resolvedUrl = resolveApiUrl('/api/extensions/repos');
-  const res = await fetchJsonWithTimeout(resolvedUrl, 12000);
+  const res = await authorizedApiFetch(resolvedUrl, { timeoutMs: 12000 });
   const parsed = await parseSafeJsonResponse<ExtensionsCatalogResponse>(res);
   if (!parsed.ok || !parsed.data) {
     const msg = extractErrorMessage(
@@ -89,7 +90,7 @@ export async function fetchAniZipMetadata(anilistId: number): Promise<AniZipResp
   if (!Number.isFinite(anilistId) || anilistId <= 0) return null;
   const backendUrl = resolveApiUrl(`/api/anime/anizip/${anilistId}`);
   try {
-    const res = await fetchJsonWithTimeout(backendUrl, 8000);
+    const res = await authorizedApiFetch(backendUrl, { timeoutMs: 8000 });
     if (res.ok) {
       return (await res.json()) as AniZipResponse;
     }
@@ -156,7 +157,7 @@ export async function fetchAniSkipTimestamps(
     `/api/anime/skip/${malId}/${episodeNumber}?length=${Math.max(0, Math.floor(episodeLength))}`
   );
   try {
-    const res = await fetchJsonWithTimeout(backendUrl, 6000);
+    const res = await authorizedApiFetch(backendUrl, { timeoutMs: 6000 });
     if (res.ok) return (await res.json()) as AniSkipResponse;
   } catch {
     // non-fatal, fallback below
