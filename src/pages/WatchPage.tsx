@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {
+  AlertTriangle,
   ArrowLeft,
   Bookmark,
   Check,
@@ -617,6 +618,42 @@ export const WatchPage: React.FC = () => {
             onRefreshStream={refreshStream}
             onRetry={loadStream}
           />
+
+          {/* Playback Troubleshooting Notice Banner */}
+          <div
+            role="note"
+            aria-label="⚠ যদি ভিডিও লোড না হয়, 1.1.1.1 VPN ব্যবহার করবেন"
+            className="kuro-vpn-notice relative overflow-hidden rounded-2xl px-4 py-3 sm:px-5 sm:py-3.5"
+          >
+            <div
+              aria-hidden="true"
+              className="kuro-vpn-notice-glow pointer-events-none absolute -inset-x-6 -inset-y-4"
+              style={{
+                background:
+                  'radial-gradient(circle at 12% 50%, rgba(251, 191, 36, 0.24) 0%, rgba(245, 158, 11, 0.08) 44%, transparent 74%)',
+              }}
+            />
+            <div
+              aria-hidden="true"
+              className="pointer-events-none absolute inset-x-6 top-0 h-px bg-gradient-to-r from-transparent via-amber-300/45 to-transparent"
+            />
+            <div className="relative z-10 flex items-center gap-3 sm:gap-3.5">
+              <div
+                aria-hidden="true"
+                className="kuro-vpn-icon-pulse flex h-9 w-9 sm:h-10 sm:w-10 shrink-0 items-center justify-center rounded-xl border border-amber-400/35 bg-amber-400/15 text-amber-300 shadow-[0_0_18px_-4px_rgba(251,191,36,0.55)]"
+              >
+                <AlertTriangle className="h-4.5 w-4.5 sm:h-5 sm:w-5" />
+              </div>
+              <p className="min-w-0 flex-1 text-[13px] sm:text-sm font-medium leading-relaxed text-amber-50/95">
+                <span className="text-amber-300 font-semibold">⚠ </span>
+                যদি ভিডিও লোড না হয়,{' '}
+                <strong className="font-bold text-sky-300 tracking-wide drop-shadow-[0_0_10px_rgba(56,189,248,0.45)]">
+                  1.1.1.1 VPN
+                </strong>{' '}
+                ব্যবহার করবেন
+              </p>
+            </div>
+          </div>
 
           {/* Episode Bar + Prev/Next + Auto Next */}
           <div className="kuro-glass flex flex-col gap-4 rounded-3xl p-4 sm:flex-row sm:items-center sm:justify-between">

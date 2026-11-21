@@ -60,54 +60,13 @@ import type {
   WatchHistoryItem,
 } from '@/src/types/anime';
 
-const GUEST_STORAGE_KEY = 'kurostream_guest_state_v1';
-
-interface GuestState {
-  preferences: UserPreferences;
-  watchlist: LibraryAnimeItem[];
-  favorites: LibraryAnimeItem[];
-  history: WatchHistoryItem[];
-  watchStats: UserWatchStats;
-}
-
-const DEFAULT_GUEST_STATE: GuestState = {
-  preferences: {
-    displayName: 'Guest Viewer',
-    photoURL: ASSETS.defaultAvatar,
-    preferredAudio: 'sub',
-    autoNext: true,
-    theme: 'midnight-purple',
-  },
-  watchlist: [],
-  favorites: [],
-  history: [],
-  watchStats: DEFAULT_WATCH_STATS,
+const DEFAULT_SIGNED_OUT_PREFERENCES: UserPreferences = {
+  displayName: 'KuroStream',
+  photoURL: ASSETS.defaultAvatar,
+  preferredAudio: 'sub',
+  autoNext: true,
+  theme: getStoredTheme() || 'midnight-purple',
 };
-
-function readGuestState(): GuestState {
-  try {
-    const raw = localStorage.getItem(GUEST_STORAGE_KEY);
-    if (!raw) return { ...DEFAULT_GUEST_STATE, watchStats: getStoredWatchStats() };
-    const parsed = JSON.parse(raw) as Partial<GuestState>;
-    return {
-      preferences: { ...DEFAULT_GUEST_STATE.preferences, ...(parsed.preferences || {}) },
-      watchlist: Array.isArray(parsed.watchlist) ? parsed.watchlist : [],
-      favorites: Array.isArray(parsed.favorites) ? parsed.favorites : [],
-      history: Array.isArray(parsed.history) ? parsed.history : [],
-      watchStats: parsed.watchStats || getStoredWatchStats(),
-    };
-  } catch {
-    return { ...DEFAULT_GUEST_STATE, watchStats: getStoredWatchStats() };
-  }
-}
-
-function writeGuestState(state: GuestState): void {
-  try {
-    localStorage.setItem(GUEST_STORAGE_KEY, JSON.stringify(state));
-  } catch {
-    // ignore storage errors
-  }
-}
 
 function toMillis(val: unknown): number {
   if (typeof val === 'number') return val;
@@ -197,7 +156,7 @@ function formatFirebaseAuthError(err: unknown, context: 'google' | 'email'): str
     Capacitor.isNativePlatform() &&
     (lower.includes('[16]') || lower.includes('account reauth failed'))
   ) {
-    return 'Google Sign-In failed: [16] Account reauth failed. Ensure com.kurostream.app + APK SHA-1/SHA-256 and Web Client ID belong to the same Google Cloud/Firebase project, OAuth consent screen is External (or your account is a Test User), or sign in with Email/Password or Guest Mode.';
+    return 'Google Sign-In failed: [16] Account reauth failed. Ensure com.kurostream.app + APK SHA-1/SHA-256 and Web Client ID belong to the same Google Cloud/Firebase project, or sign in with Email/Password.';
   }
 
   if (
@@ -211,7 +170,7 @@ function formatFirebaseAuthError(err: unknown, context: 'google' | 'email'): str
       lower.includes('10:') ||
       lower.includes('16:'))
   ) {
-    return 'Native Google Sign-In failed (' + rawMessage + '). Verify com.kurostream.app + APK SHA-1/SHA-256 and Web Client ID match your Firebase/Google Cloud project, or use Email/Password or Guest Mode.';
+    return 'Native Google Sign-In failed (' + rawMessage + '). Verify com.kurostream.app + APK SHA-1/SHA-256 and Web Client ID match your Firebase/Google Cloud project, or sign in with Email/Password.';
   }
 
   return rawMessage || 'Unable to sign in.';
@@ -220,7 +179,6 @@ function formatFirebaseAuthError(err: unknown, context: 'google' | 'email'): str
 interface AuthContextValue {
   user: User | null;
   authReady: boolean;
-  isGuest: boolean;
   isAdmin: boolean;
   firebaseEnabled: boolean;
   getIdToken: (forceRefresh?: boolean) => Promise<string | null>;
@@ -261,9 +219,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [user, setUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(!isFirebaseConfigured);
   const [isAdmin, setIsAdmin] = useState(false);
-  const [guestState, setGuestState] = useState<GuestState>(() => readGuestState());
+  const [sessionPrefs, setSessionPrefs] = useState<UserPreferences>(DEFAULT_SIGNED_OUT_PREFERENCES);
 
-  const [cloudPrefs, setCloudPrefs] = useState<UserPreferences>(DEFAULT_GUEST_STATE.preferences);
+  const [cloudPrefs, setCloudPrefs] = useState<UserPreferences>(DEFAULT_SIGNED_OUT_PREFERENCES);
   const [cloudWatchStats, setCloudWatchStats] = useState<UserWatchStats>(() => getStoredWatchStats());
   const [cloudWatchlist, setCloudWatchlist] = useState<LibraryAnimeItem[]>([]);
   const [cloudFavorites, setCloudFavorites] = useState<LibraryAnimeItem[]>([]);
@@ -559,20 +517,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     };
   }, [authReady, user]);
 
-  const isGuest = !user;
-  const preferences = user ? cloudPrefs : guestState.preferences;
-  const watchlist = user ? cloudWatchlist : guestState.watchlist;
-  const favorites = user ? cloudFavorites : guestState.favorites;
-  const history = user ? cloudHistory : guestState.history;
-
-  const updateGuest = useCallback((updater: (prev: GuestState) => GuestState) => {
-    setGuestState((prev) => {
-      const next = updater(prev);
-      writeGuestState(next);
-      return next;
-    });
-  }, []);
-
   const clearAuthMessages = useCallback(() => {
     setAuthError(null);
     setAuthNotice(null);
@@ -580,7 +524,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const signInWithGoogle = useCallback(async () => {
     if (!auth || !googleProvider) {
-      setAuthError('Firebase is not configured. Using local Guest Mode.');
+      setAuthError('Firebase Authentication is not configured.');
       return;
     }
     setAuthError(null);
@@ -633,7 +577,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const signInWithEmail = useCallback(async (email: string, password: string) => {
     if (!auth) {
-      setAuthError('Firebase is not configured. Using local Guest Mode.');
+      setAuthError('Firebase Authentication is not configured.');
       return;
     }
     const trimmedEmail = email.trim();
@@ -680,7 +624,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const registerWithEmail = useCallback(
     async (email: string, password: string, displayName?: string) => {
       if (!auth) {
-        setAuthError('Firebase is not configured. Using local Guest Mode.');
+        setAuthError('Firebase Authentication is not configured.');
         return;
       }
       const trimmedEmail = email.trim();
@@ -833,6 +777,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     [user]
   );
 
+  const hasVerifiedCloudSession = Boolean(user && user.emailVerified);
+  const watchlist = hasVerifiedCloudSession ? cloudWatchlist : [];
+  const favorites = hasVerifiedCloudSession ? cloudFavorites : [];
+  const history = hasVerifiedCloudSession ? cloudHistory : [];
+  const preferences = hasVerifiedCloudSession ? cloudPrefs : sessionPrefs;
+  const watchStats = hasVerifiedCloudSession ? cloudWatchStats : DEFAULT_WATCH_STATS;
+
   const isInWatchlist = useCallback(
     (animeId: number) => watchlist.some((item) => item.animeId === animeId),
     [watchlist]
@@ -850,124 +801,108 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const toggleWatchlist = useCallback(
     async (anime: AnimeSummary) => {
-      const title = (getDisplayTitle(anime.title).trim() || 'Untitled').slice(0, 240);
-      const coverImage = (anime.coverImage?.large || anime.coverImage?.extraLarge || '').slice(0, 500);
-      const exists = watchlist.some((w) => w.animeId === anime.id);
-
-      if (user && user.emailVerified && db) {
-        const path = `users/${user.uid}/watchlist/${anime.id}`;
-        try {
-          if (exists) {
-            await deleteDoc(doc(db, path));
-          } else {
-            const payload: Record<string, unknown> = {
-              ownerId: user.uid,
-              animeId: anime.id,
-              title,
-              coverImage,
-              addedAt: serverTimestamp(),
-            };
-            if (anime.format) payload.format = String(anime.format).slice(0, 40);
-            if (typeof anime.episodes === 'number' && anime.episodes >= 0) {
-              payload.episodes = anime.episodes;
-            }
-            if (
-              typeof anime.averageScore === 'number' &&
-              anime.averageScore >= 0 &&
-              anime.averageScore <= 100
-            ) {
-              payload.averageScore = anime.averageScore;
-            }
-            await setDoc(doc(db, path), payload);
-          }
-        } catch (err) {
-          handleFirestoreError(err, exists ? OperationType.DELETE : OperationType.CREATE, path);
-        }
+      if (!user || !user.emailVerified || !db) {
+        setAuthError(null);
+        setAuthNotice(
+          user && !user.emailVerified
+            ? 'Verify your email address to save anime to your watchlist.'
+            : 'Sign in with Google or Email to save anime to your watchlist.'
+        );
+        setIsAuthModalOpen(true);
         return;
       }
 
-      updateGuest((prev) => ({
-        ...prev,
-        watchlist: exists
-          ? prev.watchlist.filter((w) => w.animeId !== anime.id)
-          : [
-              {
-                animeId: anime.id,
-                title,
-                coverImage,
-                format: anime.format || undefined,
-                episodes: anime.episodes || undefined,
-                averageScore: anime.averageScore || undefined,
-                addedAt: Date.now(),
-              },
-              ...prev.watchlist,
-            ],
-      }));
+      const title = (getDisplayTitle(anime.title).trim() || 'Untitled').slice(0, 240);
+      const coverImage = (anime.coverImage?.large || anime.coverImage?.extraLarge || '').slice(0, 500);
+      const exists = watchlist.some((w) => w.animeId === anime.id);
+      const path = `users/${user.uid}/watchlist/${anime.id}`;
+
+      try {
+        if (exists) {
+          await deleteDoc(doc(db, path));
+        } else {
+          const payload: Record<string, unknown> = {
+            ownerId: user.uid,
+            animeId: anime.id,
+            title,
+            coverImage,
+            addedAt: serverTimestamp(),
+          };
+          if (anime.format) payload.format = String(anime.format).slice(0, 40);
+          if (typeof anime.episodes === 'number' && anime.episodes >= 0) {
+            payload.episodes = anime.episodes;
+          }
+          if (
+            typeof anime.averageScore === 'number' &&
+            anime.averageScore >= 0 &&
+            anime.averageScore <= 100
+          ) {
+            payload.averageScore = anime.averageScore;
+          }
+          await setDoc(doc(db, path), payload);
+        }
+      } catch (err) {
+        handleFirestoreError(err, exists ? OperationType.DELETE : OperationType.CREATE, path);
+      }
     },
-    [user, watchlist, updateGuest]
+    [user, watchlist]
   );
 
   const toggleFavorite = useCallback(
     async (anime: AnimeSummary) => {
-      const title = (getDisplayTitle(anime.title).trim() || 'Untitled').slice(0, 240);
-      const coverImage = (anime.coverImage?.large || anime.coverImage?.extraLarge || '').slice(0, 500);
-      const exists = favorites.some((f) => f.animeId === anime.id);
-
-      if (user && user.emailVerified && db) {
-        const path = `users/${user.uid}/favorites/${anime.id}`;
-        try {
-          if (exists) {
-            await deleteDoc(doc(db, path));
-          } else {
-            const payload: Record<string, unknown> = {
-              ownerId: user.uid,
-              animeId: anime.id,
-              title,
-              coverImage,
-              addedAt: serverTimestamp(),
-            };
-            if (anime.format) payload.format = String(anime.format).slice(0, 40);
-            if (typeof anime.episodes === 'number' && anime.episodes >= 0) {
-              payload.episodes = anime.episodes;
-            }
-            if (
-              typeof anime.averageScore === 'number' &&
-              anime.averageScore >= 0 &&
-              anime.averageScore <= 100
-            ) {
-              payload.averageScore = anime.averageScore;
-            }
-            await setDoc(doc(db, path), payload);
-          }
-        } catch (err) {
-          handleFirestoreError(err, exists ? OperationType.DELETE : OperationType.CREATE, path);
-        }
+      if (!user || !user.emailVerified || !db) {
+        setAuthError(null);
+        setAuthNotice(
+          user && !user.emailVerified
+            ? 'Verify your email address to save favorite anime.'
+            : 'Sign in with Google or Email to save favorite anime.'
+        );
+        setIsAuthModalOpen(true);
         return;
       }
 
-      updateGuest((prev) => ({
-        ...prev,
-        favorites: exists
-          ? prev.favorites.filter((f) => f.animeId !== anime.id)
-          : [
-              {
-                animeId: anime.id,
-                title,
-                coverImage,
-                format: anime.format || undefined,
-                episodes: anime.episodes || undefined,
-                averageScore: anime.averageScore || undefined,
-                addedAt: Date.now(),
-              },
-              ...prev.favorites,
-            ],
-      }));
+      const title = (getDisplayTitle(anime.title).trim() || 'Untitled').slice(0, 240);
+      const coverImage = (anime.coverImage?.large || anime.coverImage?.extraLarge || '').slice(0, 500);
+      const exists = favorites.some((f) => f.animeId === anime.id);
+      const path = `users/${user.uid}/favorites/${anime.id}`;
+
+      try {
+        if (exists) {
+          await deleteDoc(doc(db, path));
+        } else {
+          const payload: Record<string, unknown> = {
+            ownerId: user.uid,
+            animeId: anime.id,
+            title,
+            coverImage,
+            addedAt: serverTimestamp(),
+          };
+          if (anime.format) payload.format = String(anime.format).slice(0, 40);
+          if (typeof anime.episodes === 'number' && anime.episodes >= 0) {
+            payload.episodes = anime.episodes;
+          }
+          if (
+            typeof anime.averageScore === 'number' &&
+            anime.averageScore >= 0 &&
+            anime.averageScore <= 100
+          ) {
+            payload.averageScore = anime.averageScore;
+          }
+          await setDoc(doc(db, path), payload);
+        }
+      } catch (err) {
+        handleFirestoreError(err, exists ? OperationType.DELETE : OperationType.CREATE, path);
+      }
     },
-    [user, favorites, updateGuest]
+    [user, favorites]
   );
 
   const saveWatchProgress = useCallback(
     async (item: Omit<WatchHistoryItem, 'updatedAt'>) => {
+      if (!user || !user.emailVerified || !db) {
+        return;
+      }
+
       const safeTitle = (item.title?.trim() || 'Untitled').slice(0, 240);
       const safeCover = (item.coverImage || '').slice(0, 500);
       const safeEpId = (item.episodeId?.trim() || 'ep-1').slice(0, 200);
@@ -976,95 +911,60 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const safeProgress = Math.max(0, Math.floor(item.progressSeconds || 0));
       const safeDuration = Math.max(0, Math.floor(item.durationSeconds || 0));
 
-      if (user && user.emailVerified && db) {
-        const path = `users/${user.uid}/history/${item.animeId}`;
-        try {
-          const payload: Record<string, unknown> = {
-            ownerId: user.uid,
-            animeId: item.animeId,
-            title: safeTitle,
-            coverImage: safeCover,
-            episodeId: safeEpId,
-            episodeNumber: safeEpNumber,
-            progressSeconds: safeProgress,
-            durationSeconds: safeDuration,
-            audioMode:
-              item.audioMode === 'dub'
-                ? 'dub'
-                : item.audioMode === 'hindi'
-                  ? 'hindi'
-                  : 'sub',
-            updatedAt: serverTimestamp(),
-          };
-          if (safeEpTitle) payload.episodeTitle = safeEpTitle;
-          await setDoc(doc(db, path), payload);
-        } catch (err) {
-          logFirestoreError(err, OperationType.WRITE, path);
-        }
-        return;
-      }
-
-      updateGuest((prev) => {
-        const filtered = prev.history.filter((h) => h.animeId !== item.animeId);
-        return {
-          ...prev,
-          history: [
-            {
-              ...item,
-              title: safeTitle,
-              coverImage: safeCover,
-              episodeId: safeEpId,
-              episodeTitle: safeEpTitle,
-              progressSeconds: safeProgress,
-              durationSeconds: safeDuration,
-              updatedAt: Date.now(),
-            },
-            ...filtered,
-          ].slice(0, 60),
+      const path = `users/${user.uid}/history/${item.animeId}`;
+      try {
+        const payload: Record<string, unknown> = {
+          ownerId: user.uid,
+          animeId: item.animeId,
+          title: safeTitle,
+          coverImage: safeCover,
+          episodeId: safeEpId,
+          episodeNumber: safeEpNumber,
+          progressSeconds: safeProgress,
+          durationSeconds: safeDuration,
+          audioMode:
+            item.audioMode === 'dub'
+              ? 'dub'
+              : item.audioMode === 'hindi'
+                ? 'hindi'
+                : 'sub',
+          updatedAt: serverTimestamp(),
         };
-      });
+        if (safeEpTitle) payload.episodeTitle = safeEpTitle;
+        await setDoc(doc(db, path), payload);
+      } catch (err) {
+        logFirestoreError(err, OperationType.WRITE, path);
+      }
     },
-    [user, updateGuest]
+    [user]
   );
 
   const removeHistoryItem = useCallback(
     async (animeId: number) => {
-      if (user && user.emailVerified && db) {
-        const path = `users/${user.uid}/history/${animeId}`;
-        try {
-          await deleteDoc(doc(db, path));
-        } catch (err) {
-          handleFirestoreError(err, OperationType.DELETE, path);
-        }
-        return;
-      }
-
-      updateGuest((prev) => ({
-        ...prev,
-        history: prev.history.filter((h) => h.animeId !== animeId),
-      }));
-    },
-    [user, updateGuest]
-  );
-
-  const clearHistory = useCallback(async () => {
-    if (user && user.emailVerified && db) {
-      if (cloudHistory.length === 0) return;
-      const path = `users/${user.uid}/history`;
+      if (!user || !user.emailVerified || !db) return;
+      const path = `users/${user.uid}/history/${animeId}`;
       try {
-        const batch = writeBatch(db);
-        cloudHistory.slice(0, 500).forEach((h) => {
-          batch.delete(doc(db!, path, String(h.animeId)));
-        });
-        await batch.commit();
+        await deleteDoc(doc(db, path));
       } catch (err) {
         handleFirestoreError(err, OperationType.DELETE, path);
       }
-      return;
-    }
+    },
+    [user]
+  );
 
-    updateGuest((prev) => ({ ...prev, history: [] }));
-  }, [user, cloudHistory, updateGuest]);
+  const clearHistory = useCallback(async () => {
+    if (!user || !user.emailVerified || !db || cloudHistory.length === 0) return;
+    const path = `users/${user.uid}/history`;
+    try {
+      const batch = writeBatch(db);
+      cloudHistory.slice(0, 500).forEach((h) => {
+        batch.delete(doc(db!, path, String(h.animeId)));
+      });
+      await batch.commit();
+    } catch (err) {
+      handleFirestoreError(err, OperationType.DELETE, path);
+    }
+  }, [user, cloudHistory]);
 
   const updatePreferences = useCallback(
     async (patch: Partial<UserPreferences>) => {
@@ -1094,78 +994,63 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         return;
       }
 
-      updateGuest((prev) => ({
+      if (patch.displayName !== undefined || patch.photoURL !== undefined) {
+        setAuthError(null);
+        setAuthNotice('Sign in to customize and save your profile.');
+        setIsAuthModalOpen(true);
+        return;
+      }
+
+      setSessionPrefs((prev) => ({
         ...prev,
-        preferences: {
-          ...prev.preferences,
-          ...patch,
-          displayName:
-            typeof patch.displayName === 'string' && patch.displayName.trim()
-              ? patch.displayName.trim().slice(0, 80)
-              : prev.preferences.displayName,
-        },
+        ...patch,
       }));
     },
-    [user, updateGuest]
+    [user]
   );
 
   const recordWatchCompletion = useCallback(
     async (animeId: number, episodeNumber: number) => {
-      const activeStats = user && user.emailVerified ? cloudWatchStats : guestState.watchStats;
-      const res = recordEpisodeCompletionLocally(animeId, episodeNumber, activeStats);
+      if (!user || !user.emailVerified || !db) return;
 
-      if (user && user.emailVerified && db) {
-        setCloudWatchStats(res.stats);
-        const path = `users/${user.uid}`;
-        try {
-          const updatePayload: Record<string, unknown> = {
-            streakCurrent: res.stats.streakCurrent,
-            streakLongest: res.stats.streakLongest,
-            streakWatchedDays: res.stats.streakWatchedDays,
-            totalEpisodesCompleted: res.stats.totalEpisodesCompleted,
-            todayEpisodesCompleted: res.stats.todayEpisodesCompleted,
-            todayCompletedDate: res.stats.todayCompletedDate,
-            unlockedAchievements: res.stats.unlockedAchievements,
-            updatedAt: serverTimestamp(),
-          };
-          if (res.stats.streakLastWatchedDate) {
-            updatePayload.streakLastWatchedDate = res.stats.streakLastWatchedDate;
-          }
-          await updateDoc(doc(db, path), updatePayload);
-        } catch (err) {
-          logFirestoreError(err, OperationType.UPDATE, path);
+      const res = recordEpisodeCompletionLocally(animeId, episodeNumber, cloudWatchStats);
+      setCloudWatchStats(res.stats);
+      const path = `users/${user.uid}`;
+      try {
+        const updatePayload: Record<string, unknown> = {
+          streakCurrent: res.stats.streakCurrent,
+          streakLongest: res.stats.streakLongest,
+          streakWatchedDays: res.stats.streakWatchedDays,
+          totalEpisodesCompleted: res.stats.totalEpisodesCompleted,
+          todayEpisodesCompleted: res.stats.todayEpisodesCompleted,
+          todayCompletedDate: res.stats.todayCompletedDate,
+          unlockedAchievements: res.stats.unlockedAchievements,
+          updatedAt: serverTimestamp(),
+        };
+        if (res.stats.streakLastWatchedDate) {
+          updatePayload.streakLastWatchedDate = res.stats.streakLastWatchedDate;
         }
-      } else {
-        updateGuest((prev) => ({
-          ...prev,
-          watchStats: res.stats,
-        }));
+        await updateDoc(doc(db, path), updatePayload);
+      } catch (err) {
+        logFirestoreError(err, OperationType.UPDATE, path);
       }
     },
-    [user, cloudWatchStats, guestState.watchStats, updateGuest]
+    [user, cloudWatchStats]
   );
-
-  const hasVerifiedCloudSession = Boolean(user && user.emailVerified);
-  const activePreferences = hasVerifiedCloudSession ? cloudPrefs : guestState.preferences;
-  const activeWatchlist = hasVerifiedCloudSession ? cloudWatchlist : guestState.watchlist;
-  const activeFavorites = hasVerifiedCloudSession ? cloudFavorites : guestState.favorites;
-  const activeHistory = hasVerifiedCloudSession ? cloudHistory : guestState.history;
-  const activeWatchStats = hasVerifiedCloudSession ? cloudWatchStats : guestState.watchStats;
 
   return (
     <AuthContext.Provider
       value={{
         user,
         authReady,
-        isGuest,
         isAdmin,
         firebaseEnabled: isFirebaseConfigured,
         getIdToken,
-        preferences: activePreferences,
-        watchStats: activeWatchStats,
-        watchlist: activeWatchlist,
-        favorites: activeFavorites,
-        history: activeHistory,
+        preferences,
+        watchStats,
+        watchlist,
+        favorites,
+        history,
         isAuthModalOpen,
         authError,
         authNotice,

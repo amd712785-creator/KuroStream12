@@ -42,7 +42,6 @@ export const ProfilePage: React.FC = () => {
   const {
     user,
     authReady,
-    isGuest,
     isAdmin,
     firebaseEnabled,
     preferences,
@@ -108,6 +107,10 @@ export const ProfilePage: React.FC = () => {
 
   const handleSaveProfile = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!user) {
+      openAuthModal();
+      return;
+    }
     if (!nameInput.trim()) return;
     await updatePreferences({ displayName: nameInput.trim() });
     setSavedToast(true);
@@ -115,6 +118,10 @@ export const ProfilePage: React.FC = () => {
   };
 
   const handleSaveAvatar = async (photoURL: string) => {
+    if (!user) {
+      openAuthModal();
+      return;
+    }
     await updatePreferences({ photoURL });
     setAvatarSavedToast(true);
     window.setTimeout(() => setAvatarSavedToast(false), 2500);
@@ -135,7 +142,7 @@ export const ProfilePage: React.FC = () => {
           <div className="flex items-center gap-4">
             <button
               type="button"
-              onClick={() => setShowAvatarGallery(true)}
+              onClick={() => (user ? setShowAvatarGallery(true) : openAuthModal())}
               aria-label="Edit profile picture"
               className="group relative h-20 w-20 shrink-0 overflow-hidden rounded-2xl border border-violet-400/35 bg-[#141726] shadow-lg shadow-violet-950/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
             >
@@ -163,7 +170,7 @@ export const ProfilePage: React.FC = () => {
                 ) : (
                   <>
                     <User className="h-3.5 w-3.5 shrink-0 text-slate-400" />
-                    <span>Local Guest Mode · Saved on this device</span>
+                    <span>Sign in to sync your profile, watchlist, and history</span>
                   </>
                 )}
               </p>
@@ -177,22 +184,24 @@ export const ProfilePage: React.FC = () => {
           </div>
 
           <div className="flex flex-wrap items-center gap-2.5 sm:gap-3">
-            <button
-              type="button"
-              onClick={() => setShowAvatarGallery(true)}
-              className="kuro-btn-active inline-flex min-h-[44px] items-center gap-2 rounded-2xl px-4.5 py-2 text-xs sm:text-sm font-semibold whitespace-nowrap"
-            >
-              <Camera className="h-4 w-4" />
-              <span>Edit Profile Picture</span>
-            </button>
-            {isGuest && firebaseEnabled && (
+            {user && (
+              <button
+                type="button"
+                onClick={() => setShowAvatarGallery(true)}
+                className="kuro-btn-active inline-flex min-h-[44px] items-center gap-2 rounded-2xl px-4.5 py-2 text-xs sm:text-sm font-semibold whitespace-nowrap"
+              >
+                <Camera className="h-4 w-4" />
+                <span>Edit Profile Picture</span>
+              </button>
+            )}
+            {!user && firebaseEnabled && (
               <button
                 type="button"
                 onClick={openAuthModal}
                 className="kuro-btn-primary inline-flex min-h-[44px] items-center gap-2 rounded-2xl px-4.5 py-2 text-xs sm:text-sm font-semibold whitespace-nowrap"
               >
                 <LogIn className="h-4 w-4" />
-                <span>Sign In with Google</span>
+                <span>Sign In / Create Account</span>
               </button>
             )}
             {user && (
