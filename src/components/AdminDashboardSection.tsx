@@ -24,6 +24,7 @@ import {
 import { PopupBannerCard } from '@/src/components/PopupBannerModal';
 import { useAuth } from '@/src/context/AuthContext';
 import {
+  AdminApiError,
   createPopupBanner,
   deletePopupBanner,
   fetchAdminRegisteredUsersStats,
@@ -69,13 +70,14 @@ function formatDateShort(isoDate: string): string {
 }
 
 export const AdminDashboardSection: React.FC = () => {
-  const { user, isAdmin, getIdToken } = useAuth();
+  const { user, authReady, isAdmin, getIdToken, openAuthModal } = useAuth();
 
   // Analytics state
   const [serverStats, setServerStats] = useState<AdminServerStats | null>(null);
   const [registeredStats, setRegisteredStats] = useState<RegisteredUsersStats | null>(null);
   const [statsLoading, setStatsLoading] = useState(true);
   const [statsError, setStatsError] = useState<string | null>(null);
+  const [sessionExpired, setSessionExpired] = useState(false);
   const [hoveredDayIndex, setHoveredDayIndex] = useState<number | null>(null);
 
   // Banner management state
@@ -93,36 +95,86 @@ export const AdminDashboardSection: React.FC = () => {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  const runWithFreshAdminToken = useCallback(
+    async <T,>(operation: (idToken: string) => Promise<T>): Promise<T> => {
+      let token = await getIdToken(false);
+      if (!token) {
+        token = await getIdToken(true);
+      }
+      if (!token) {
+        setSessionExpired(true);
+        throw new AdminApiError(
+          'Your administrator session has expired. Please sign in again.',
+          401,
+          'SESSION_EXPIRED'
+        );
+      }
+
+      try {
+        const result = await operation(token);
+        setSessionExpired(false);
+        return result;
+      } catch (err) {
+        if (err instanceof AdminApiError && err.status === 401) {
+          const refreshedToken = await getIdToken(true);
+          if (refreshedToken) {
+            try {
+              const retriedResult = await operation(refreshedToken);
+              setSessionExpired(false);
+              return retriedResult;
+            } catch (retryErr) {
+              if (retryErr instanceof AdminApiError && retryErr.status === 401) {
+                setSessionExpired(true);
+              }
+              throw retryErr;
+            }
+          }
+          setSessionExpired(true);
+        }
+        throw err;
+      }
+    },
+    [getIdToken]
+  );
+
   const loadAnalytics = useCallback(async () => {
-    if (!isAdmin) return;
+    if (!authReady || !isAdmin || !user) return;
     setStatsError(null);
     try {
-      const token = await getIdToken();
-      if (!token) {
-        throw new Error('Unable to obtain verified administrator token.');
-      }
-      const [srvRes, regRes] = await Promise.all([
-        fetchAdminServerStats(token),
+      const [srvOutcome, regOutcome] = await Promise.allSettled([
+        runWithFreshAdminToken((token) => fetchAdminServerStats(token)),
         fetchAdminRegisteredUsersStats(),
       ]);
-      setServerStats(srvRes);
-      setRegisteredStats(regRes);
+
+      if (srvOutcome.status === 'fulfilled') {
+        setServerStats(srvOutcome.value);
+      }
+      if (regOutcome.status === 'fulfilled') {
+        setRegisteredStats(regOutcome.value);
+      }
+
+      if (srvOutcome.status === 'rejected') {
+        throw srvOutcome.reason;
+      }
+      if (regOutcome.status === 'rejected') {
+        throw regOutcome.reason;
+      }
     } catch (err) {
       setStatsError(err instanceof Error ? err.message : 'Failed to load admin analytics.');
     } finally {
       setStatsLoading(false);
     }
-  }, [isAdmin, getIdToken]);
+  }, [authReady, isAdmin, user, runWithFreshAdminToken]);
 
   useEffect(() => {
-    if (!isAdmin) return;
+    if (!authReady || !isAdmin || !user) return;
     loadAnalytics();
     const timer = window.setInterval(loadAnalytics, 20000);
     return () => window.clearInterval(timer);
-  }, [isAdmin, loadAnalytics]);
+  }, [authReady, isAdmin, user, loadAnalytics]);
 
   useEffect(() => {
-    if (!isAdmin) return;
+    if (!authReady || !isAdmin || !user) return;
     const unsub = subscribeAllBannersForAdmin(
       (list) => {
         setBanners(list);
@@ -131,7 +183,7 @@ export const AdminDashboardSection: React.FC = () => {
       (msg) => setBannersError(msg)
     );
     return () => unsub();
-  }, [isAdmin]);
+  }, [authReady, isAdmin, user]);
 
   const combinedUsersActiveToday = useMemo(() => {
     const srvToday = serverStats?.usersActiveToday || 0;
@@ -164,9 +216,7 @@ export const AdminDashboardSection: React.FC = () => {
     setUploadError(null);
     setUploadingImage(true);
     try {
-      const token = await getIdToken();
-      if (!token) throw new Error('Authentication expired. Please sign in again.');
-      const result = await uploadBannerImage(token, file);
+      const result = await runWithFreshAdminToken((token) => uploadBannerImage(token, file));
       setForm((prev) => ({ ...prev, imageUrl: result.imageUrl }));
     } catch (err) {
       setUploadError(err instanceof Error ? err.message : 'Failed to upload image.');
@@ -252,7 +302,7 @@ export const AdminDashboardSection: React.FC = () => {
 
   const handleDeleteBanner = async (banner: PopupBanner) => {
     try {
-      const token = await getIdToken();
+      const token = await getIdToken(false);
       await deletePopupBanner(banner, token);
       if (editingBannerId === banner.id) {
         setEditingBannerId(null);
@@ -319,9 +369,18 @@ export const AdminDashboardSection: React.FC = () => {
           </div>
         </div>
 
-        {statsError && (
-          <div className="rounded-2xl border border-rose-500/35 bg-rose-950/35 px-4 py-3 text-xs sm:text-sm text-rose-200">
-            {statsError}
+        {(statsError || sessionExpired) && (
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between rounded-2xl border border-rose-500/35 bg-rose-950/35 px-4 py-3 text-xs sm:text-sm text-rose-200">
+            <span>{statsError || 'Your administrator session expired. Please sign in again.'}</span>
+            {sessionExpired && (
+              <button
+                type="button"
+                onClick={openAuthModal}
+                className="kuro-btn-primary inline-flex min-h-[36px] shrink-0 items-center justify-center rounded-xl px-3.5 py-1.5 text-xs font-semibold"
+              >
+                Sign In Again
+              </button>
+            )}
           </div>
         )}
 

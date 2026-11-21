@@ -5,7 +5,7 @@
   "outputDirectory": "dist",
   "functions": {
     "api/index.ts": {
-      "includeFiles": "{server.js,firebase-applet-config.json}",
+      "includeFiles": "{server.js,firebase-applet-config.json,android/app/google-services.json}",
       "maxDuration": 30
     }
   },

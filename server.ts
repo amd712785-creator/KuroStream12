@@ -64,22 +64,24 @@ const DATA_DIR = resolveWritableDataDir();
 const BANNER_UPLOADS_DIR = path.join(DATA_DIR, 'uploads', 'banners');
 const ANALYTICS_FILE_PATH = path.join(DATA_DIR, 'analytics.json');
 
-interface FirebaseAppletConfig {
+interface FirebaseProjectConfig {
   projectId: string;
   apiKey: string;
   firestoreDatabaseId?: string;
+  source: 'web' | 'android' | 'env';
 }
 
-function loadFirebaseAppletConfig(): FirebaseAppletConfig | null {
+function loadFirebaseAppletConfig(): FirebaseProjectConfig | null {
   const envJson = process.env.FIREBASE_CONFIG_JSON;
   if (envJson && envJson.trim()) {
     try {
-      const parsed = JSON.parse(envJson) as Partial<FirebaseAppletConfig>;
+      const parsed = JSON.parse(envJson) as Partial<FirebaseProjectConfig>;
       if (parsed.projectId && parsed.apiKey) {
         return {
           projectId: parsed.projectId,
           apiKey: parsed.apiKey,
           firestoreDatabaseId: parsed.firestoreDatabaseId || '(default)',
+          source: 'env',
         };
       }
     } catch {
@@ -96,12 +98,13 @@ function loadFirebaseAppletConfig(): FirebaseAppletConfig | null {
     try {
       if (!fs.existsSync(configPath)) continue;
       const raw = fs.readFileSync(configPath, 'utf8');
-      const parsed = JSON.parse(raw) as Partial<FirebaseAppletConfig>;
+      const parsed = JSON.parse(raw) as Partial<FirebaseProjectConfig>;
       if (parsed.projectId && parsed.apiKey) {
         return {
           projectId: parsed.projectId,
           apiKey: parsed.apiKey,
           firestoreDatabaseId: parsed.firestoreDatabaseId || '(default)',
+          source: 'web',
         };
       }
     } catch {
@@ -114,55 +117,141 @@ function loadFirebaseAppletConfig(): FirebaseAppletConfig | null {
       projectId: process.env.FIREBASE_PROJECT_ID,
       apiKey: process.env.FIREBASE_WEB_API_KEY,
       firestoreDatabaseId: process.env.FIREBASE_DATABASE_ID || '(default)',
+      source: 'env',
     };
   }
 
   return null;
 }
 
+function loadAndroidGoogleServicesConfig(): FirebaseProjectConfig | null {
+  const envAndroidJson = process.env.FIREBASE_ANDROID_CONFIG_JSON;
+  const rawSources: Array<{ label: string; raw?: string }> = [];
+  if (envAndroidJson && envAndroidJson.trim()) {
+    rawSources.push({ label: 'env', raw: envAndroidJson });
+  }
+
+  const candidatePaths = [
+    path.resolve(SERVER_ROOT_DIR, 'android/app/google-services.json'),
+    path.resolve(process.cwd(), 'android/app/google-services.json'),
+    path.resolve(SERVER_ROOT_DIR, 'public/assets/aistudio/google-services_48e0edfe.json'),
+    path.resolve(process.cwd(), 'public/assets/aistudio/google-services_48e0edfe.json'),
+  ];
+
+  for (const p of candidatePaths) {
+    try {
+      if (fs.existsSync(p)) {
+        rawSources.push({ label: p, raw: fs.readFileSync(p, 'utf8') });
+      }
+    } catch {
+      // try next path
+    }
+  }
+
+  for (const entry of rawSources) {
+    if (!entry.raw) continue;
+    try {
+      const parsed = JSON.parse(entry.raw) as {
+        project_info?: { project_id?: string };
+        client?: Array<{
+          client_info?: { android_client_info?: { package_name?: string } };
+          api_key?: Array<{ current_key?: string }>;
+        }>;
+      };
+      const projectId = parsed.project_info?.project_id?.trim();
+      const clients = Array.isArray(parsed.client) ? parsed.client : [];
+      const matchingClient =
+        clients.find(
+          (c) => c.client_info?.android_client_info?.package_name === 'com.kurostream.app'
+        ) || clients[0];
+      const apiKey = matchingClient?.api_key?.find((k) => Boolean(k?.current_key))?.current_key?.trim();
+      if (projectId && apiKey) {
+        return {
+          projectId,
+          apiKey,
+          firestoreDatabaseId: '(default)',
+          source: 'android',
+        };
+      }
+    } catch {
+      // try next source
+    }
+  }
+
+  return null;
+}
+
 const FIREBASE_CONFIG = loadFirebaseAppletConfig();
+const ANDROID_FIREBASE_CONFIG = loadAndroidGoogleServicesConfig();
+
+const FIREBASE_PROJECTS: FirebaseProjectConfig[] = [];
+for (const cfg of [FIREBASE_CONFIG, ANDROID_FIREBASE_CONFIG]) {
+  if (!cfg?.projectId || cfg.projectId === 'remixed-project-id') continue;
+  if (!FIREBASE_PROJECTS.some((p) => p.projectId === cfg.projectId)) {
+    FIREBASE_PROJECTS.push(cfg);
+  }
+}
 
 type AdminAuthInstance = {
   verifyIdToken: (token: string, checkRevoked?: boolean) => Promise<{
     email?: string;
     uid?: string;
+    sub?: string;
+    aud?: string;
     email_verified?: boolean;
+    admin?: boolean;
   }>;
   getUser: (uid: string) => Promise<{ customClaims?: Record<string, unknown> }>;
   setCustomUserClaims: (uid: string, claims: Record<string, unknown>) => Promise<void>;
 };
 
-let adminAuthCached: AdminAuthInstance | null = null;
-let adminInitAttempted = false;
+const adminAuthByProject = new Map<string, AdminAuthInstance>();
+const adminInitFailedProjects = new Set<string>();
 
-// Lazily load Firebase Admin SDK so Vercel cold starts never fail on Node < 22 or bundle trace edge cases
-async function getLazyAdminAuth(): Promise<AdminAuthInstance | null> {
-  if (adminAuthCached) return adminAuthCached;
-  if (adminInitAttempted || !FIREBASE_CONFIG?.projectId) return null;
-  adminInitAttempted = true;
+function hasServiceAccountCredentials(): boolean {
+  return Boolean(process.env.FIREBASE_SERVICE_ACCOUNT_JSON?.trim());
+}
+
+// Lazily load Firebase Admin SDK per Firebase project (Web + Android APK projects)
+async function getLazyAdminAuth(projectId: string): Promise<AdminAuthInstance | null> {
+  if (!projectId || projectId === 'remixed-project-id') return null;
+  const cached = adminAuthByProject.get(projectId);
+  if (cached) return cached;
+  if (adminInitFailedProjects.has(projectId)) return null;
+
   try {
     const [{ cert, getApps, initializeApp: initAdminApp }, { getAuth: getAdminAuth }] =
       await Promise.all([
         import('firebase-admin/app'),
         import('firebase-admin/auth'),
       ]);
-    if (getApps().length === 0) {
+    const appName = `kurostream-admin-${projectId}`;
+    let adminApp = getApps().find((a) => a.name === appName);
+    if (!adminApp) {
       const serviceAccountJson = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
       if (serviceAccountJson && serviceAccountJson.trim()) {
-        const sa = JSON.parse(serviceAccountJson);
-        initAdminApp({
-          credential: cert(sa),
-          projectId: FIREBASE_CONFIG.projectId,
-        });
+        const sa = JSON.parse(serviceAccountJson) as { project_id?: string };
+        // Only bind service account cert to the matching Firebase project
+        if (!sa.project_id || sa.project_id === projectId) {
+          adminApp = initAdminApp(
+            {
+              credential: cert(sa as Parameters<typeof cert>[0]),
+              projectId,
+            },
+            appName
+          );
+        } else {
+          adminApp = initAdminApp({ projectId }, appName);
+        }
       } else {
-        initAdminApp({
-          projectId: FIREBASE_CONFIG.projectId,
-        });
+        adminApp = initAdminApp({ projectId }, appName);
       }
     }
-    adminAuthCached = getAdminAuth() as unknown as AdminAuthInstance;
-    return adminAuthCached;
+    const authInstance = getAdminAuth(adminApp) as unknown as AdminAuthInstance;
+    adminAuthByProject.set(projectId, authInstance);
+    return authInstance;
   } catch {
+    adminInitFailedProjects.add(projectId);
     // Falls back cleanly to Google Identity Toolkit REST token verification
     return null;
   }
@@ -309,46 +398,98 @@ function pruneStalePresence(now = Date.now()): ActivePresenceSession[] {
   return active;
 }
 
+function peekJwtAudience(token: string): string | null {
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 3 || !parts[1]) return null;
+    const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8')) as {
+      aud?: unknown;
+    };
+    return typeof payload.aud === 'string' && payload.aud.trim() ? payload.aud.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
 async function verifyAdminRequest(req: Request): Promise<{
   ok: boolean;
   status: number;
+  code?: string;
   error?: string;
   uid?: string;
   email?: string;
+  projectId?: string;
 }> {
-  if (!FIREBASE_CONFIG) {
+  if (FIREBASE_PROJECTS.length === 0) {
     return { ok: false, status: 503, error: 'Firebase configuration is unavailable on server.' };
   }
+
   const authHeader = req.headers.authorization || '';
   const match = authHeader.match(/^Bearer\s+(.+)$/i);
   if (!match || !match[1]) {
-    return { ok: false, status: 401, error: 'Missing Authorization Bearer token.' };
+    return { ok: false, status: 401, code: 'MISSING_TOKEN', error: 'Missing Authorization Bearer token.' };
   }
   const idToken = match[1].trim();
+  if (!idToken || idToken === 'undefined' || idToken === 'null' || idToken.split('.').length !== 3) {
+    return {
+      ok: false,
+      status: 401,
+      code: 'MALFORMED_TOKEN',
+      error: 'Invalid or expired authentication token.',
+    };
+  }
+
+  // Unverified aud hint is used strictly to select which configured project verifier to run;
+  // full cryptographic signature/aud/iss/exp checks are performed by Firebase Admin SDK or Identity Toolkit.
+  const hintedAud = peekJwtAudience(idToken);
+  const candidateProjects = hintedAud
+    ? FIREBASE_PROJECTS.filter((p) => p.projectId === hintedAud)
+    : FIREBASE_PROJECTS;
+
+  if (hintedAud && candidateProjects.length === 0) {
+    console.warn('[AdminAuth] Rejected token with unrecognized Firebase project aud:', hintedAud);
+    return {
+      ok: false,
+      status: 401,
+      code: 'PROJECT_MISMATCH',
+      error: 'Authentication token does not belong to an authorized KuroStream Firebase project.',
+    };
+  }
 
   let verifiedEmail: string | undefined;
   let verifiedUid: string | undefined;
   let isEmailVerified = false;
+  let verifiedProjectId: string | undefined;
+  let sawExpiredToken = false;
 
-  const adminAuth = await getLazyAdminAuth();
+  for (const project of candidateProjects) {
+    const adminAuth = await getLazyAdminAuth(project.projectId);
 
-  // 1. Try Firebase Admin SDK verifyIdToken if initialized
-  if (adminAuth) {
-    try {
-      const decoded = await adminAuth.verifyIdToken(idToken, true);
-      verifiedEmail = decoded.email;
-      verifiedUid = decoded.uid;
-      isEmailVerified = decoded.email_verified === true;
-    } catch {
-      // Admin SDK verification failed or lacked service account certs; fall back to Identity Toolkit
+    // 1. Verify signature, expiry, issuer, and audience using Firebase Admin SDK (no IAM needed when checkRevoked=false)
+    if (adminAuth) {
+      try {
+        const useRevocationCheck = hasServiceAccountCredentials();
+        const decoded = await adminAuth.verifyIdToken(idToken, useRevocationCheck);
+        verifiedEmail = decoded.email;
+        verifiedUid = decoded.uid || decoded.sub;
+        isEmailVerified = decoded.email_verified === true;
+        verifiedProjectId = project.projectId;
+        break;
+      } catch (err) {
+        const fbCode =
+          err && typeof err === 'object' && 'code' in err ? String((err as { code?: unknown }).code) : '';
+        if (fbCode === 'auth/id-token-expired' || fbCode === 'auth/id-token-revoked') {
+          sawExpiredToken = true;
+          break;
+        }
+        // Only fall through to Identity Toolkit if Admin SDK failed for environment/cert reasons
+      }
     }
-  }
 
-  // 2. Identity Toolkit REST verification (authoritative Google verification of ID token)
-  if (!verifiedEmail) {
+    // 2. Identity Toolkit REST fallback for this project's Web/Android API key
     try {
       const lookupRes = await fetchWithTimeout(
-        `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(FIREBASE_CONFIG.apiKey)}`,
+        `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(project.apiKey)}`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -357,28 +498,53 @@ async function verifyAdminRequest(req: Request): Promise<{
         6000
       );
 
-      if (!lookupRes.ok) {
-        return { ok: false, status: 401, error: 'Invalid or expired authentication token.' };
+      if (lookupRes.ok) {
+        const lookupData = (await lookupRes.json()) as {
+          users?: Array<{ localId?: string; email?: string; emailVerified?: boolean }>;
+        };
+        const account = lookupData.users?.[0];
+        if (account?.localId && account?.email) {
+          verifiedEmail = account.email;
+          verifiedUid = account.localId;
+          isEmailVerified = account.emailVerified === true;
+          verifiedProjectId = project.projectId;
+          break;
+        }
+      } else {
+        const errJson = (await lookupRes.json().catch(() => null)) as {
+          error?: { message?: string };
+        } | null;
+        const msg = errJson?.error?.message || '';
+        if (msg.includes('TOKEN_EXPIRED')) {
+          sawExpiredToken = true;
+          break;
+        }
       }
-
-      const lookupData = (await lookupRes.json()) as {
-        users?: Array<{ localId?: string; email?: string; emailVerified?: boolean }>;
-      };
-      const account = lookupData.users?.[0];
-      verifiedEmail = account?.email;
-      verifiedUid = account?.localId;
-      isEmailVerified = account?.emailVerified === true;
-    } catch (err) {
-      return {
-        ok: false,
-        status: 500,
-        error: err instanceof Error ? err.message : 'Failed to verify administrator credentials.',
-      };
+    } catch {
+      // try next candidate project or report failure below
     }
   }
 
-  if (!verifiedUid || !verifiedEmail || !isEmailVerified) {
-    return { ok: false, status: 403, error: 'Verified email authentication is required.' };
+  if (sawExpiredToken) {
+    return {
+      ok: false,
+      status: 401,
+      code: 'TOKEN_EXPIRED',
+      error: 'Authentication token expired. Refreshing session...',
+    };
+  }
+
+  if (!verifiedUid || !verifiedEmail || !verifiedProjectId) {
+    return {
+      ok: false,
+      status: 401,
+      code: 'INVALID_TOKEN',
+      error: 'Invalid or expired authentication token.',
+    };
+  }
+
+  if (!isEmailVerified) {
+    return { ok: false, status: 403, code: 'EMAIL_UNVERIFIED', error: 'Verified email authentication is required.' };
   }
 
   const normalizedEmail = verifiedEmail.toLowerCase();
@@ -386,23 +552,27 @@ async function verifyAdminRequest(req: Request): Promise<{
     return {
       ok: false,
       status: 403,
-      error: 'Access denied: Only amd712785@gmail.com is authorized as administrator.',
+      code: 'FORBIDDEN',
+      error: `Access denied: Only ${AUTHORIZED_ADMIN_EMAIL} is authorized as administrator.`,
     };
   }
 
-  // Assign Firebase Admin custom claims { admin: true } to the authorized admin if available
-  if (adminAuth) {
-    try {
-      const userRec = await adminAuth.getUser(verifiedUid);
-      if (!userRec.customClaims?.admin) {
-        await adminAuth.setCustomUserClaims(verifiedUid, { admin: true });
+  // Only attempt custom claims mutation when a service account credential with IAM access is configured
+  if (hasServiceAccountCredentials()) {
+    const adminAuth = await getLazyAdminAuth(verifiedProjectId);
+    if (adminAuth) {
+      try {
+        const userRec = await adminAuth.getUser(verifiedUid);
+        if (!userRec.customClaims?.admin) {
+          await adminAuth.setCustomUserClaims(verifiedUid, { admin: true });
+        }
+      } catch {
+        // non-fatal if IAM permissions do not allow modifying custom claims
       }
-    } catch {
-      // non-fatal if IAM permissions do not allow modifying custom claims
     }
   }
 
-  return { ok: true, status: 200, uid: verifiedUid, email: verifiedEmail };
+  return { ok: true, status: 200, uid: verifiedUid, email: verifiedEmail, projectId: verifiedProjectId };
 }
 
 function detectVerifiedImageFormat(buffer: Buffer): { mime: string; ext: string } | null {
@@ -2335,9 +2505,30 @@ export function createExpressApp() {
     rawJsonParser(req, res, next);
   };
 
-  // Standard CORS support for all /api routes
+  // Standard CORS support for /api routes (explicit origin allowlist on authenticated /api/admin routes)
   app.use('/api', (req: Request, res: Response, next: NextFunction) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
+    const requestOrigin = typeof req.headers.origin === 'string' ? req.headers.origin.trim() : '';
+    const isAdminRoute = req.path.startsWith('/admin');
+
+    if (isAdminRoute) {
+      const isAllowedAdminOrigin =
+        !requestOrigin ||
+        requestOrigin === 'https://localhost' ||
+        requestOrigin === 'http://localhost' ||
+        requestOrigin === 'capacitor://localhost' ||
+        requestOrigin === 'ionic://localhost' ||
+        /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(requestOrigin) ||
+        /^https:\/\/[a-z0-9.-]+\.(run\.app|vercel\.app|web\.app|firebaseapp\.com)$/i.test(
+          requestOrigin
+        );
+      if (isAllowedAdminOrigin && requestOrigin) {
+        res.setHeader('Access-Control-Allow-Origin', requestOrigin);
+        res.setHeader('Vary', 'Origin');
+      }
+    } else {
+      res.setHeader('Access-Control-Allow-Origin', '*');
+    }
+
     res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, POST, DELETE, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, Range, If-Range');
     res.setHeader(
@@ -2363,7 +2554,8 @@ export function createExpressApp() {
         animeWorldUpstream: ANIMEWORLD_UPSTREAM,
         anilistUrl: ANILIST_API_URL,
       },
-      firebaseConfigured: Boolean(FIREBASE_CONFIG?.projectId),
+      firebaseConfigured: FIREBASE_PROJECTS.length > 0,
+      firebaseProjects: FIREBASE_PROJECTS.map((p) => p.projectId),
     });
   });
 
@@ -2818,7 +3010,7 @@ export function createExpressApp() {
   app.get('/api/admin/stats', async (req: Request, res: Response) => {
     const authCheck = await verifyAdminRequest(req);
     if (!authCheck.ok) {
-      res.status(authCheck.status).json({ error: authCheck.error });
+      res.status(authCheck.status).json({ error: authCheck.error, code: authCheck.code });
       return;
     }
 
@@ -2888,7 +3080,7 @@ export function createExpressApp() {
   app.post('/api/admin/banners/upload', jsonParser, async (req: Request, res: Response) => {
     const authCheck = await verifyAdminRequest(req);
     if (!authCheck.ok) {
-      res.status(authCheck.status).json({ error: authCheck.error });
+      res.status(authCheck.status).json({ error: authCheck.error, code: authCheck.code });
       return;
     }
 
@@ -2979,7 +3171,7 @@ export function createExpressApp() {
   app.delete('/api/admin/banners/image/:filename', async (req: Request, res: Response) => {
     const authCheck = await verifyAdminRequest(req);
     if (!authCheck.ok) {
-      res.status(authCheck.status).json({ error: authCheck.error });
+      res.status(authCheck.status).json({ error: authCheck.error, code: authCheck.code });
       return;
     }
 

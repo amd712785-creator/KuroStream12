@@ -223,7 +223,7 @@ interface AuthContextValue {
   isGuest: boolean;
   isAdmin: boolean;
   firebaseEnabled: boolean;
-  getIdToken: () => Promise<string | null>;
+  getIdToken: (forceRefresh?: boolean) => Promise<string | null>;
   preferences: UserPreferences;
   watchStats: UserWatchStats;
   watchlist: LibraryAnimeItem[];
@@ -324,7 +324,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         const isAuthorizedEmail =
           firebaseUser.email.toLowerCase() === AUTHORIZED_ADMIN_EMAIL.toLowerCase();
 
-        // Also check custom claims if provisioned by server
+        // Also inspect custom claims if provisioned by server
         let hasAdminClaim = false;
         try {
           const tokenResult = await firebaseUser.getIdTokenResult();
@@ -332,6 +332,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         } catch {
           // ignore token result lookup errors
         }
+
+        console.info('[KuroStream Auth] Admin check', {
+          projectId: auth?.app?.options?.projectId || firebaseDiagnostics.projectId,
+          isAuthorizedEmail,
+          hasAdminClaim,
+        });
 
         if (isAuthorizedEmail) {
           setIsAdmin(true);
@@ -794,14 +800,38 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   }, [user]);
 
-  const getIdToken = useCallback(async (): Promise<string | null> => {
-    if (!user) return null;
-    try {
-      return await user.getIdToken();
-    } catch {
-      return null;
-    }
-  }, [user]);
+  const getIdToken = useCallback(
+    async (forceRefresh = false): Promise<string | null> => {
+      const currentUser = auth?.currentUser || user;
+      if (!currentUser) return null;
+      try {
+        let token = await currentUser.getIdToken(forceRefresh);
+        if (typeof token !== 'string' || token.split('.').length !== 3) {
+          if (!forceRefresh) {
+            token = await currentUser.getIdToken(true);
+          }
+        }
+        return typeof token === 'string' && token.split('.').length === 3 ? token : null;
+      } catch (err) {
+        const code = (err as { code?: string } | null)?.code || 'unknown';
+        console.warn('[KuroStream Auth] Failed to obtain Firebase ID token', {
+          projectId: auth?.app?.options?.projectId || firebaseDiagnostics.projectId,
+          forceRefresh,
+          code,
+        });
+        if (!forceRefresh) {
+          try {
+            const retried = await currentUser.getIdToken(true);
+            return typeof retried === 'string' && retried.split('.').length === 3 ? retried : null;
+          } catch {
+            return null;
+          }
+        }
+        return null;
+      }
+    },
+    [user]
+  );
 
   const isInWatchlist = useCallback(
     (animeId: number) => watchlist.some((item) => item.animeId === animeId),

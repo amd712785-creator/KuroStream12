@@ -108,20 +108,47 @@ export function sendPresenceOfflineBeacon(): void {
   }).catch(() => {});
 }
 
+export class AdminApiError extends Error {
+  status: number;
+  code?: string;
+
+  constructor(message: string, status: number, code?: string) {
+    super(message);
+    this.name = 'AdminApiError';
+    this.status = status;
+    this.code = code;
+  }
+}
+
+function assertValidBearerToken(idToken: string | null | undefined): string {
+  const cleaned = typeof idToken === 'string' ? idToken.trim() : '';
+  if (!cleaned || cleaned === 'undefined' || cleaned === 'null' || cleaned.split('.').length !== 3) {
+    throw new AdminApiError(
+      'Unable to obtain a valid Firebase authentication token.',
+      401,
+      'MISSING_TOKEN'
+    );
+  }
+  return cleaned;
+}
+
 export async function fetchAdminServerStats(idToken: string): Promise<AdminServerStats> {
+  const token = assertValidBearerToken(idToken);
   const res = await fetch(resolveApiUrl('/api/admin/stats'), {
     headers: {
-      Authorization: `Bearer ${idToken}`,
+      Authorization: `Bearer ${token}`,
       Accept: 'application/json',
     },
   });
-  const parsed = await parseSafeJsonResponse<AdminServerStats & { error?: unknown }>(res);
+  const parsed = await parseSafeJsonResponse<AdminServerStats & { error?: unknown; code?: string }>(res);
   if (!parsed.ok || !parsed.data) {
-    throw new Error(
+    throw new AdminApiError(
       extractErrorMessage(
         parsed.data || parsed.rawText,
         `Failed to load admin statistics (HTTP ${parsed.status})`
-      )
+      ),
+      parsed.status,
+      parsed.data?.code
     );
   }
   return parsed.data;
@@ -198,11 +225,12 @@ export async function uploadBannerImage(
     reader.readAsDataURL(file);
   });
 
+  const token = assertValidBearerToken(idToken);
   const res = await fetch(resolveApiUrl('/api/admin/banners/upload'), {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${idToken}`,
+      Authorization: `Bearer ${token}`,
     },
     body: JSON.stringify({
       filename: file.name,
@@ -216,14 +244,17 @@ export async function uploadBannerImage(
     mimeType?: string;
     size?: number;
     error?: unknown;
+    code?: string;
   }>(res);
   const data = parsed.data;
   if (!parsed.ok || !data?.imageUrl) {
-    throw new Error(
+    throw new AdminApiError(
       extractErrorMessage(
         data || parsed.rawText,
         `Failed to upload image (HTTP ${parsed.status})`
-      )
+      ),
+      parsed.status,
+      data?.code
     );
   }
   return {
@@ -406,10 +437,11 @@ export async function deletePopupBanner(
   // Clean up local uploaded file if hosted by this server
   const prefix = '/api/banners/image/';
   if (banner.imageUrl.startsWith(prefix) && idToken) {
+    const token = assertValidBearerToken(idToken);
     const filename = banner.imageUrl.slice(prefix.length);
-    fetch(resolveApiUrl(`/api/admin/banners/image/${encodeURIComponent(filename)}`), {
+    await fetch(resolveApiUrl(`/api/admin/banners/image/${encodeURIComponent(filename)}`), {
       method: 'DELETE',
-      headers: { Authorization: `Bearer ${idToken}` },
+      headers: { Authorization: `Bearer ${token}` },
     }).catch(() => {});
   }
 }
