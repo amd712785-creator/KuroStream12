@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import {
+  AlertTriangle,
   Bookmark,
   Check,
   CheckCircle2,
@@ -363,21 +364,52 @@ export const AnimeDetailPage: React.FC = () => {
                 <span>{favored ? 'Favorited' : 'Favorite'}</span>
               </button>
 
-              {primaryEpisodeForDownload && (
-                <button
-                  type="button"
-                  onClick={() => void handleEpisodeDownload(primaryEpisodeForDownload)}
-                  disabled={resolvingEpId === primaryEpisodeForDownload.id}
-                  className="kuro-btn-glass inline-flex min-h-[46px] items-center gap-2 rounded-2xl px-4.5 py-3 text-sm font-semibold text-violet-200 whitespace-nowrap shrink-0 disabled:opacity-60"
-                >
-                  {resolvingEpId === primaryEpisodeForDownload.id ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                  ) : (
-                    <Download className="h-4 w-4" />
-                  )}
-                  <span>Download EP {primaryEpisodeForDownload.number}</span>
-                </button>
-              )}
+              {primaryEpisodeForDownload && (() => {
+                const audioMode = preferences.preferredAudio || 'sub';
+                const effId =
+                  audioMode === 'dub' && primaryEpisodeForDownload.dubId
+                    ? primaryEpisodeForDownload.dubId
+                    : primaryEpisodeForDownload.id;
+                const primaryDl =
+                  downloadsMap[`${anime.id}-${effId}`] ||
+                  downloadsMap[`${anime.id}-${primaryEpisodeForDownload.id}`];
+                const isPrimaryCompleted = primaryDl?.status === 'completed';
+                const isPrimaryDownloading = primaryDl?.status === 'downloading';
+                const isPrimaryUnsupported = primaryDl?.status === 'unsupported';
+                return (
+                  <button
+                    type="button"
+                    onClick={() => void handleEpisodeDownload(primaryEpisodeForDownload)}
+                    disabled={resolvingEpId === primaryEpisodeForDownload.id}
+                    className={`inline-flex min-h-[46px] items-center gap-2 rounded-2xl px-4.5 py-3 text-sm font-semibold whitespace-nowrap shrink-0 disabled:opacity-60 ${
+                      isPrimaryCompleted
+                        ? 'kuro-btn-active text-emerald-200'
+                        : isPrimaryUnsupported
+                          ? 'kuro-btn-glass border-amber-400/35 text-amber-200'
+                          : 'kuro-btn-glass text-violet-200'
+                    }`}
+                  >
+                    {resolvingEpId === primaryEpisodeForDownload.id || isPrimaryDownloading ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : isPrimaryCompleted ? (
+                      <CheckCircle2 className="h-4 w-4 text-emerald-400" />
+                    ) : isPrimaryUnsupported ? (
+                      <AlertTriangle className="h-4 w-4 text-amber-300" />
+                    ) : (
+                      <Download className="h-4 w-4" />
+                    )}
+                    <span>
+                      {isPrimaryCompleted
+                        ? `Play EP ${primaryEpisodeForDownload.number} Offline`
+                        : isPrimaryDownloading && primaryDl
+                          ? `Downloading (${primaryDl.progress}%)`
+                          : isPrimaryUnsupported
+                            ? 'Download Not Supported'
+                            : `Download EP ${primaryEpisodeForDownload.number}`}
+                    </span>
+                  </button>
+                );
+              })()}
 
               {anime.trailer?.site === 'youtube' && anime.trailer.id && (
                 <button
@@ -573,6 +605,7 @@ export const AnimeDetailPage: React.FC = () => {
                 const isResolving = resolvingEpId === ep.id;
                 const isCompleted = dlItem?.status === 'completed';
                 const isDownloading = dlItem?.status === 'downloading';
+                const isUnsupported = dlItem?.status === 'unsupported';
 
                 return (
                   <div
@@ -599,6 +632,9 @@ export const AnimeDetailPage: React.FC = () => {
                           {isDownloading && dlItem && (
                             <span className="text-[10px] text-amber-300">· {dlItem.progress}%</span>
                           )}
+                          {isUnsupported && (
+                            <span className="text-[10px] text-amber-300">· NOT SUPPORTED</span>
+                          )}
                         </div>
                         <p className="mt-0.5 truncate text-sm font-medium text-slate-100">
                           {ep.title}
@@ -615,27 +651,35 @@ export const AnimeDetailPage: React.FC = () => {
                           ? `Play Episode ${ep.number} offline`
                           : isDownloading
                             ? `Episode ${ep.number} downloading`
-                            : `Download Episode ${ep.number}`
+                            : isUnsupported
+                              ? `Episode ${ep.number} Download Not Supported`
+                              : `Download Episode ${ep.number}`
                       }
                       title={
                         isCompleted
                           ? 'Saved offline — Tap to play offline'
                           : isDownloading
                             ? `Downloading (${dlItem?.progress || 0}%)`
-                            : 'Download episode for offline viewing'
+                            : isUnsupported
+                              ? 'Download Not Supported'
+                              : 'Download episode for offline viewing'
                       }
                       className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border transition-colors ${
                         isCompleted
                           ? 'border-emerald-400/35 bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25'
                           : isDownloading
                             ? 'border-violet-400/35 bg-violet-500/15 text-violet-300'
-                            : 'border-white/[0.08] bg-white/[0.04] text-slate-300 hover:border-violet-400/45 hover:text-white'
+                            : isUnsupported
+                              ? 'border-amber-400/35 bg-amber-500/10 text-amber-300'
+                              : 'border-white/[0.08] bg-white/[0.04] text-slate-300 hover:border-violet-400/45 hover:text-white'
                       }`}
                     >
                       {isResolving || isDownloading ? (
                         <Loader2 className="h-4 w-4 animate-spin" />
                       ) : isCompleted ? (
                         <CheckCircle2 className="h-4 w-4" />
+                      ) : isUnsupported ? (
+                        <AlertTriangle className="h-4 w-4" />
                       ) : (
                         <Download className="h-4 w-4" />
                       )}

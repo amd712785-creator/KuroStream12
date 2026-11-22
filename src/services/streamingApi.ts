@@ -55,7 +55,7 @@ function classifyStreamType(
   explicitM3u8?: boolean,
   explicitType?: unknown
 ): 'hls' | 'mp4' | 'embed' {
-  if (explicitType === 'embed') return 'embed';
+  if (explicitType === 'embed' || explicitType === 'iframe') return 'embed';
   if (explicitType === 'mp4') return 'mp4';
   const lower = url.toLowerCase();
   let inspectUrl = lower;
@@ -68,8 +68,6 @@ function classifyStreamType(
       // keep outer URL
     }
   }
-  if (explicitM3u8 || inspectUrl.includes('.m3u8') || inspectUrl.includes('/master.txt')) return 'hls';
-  if (/\.(mp4|webm|mkv)(\?|$)/i.test(inspectUrl)) return 'mp4';
   if (
     inspectUrl.includes('embed') ||
     inspectUrl.includes('iframe') ||
@@ -79,11 +77,29 @@ function classifyStreamType(
     inspectUrl.includes('short.icu') ||
     inspectUrl.includes('megaplay') ||
     inspectUrl.includes('multi-lang-plyr') ||
+    inspectUrl.includes('vidmoly') ||
+    inspectUrl.includes('streamtape') ||
+    inspectUrl.includes('filemoon') ||
+    inspectUrl.includes('streamwish') ||
+    inspectUrl.includes('voe.sx') ||
+    inspectUrl.includes('dood') ||
+    inspectUrl.includes('mixdrop') ||
     inspectUrl.includes('/video/')
   ) {
     return 'embed';
   }
-  return 'hls';
+  if (/\.(mp4|webm|mkv)(\?|$)/i.test(inspectUrl)) return 'mp4';
+  if (
+    explicitM3u8 === true ||
+    explicitType === 'hls' ||
+    inspectUrl.includes('.m3u8') ||
+    inspectUrl.includes('.m3u?') ||
+    inspectUrl.endsWith('.m3u') ||
+    inspectUrl.includes('/master.txt')
+  ) {
+    return 'hls';
+  }
+  return 'embed';
 }
 
 /**

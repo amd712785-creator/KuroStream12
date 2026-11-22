@@ -15,7 +15,9 @@ import { AnimeWorldWatchPage } from '@/src/pages/AnimeWorldWatchPage';
 import { CatalogPage } from '@/src/pages/CatalogPage';
 import { HomePage } from '@/src/pages/HomePage';
 import { ProfilePage } from '@/src/pages/ProfilePage';
+import { ProfileEditPage } from '@/src/pages/ProfileEditPage';
 import { SchedulePage } from '@/src/pages/SchedulePage';
+import { SettingsPage } from '@/src/pages/SettingsPage';
 import { WatchPage } from '@/src/pages/WatchPage';
 import {
   recordSiteVisit,
@@ -124,6 +126,8 @@ function AnimatedRoutes() {
           <Route path="/animeworld-india/series/:seriesId" element={<AnimeWorldSeriesPage />} />
           <Route path="/animeworld-india/watch/:kind/:contentId" element={<AnimeWorldWatchPage />} />
           <Route path="/profile" element={<ProfilePage />} />
+          <Route path="/profile/edit" element={<ProfileEditPage />} />
+          <Route path="/settings" element={<SettingsPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </div>

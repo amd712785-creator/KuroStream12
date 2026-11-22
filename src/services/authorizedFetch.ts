@@ -97,6 +97,8 @@ export async function authorizedApiFetch(
     );
   }
 
+  const callerSignal = restInit.signal;
+
   const execute = async (bearerToken: string): Promise<Response> => {
     const headers = new Headers(callerHeaders || {});
     headers.set('Authorization', `Bearer ${bearerToken}`);
@@ -104,16 +106,41 @@ export async function authorizedApiFetch(
       headers.set('Accept', 'application/json');
     }
 
+    if (callerSignal?.aborted) {
+      throw new DOMException('Aborted', 'AbortError');
+    }
+
     const controller = new AbortController();
-    const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+    let timedOut = false;
+
+    const onCallerAbort = () => {
+      controller.abort();
+    };
+    if (callerSignal) {
+      callerSignal.addEventListener('abort', onCallerAbort, { once: true });
+    }
+
+    const timer = window.setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
+
     try {
       return await fetch(url, {
         ...restInit,
         headers,
         signal: controller.signal,
       });
+    } catch (err) {
+      if (timedOut && !callerSignal?.aborted) {
+        throw new Error(`Request timed out after ${Math.round(timeoutMs / 1000)}s.`);
+      }
+      throw err;
     } finally {
       window.clearTimeout(timer);
+      if (callerSignal) {
+        callerSignal.removeEventListener('abort', onCallerAbort);
+      }
     }
   };
 

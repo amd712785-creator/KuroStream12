@@ -1,29 +1,32 @@
 import React, { useEffect, useState } from 'react';
-import { Link, useSearchParams } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import {
+  AlertCircle,
+  ArrowRight,
   Bookmark,
   Camera,
   Check,
   Clock,
-  Cloud,
   Download,
+  Flame,
   HardDrive,
   Heart,
-  LogIn,
-  LogOut,
   Package,
   Pause,
   Play,
   RefreshCw,
-  RotateCcw,
+  Server,
   Settings2,
   ShieldCheck,
   Trash2,
+  Trophy,
   User,
   WifiOff,
 } from 'lucide-react';
+import { AchievementsSection } from '@/src/components/AchievementsSection';
 import { AdminDashboardSection } from '@/src/components/AdminDashboardSection';
 import { AnimeImage } from '@/src/components/AnimeImage';
+import { OptimizedBannerImage } from '@/src/components/OptimizedBannerImage';
 import { AvatarGalleryModal } from '@/src/components/AvatarGalleryModal';
 import {
   DownloadManagerModal,
@@ -32,12 +35,7 @@ import {
 } from '@/src/components/DownloadManagerModal';
 import { ExtensionManager } from '@/src/components/ExtensionManager';
 import { OfflinePlayerModal } from '@/src/components/OfflinePlayerModal';
-import { ThemeSelector } from '@/src/components/ThemeSelector';
-import {
-  getDefaultStreamingApiBase,
-  getStreamingApiBase,
-  setStreamingApiOverride,
-} from '@/src/config/env';
+import { StreakCalendarSection } from '@/src/components/StreakCalendarSection';
 import { useAuth } from '@/src/context/AuthContext';
 import {
   cancelOrDeleteDownload,
@@ -48,13 +46,15 @@ import {
   type DownloadItem,
 } from '@/src/services/downloadService';
 
-type ProfileTab =
+type ProfileSection =
+  | 'overview'
+  | 'streak'
+  | 'achievements'
   | 'continue'
   | 'downloads'
   | 'watchlist'
   | 'favorites'
   | 'history'
-  | 'settings'
   | 'sources'
   | 'admin';
 
@@ -68,6 +68,7 @@ export const ProfilePage: React.FC = () => {
     watchlist,
     favorites,
     history,
+    watchStats,
     openAuthModal,
     signOut,
     updatePreferences,
@@ -75,26 +76,15 @@ export const ProfilePage: React.FC = () => {
     clearHistory,
   } = useAuth();
 
+  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
-  const initialTabParam = searchParams.get('tab');
-  const [tab, setTab] = useState<ProfileTab>(
-    initialTabParam === 'sources' ||
-      initialTabParam === 'downloads' ||
-      initialTabParam === 'watchlist' ||
-      initialTabParam === 'favorites' ||
-      initialTabParam === 'history' ||
-      initialTabParam === 'settings' ||
-      initialTabParam === 'admin'
-      ? initialTabParam
-      : 'continue'
-  );
-  const [nameInput, setNameInput] = useState(preferences.displayName);
-  const [savedToast, setSavedToast] = useState(false);
+  const activeTab = (searchParams.get('tab') as ProfileSection) || 'overview';
+
+  const [downloads, setDownloads] = useState<DownloadItem[]>(() => getStoredDownloads());
   const [showAvatarGallery, setShowAvatarGallery] = useState(false);
   const [avatarSavedToast, setAvatarSavedToast] = useState(false);
-  const [endpointInput, setEndpointInput] = useState(() => getStreamingApiBase());
-  const [endpointSaved, setEndpointSaved] = useState(false);
-  const [downloads, setDownloads] = useState<DownloadItem[]>(() => getStoredDownloads());
+  const [nameInput, setNameInput] = useState(preferences.displayName);
+  const [savedToast, setSavedToast] = useState(false);
   const [showDownloadManager, setShowDownloadManager] = useState(false);
   const [offlinePlayerItem, setOfflinePlayerItem] = useState<DownloadItem | null>(null);
 
@@ -113,32 +103,14 @@ export const ProfilePage: React.FC = () => {
     setNameInput(preferences.displayName);
   }, [preferences.displayName]);
 
-  useEffect(() => {
-    const p = searchParams.get('tab');
-    if (
-      p === 'sources' ||
-      p === 'downloads' ||
-      p === 'watchlist' ||
-      p === 'favorites' ||
-      p === 'history' ||
-      p === 'settings' ||
-      p === 'continue'
-    ) {
-      setTab(p);
-    } else if (p === 'admin') {
-      if (isAdmin) {
-        setTab('admin');
-      } else if (authReady) {
-        setTab('continue');
-        setSearchParams({}, { replace: true });
-      }
+  const selectTab = (tab: ProfileSection) => {
+    if (tab === 'admin' && !isAdmin) return;
+    if (tab === 'overview') {
+      setSearchParams({}, { replace: true });
+    } else {
+      setSearchParams({ tab }, { replace: true });
     }
-  }, [searchParams, isAdmin, authReady, setSearchParams]);
-
-  const selectTab = (next: ProfileTab) => {
-    if (next === 'admin' && !isAdmin) return;
-    setTab(next);
-    setSearchParams(next === 'continue' ? {} : { tab: next }, { replace: true });
+    window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
   const handleSaveProfile = async (e: React.FormEvent) => {
@@ -163,451 +135,288 @@ export const ProfilePage: React.FC = () => {
     window.setTimeout(() => setAvatarSavedToast(false), 2500);
   };
 
-  const handleSaveEndpoint = (e: React.FormEvent) => {
-    e.preventDefault();
-    setStreamingApiOverride(endpointInput.trim() || null);
-    setEndpointSaved(true);
-    window.setTimeout(() => setEndpointSaved(false), 2200);
-  };
+  const completedDownloadsCount = downloads.filter((d) => d.status === 'completed').length;
+  const totalDownloadsBytes = downloads.reduce(
+    (sum, d) => sum + (d.status === 'completed' ? d.fileSize || d.downloadedBytes : d.downloadedBytes),
+    0
+  );
+
+  const uniqueAnimeWatched = new Set(history.map((h) => h.animeId)).size;
+  const totalEpisodesCount = watchStats.totalEpisodesCompleted || history.length;
+  const totalMinutes = totalEpisodesCount * 24;
+  const watchTimeFormatted =
+    totalMinutes >= 60
+      ? `${Math.floor(totalMinutes / 60)} hrs ${totalMinutes % 60} mins`
+      : `${totalMinutes} mins`;
+
+  const currentStreak = watchStats.streakCurrent || 0;
+  const unlockedBadgesCount = (watchStats.unlockedAchievements || []).length;
 
   return (
-    <div className="mx-auto max-w-7xl space-y-6 sm:space-y-8 px-4 py-6 sm:px-6 sm:py-8">
-      {/* User Header Card */}
-      <section className="kuro-glass rounded-3xl p-5 sm:p-6">
-        <div className="flex flex-col gap-5 md:flex-row md:items-center md:justify-between">
-          <div className="flex items-center gap-4">
+    <div className="mx-auto max-w-5xl space-y-8 px-4 py-6 sm:px-6 sm:py-10">
+      {/* Profile Header with Custom Profile Banner */}
+      <section className="relative overflow-hidden rounded-3xl border border-violet-500/30 bg-gradient-to-br from-[#121422] via-[#0b0d17] to-[#07080d] p-6 sm:p-8 shadow-[0_0_50px_-10px_rgba(147,51,234,0.25)]">
+        {preferences.bannerURL && (
+          <div className="absolute inset-0 z-0 overflow-hidden pointer-events-none">
+            <OptimizedBannerImage
+              src={preferences.bannerURL}
+              alt="Profile Banner Backdrop"
+              priority
+              className="h-full w-full object-cover filter brightness-[0.35] scale-105"
+            />
+            <div className="absolute inset-0 bg-gradient-to-r from-[#07080d]/95 via-[#07080d]/85 to-[#07080d]/70 pointer-events-none" />
+          </div>
+        )}
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute -right-20 -top-20 h-64 w-64 rounded-full bg-violet-600/20 blur-3xl"
+        />
+
+        <div className="relative z-10 flex flex-col gap-6 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex items-center gap-5">
             <button
               type="button"
-              onClick={() => (user ? setShowAvatarGallery(true) : openAuthModal())}
+              onClick={() => (user ? navigate('/profile/edit') : openAuthModal())}
               aria-label="Edit profile picture"
-              className="group relative h-20 w-20 shrink-0 overflow-hidden rounded-2xl border border-violet-400/35 bg-[#141726] shadow-lg shadow-violet-950/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
+              className="group relative h-20 w-20 sm:h-24 sm:w-24 shrink-0 overflow-hidden rounded-3xl border-2 border-violet-400 bg-[#141726] shadow-[0_0_25px_rgba(168,85,247,0.5)] transition-transform duration-300 hover:scale-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400"
             >
               <AnimeImage
                 src={preferences.photoURL}
                 alt={preferences.displayName}
                 variant="avatar"
-                className="h-full w-full object-cover object-top transition-transform duration-200 group-hover:scale-105"
+                className="h-full w-full object-cover object-top"
               />
-              <span className="absolute inset-0 flex items-center justify-center bg-black/50 opacity-0 transition-opacity group-hover:opacity-100">
-                <Camera className="h-5 w-5 text-white" />
+              <span className="absolute inset-0 flex items-center justify-center bg-black/60 opacity-0 transition-opacity group-hover:opacity-100">
+                <Camera className="h-6 w-6 text-white" />
               </span>
             </button>
 
-            <div className="min-w-0">
-              <h1 className="truncate text-xl sm:text-2xl font-bold text-white">
+            <div className="min-w-0 space-y-1">
+              <h1 className="text-xl sm:text-2xl font-black text-white truncate">
                 {preferences.displayName}
               </h1>
-              <p className="mt-1 flex items-center gap-2 text-xs text-slate-400">
-                {user ? (
-                  <>
-                    <Cloud className="h-3.5 w-3.5 shrink-0 text-violet-400" />
-                    <span className="truncate">Synced via Firebase ({user.email})</span>
-                  </>
-                ) : (
-                  <>
-                    <User className="h-3.5 w-3.5 shrink-0 text-slate-400" />
-                    <span>Sign in to sync your profile, watchlist, and history</span>
-                  </>
-                )}
+              <p className="text-xs sm:text-sm text-slate-400 truncate">
+                {user ? user.email : 'Guest Session (Sign in to sync across devices)'}
               </p>
               {avatarSavedToast && (
-                <p className="mt-1.5 inline-flex items-center gap-1.5 text-xs font-medium text-emerald-400">
+                <p className="inline-flex items-center gap-1.5 text-xs font-semibold text-emerald-400">
                   <Check className="h-3.5 w-3.5" />
-                  <span>Profile picture updated</span>
+                  <span>Profile picture updated successfully</span>
                 </p>
               )}
             </div>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2.5 sm:gap-3">
-            {user && (
-              <button
-                type="button"
-                onClick={() => setShowAvatarGallery(true)}
-                className="kuro-btn-active inline-flex min-h-[44px] items-center gap-2 rounded-2xl px-4.5 py-2 text-xs sm:text-sm font-semibold whitespace-nowrap"
-              >
-                <Camera className="h-4 w-4" />
-                <span>Edit Profile Picture</span>
-              </button>
-            )}
-            {!user && firebaseEnabled && (
-              <button
-                type="button"
-                onClick={openAuthModal}
-                className="kuro-btn-primary inline-flex min-h-[44px] items-center gap-2 rounded-2xl px-4.5 py-2 text-xs sm:text-sm font-semibold whitespace-nowrap"
-              >
-                <LogIn className="h-4 w-4" />
-                <span>Sign In / Create Account</span>
-              </button>
-            )}
-            {user && (
-              <button
-                type="button"
-                onClick={signOut}
-                className="kuro-btn-glass inline-flex min-h-[44px] items-center gap-2 rounded-2xl px-4.5 py-2 text-xs sm:text-sm font-semibold whitespace-nowrap"
-              >
-                <LogOut className="h-4 w-4" />
-                <span>Sign Out</span>
-              </button>
+          <div className="flex flex-wrap items-center gap-3">
+            {user ? (
+              <>
+                <button
+                  type="button"
+                  onClick={() => navigate('/profile/edit')}
+                  className="kuro-btn-active inline-flex min-h-[44px] items-center gap-2 rounded-2xl px-4.5 py-2 text-xs sm:text-sm font-semibold whitespace-nowrap shadow-lg"
+                >
+                  <Camera className="h-4 w-4" />
+                  <span>Edit Profile</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={signOut}
+                  className="kuro-btn-glass inline-flex min-h-[44px] items-center gap-2 rounded-2xl px-4.5 py-2 text-xs sm:text-sm font-semibold whitespace-nowrap text-rose-300 hover:text-rose-200"
+                >
+                  <span>Sign Out</span>
+                </button>
+              </>
+            ) : (
+              firebaseEnabled && (
+                <button
+                  type="button"
+                  onClick={openAuthModal}
+                  className="kuro-btn-primary inline-flex min-h-[44px] items-center gap-2 rounded-2xl px-5 py-2.5 text-xs sm:text-sm font-semibold whitespace-nowrap shadow-lg shadow-violet-950/50"
+                >
+                  <User className="h-4 w-4" />
+                  <span>Sign In / Create Account</span>
+                </button>
+              )
             )}
           </div>
         </div>
 
-        {/* Quick Preferences Row */}
-        <form
-          onSubmit={handleSaveProfile}
-          className="mt-6 grid grid-cols-1 gap-4 border-t border-white/[0.08] pt-5 sm:grid-cols-3"
-        >
-          <div>
-            <label htmlFor="profile-name" className="block text-xs font-medium text-slate-400 mb-1.5">
-              Display Name
-            </label>
-            <div className="flex gap-2">
+        {user && (
+          <form
+            onSubmit={handleSaveProfile}
+            className="mt-6 flex flex-col sm:flex-row items-center gap-3 border-t border-white/[0.08] pt-5"
+          >
+            <div className="w-full sm:max-w-md flex-1">
+              <label htmlFor="profile-name-input" className="block text-xs font-medium text-slate-400 mb-1">
+                Display Name
+              </label>
               <input
-                id="profile-name"
+                id="profile-name-input"
                 type="text"
-                maxLength={80}
+                maxLength={60}
                 value={nameInput}
                 onChange={(e) => setNameInput(e.target.value)}
-                className="h-10 flex-1 rounded-xl border border-white/[0.1] bg-[#07080d]/85 px-3 text-sm text-white focus:border-violet-500 focus:outline-none"
+                className="h-10 w-full rounded-xl border border-white/[0.1] bg-[#07080d]/90 px-3.5 text-sm text-white focus:border-violet-500 focus:outline-none"
               />
-              <button
-                type="submit"
-                className="kuro-btn-glass min-h-[40px] rounded-xl px-4 text-xs font-semibold"
-              >
-                {savedToast ? <Check className="h-4 w-4 text-emerald-400" /> : 'Save'}
-              </button>
             </div>
-          </div>
-
-          <div>
-            <span className="block text-xs font-medium text-slate-400 mb-1.5">Default Audio</span>
-            <div className="kuro-segment-track inline-flex flex-wrap rounded-xl p-1 gap-1">
-              <button
-                type="button"
-                onClick={() => updatePreferences({ preferredAudio: 'sub' })}
-                className={`min-h-[34px] rounded-lg px-3.5 py-1 text-xs font-semibold ${
-                  preferences.preferredAudio === 'sub'
-                    ? 'kuro-segment-active'
-                    : 'kuro-segment-idle'
-                }`}
-              >
-                Japanese
-              </button>
-              <button
-                type="button"
-                onClick={() => updatePreferences({ preferredAudio: 'dub' })}
-                className={`min-h-[34px] rounded-lg px-3.5 py-1 text-xs font-semibold ${
-                  preferences.preferredAudio === 'dub'
-                    ? 'kuro-segment-active'
-                    : 'kuro-segment-idle'
-                }`}
-              >
-                English
-              </button>
-              <button
-                type="button"
-                onClick={() => updatePreferences({ preferredAudio: 'hindi' })}
-                className={`min-h-[34px] rounded-lg px-3.5 py-1 text-xs font-semibold ${
-                  preferences.preferredAudio === 'hindi'
-                    ? 'kuro-segment-amber'
-                    : 'kuro-segment-idle'
-                }`}
-              >
-                Hindi
-              </button>
-            </div>
-          </div>
-
-          <div>
-            <span className="block text-xs font-medium text-slate-400 mb-1.5">Playback</span>
             <button
-              type="button"
-              onClick={() => updatePreferences({ autoNext: !preferences.autoNext })}
-              className={`min-h-[40px] rounded-xl px-4 py-2 text-xs font-semibold ${
-                preferences.autoNext ? 'kuro-btn-active' : 'kuro-btn-glass text-slate-300'
-              }`}
+              type="submit"
+              className="kuro-btn-glass mt-5 sm:mt-0 min-h-[40px] w-full sm:w-auto rounded-xl px-5 text-xs font-semibold"
             >
-              Auto Next Episode: {preferences.autoNext ? 'Enabled' : 'Disabled'}
+              {savedToast ? <Check className="h-4 w-4 text-emerald-400 inline" /> : 'Update Name'}
             </button>
-          </div>
-        </form>
+          </form>
+        )}
       </section>
 
-      {/* Library & Settings Tabs */}
-      <div className="flex flex-wrap items-center justify-between gap-4">
-        <div className="kuro-segment-track flex w-full sm:w-auto gap-1 overflow-x-auto no-scrollbar rounded-2xl p-1">
-          <button
-            type="button"
-            onClick={() => selectTab('continue')}
-            className={`inline-flex min-h-[40px] shrink-0 items-center gap-1.5 rounded-xl px-3.5 py-2 text-xs font-semibold ${
-              tab === 'continue' ? 'kuro-segment-active' : 'kuro-segment-idle'
-            }`}
-          >
-            <Play className="h-3.5 w-3.5" />
-            <span>Continue Watching ({history.length})</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => selectTab('downloads')}
-            className={`inline-flex min-h-[40px] shrink-0 items-center gap-1.5 rounded-xl px-3.5 py-2 text-xs font-semibold ${
-              tab === 'downloads' ? 'kuro-segment-active' : 'kuro-segment-idle'
-            }`}
-          >
-            <Download className="h-3.5 w-3.5" />
-            <span>Downloads ({downloads.length})</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => selectTab('watchlist')}
-            className={`inline-flex min-h-[40px] shrink-0 items-center gap-1.5 rounded-xl px-3.5 py-2 text-xs font-semibold ${
-              tab === 'watchlist' ? 'kuro-segment-active' : 'kuro-segment-idle'
-            }`}
-          >
-            <Bookmark className="h-3.5 w-3.5" />
-            <span>Watchlist ({watchlist.length})</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => selectTab('favorites')}
-            className={`inline-flex min-h-[40px] shrink-0 items-center gap-1.5 rounded-xl px-3.5 py-2 text-xs font-semibold ${
-              tab === 'favorites' ? 'kuro-segment-active' : 'kuro-segment-idle'
-            }`}
-          >
-            <Heart className="h-3.5 w-3.5" />
-            <span>Favorites ({favorites.length})</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => selectTab('history')}
-            className={`inline-flex min-h-[40px] shrink-0 items-center gap-1.5 rounded-xl px-3.5 py-2 text-xs font-semibold ${
-              tab === 'history' ? 'kuro-segment-active' : 'kuro-segment-idle'
-            }`}
-          >
-            <Clock className="h-3.5 w-3.5" />
-            <span>Watch History ({history.length})</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => selectTab('settings')}
-            className={`inline-flex min-h-[40px] shrink-0 items-center gap-1.5 rounded-xl px-3.5 py-2 text-xs font-semibold ${
-              tab === 'settings' ? 'kuro-segment-active' : 'kuro-segment-idle'
-            }`}
-          >
-            <Settings2 className="h-3.5 w-3.5" />
-            <span>Settings</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => selectTab('sources')}
-            className={`inline-flex min-h-[40px] shrink-0 items-center gap-1.5 rounded-xl px-3.5 py-2 text-xs font-semibold ${
-              tab === 'sources' ? 'kuro-segment-active' : 'kuro-segment-idle'
-            }`}
-          >
-            <Package className="h-3.5 w-3.5" />
-            <span>Sources</span>
-          </button>
-          {isAdmin && (
-            <button
-              type="button"
-              onClick={() => selectTab('admin')}
-              className={`inline-flex min-h-[40px] shrink-0 items-center gap-1.5 rounded-xl px-3.5 py-2 text-xs font-semibold ${
-                tab === 'admin' ? 'kuro-segment-active' : 'kuro-segment-idle'
-              }`}
-            >
-              <ShieldCheck className="h-3.5 w-3.5" />
-              <span>Admin Dashboard</span>
-            </button>
-          )}
-        </div>
-
-        {(tab === 'history' || tab === 'continue') && history.length > 0 && (
-          <button
-            type="button"
-            onClick={clearHistory}
-            className="kuro-btn-glass inline-flex min-h-[38px] items-center gap-1.5 rounded-xl px-3.5 py-1.5 text-xs font-semibold text-rose-300"
-          >
-            <Trash2 className="h-3.5 w-3.5" />
-            <span>Clear History</span>
-          </button>
-        )}
-      </div>
-
-      {/* Tab Content */}
-      {tab === 'downloads' && (
-        <div className="space-y-4">
-          <div className="kuro-glass flex flex-wrap items-center justify-between gap-3 rounded-2xl px-4 py-3.5">
-            <div className="flex items-center gap-2.5 text-xs text-slate-300 tabular-nums">
-              <HardDrive className="h-4 w-4 text-emerald-400" />
-              <span>
-                {downloads.filter((d) => d.status === 'completed').length} ready for offline playback ·{' '}
-                {formatDownloadBytes(
-                  downloads.reduce(
-                    (sum, d) => sum + (d.status === 'completed' ? d.fileSize || d.downloadedBytes : d.downloadedBytes),
-                    0
-                  )
-                )}{' '}
-                used
-              </span>
-            </div>
-            <button
-              type="button"
-              onClick={() => setShowDownloadManager(true)}
-              className="kuro-btn-glass inline-flex min-h-[38px] items-center gap-1.5 rounded-xl px-3.5 py-1.5 text-xs font-semibold text-violet-200"
-            >
-              <Download className="h-3.5 w-3.5" />
-              <span>Open Manager</span>
-            </button>
+      {/* Subheader if viewing subsection */}
+      {activeTab !== 'overview' && (
+        <div className="flex items-center justify-between rounded-2xl border border-violet-500/35 bg-[#10121d]/90 px-5 py-3.5">
+          <div className="flex items-center gap-2.5 text-sm font-semibold text-white capitalize">
+            <span>Viewing: {activeTab.replace('-', ' ')}</span>
           </div>
+          <button
+            type="button"
+            onClick={() => selectTab('overview')}
+            className="kuro-btn-glass rounded-xl px-4 py-1.5 text-xs font-semibold text-violet-300"
+          >
+            ← Back to My Profile
+          </button>
+        </div>
+      )}
 
-          {downloads.length === 0 ? (
-            <EmptyLibraryState
-              title="No offline downloads yet"
-              description="Tap Download on any anime episode or inside the video player to save episodes for offline playback."
-            />
-          ) : (
-            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-              {downloads.map((item) => {
-                const isCompleted = item.status === 'completed';
-                const isDownloading = item.status === 'downloading';
-                const isQueued = item.status === 'queued';
-                const isPaused = item.status === 'paused';
-                const isError = item.status === 'error';
-
-                return (
-                  <div
-                    key={item.id}
-                    className="kuro-glass flex flex-col justify-between gap-3 rounded-2xl p-3.5 sm:p-4"
-                  >
-                    <div className="flex items-start gap-3.5 min-w-0">
-                      <AnimeImage
-                        src={item.coverImage}
-                        alt={item.animeTitle}
-                        className="h-20 w-14 shrink-0 rounded-xl object-cover"
-                      />
-                      <div className="min-w-0 flex-1 space-y-1">
-                        <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 font-mono text-[11px] text-violet-300 tabular-nums">
-                          <span className="font-semibold">
-                            EP {item.episodeNumber} · {item.audioMode.toUpperCase()}
-                          </span>
-                          <span className="uppercase text-slate-400">
-                            · {item.format}
-                            {item.serverName ? ` (${item.serverName})` : ''}
-                          </span>
-                          <span className="text-slate-400">
-                            · {formatDownloadBytes(item.fileSize || item.downloadedBytes)}
-                          </span>
-                        </div>
-                        <p className="truncate text-sm font-bold text-white">{item.animeTitle}</p>
-                        <p className="truncate text-xs text-slate-400">{item.episodeTitle}</p>
-
-                        {isCompleted && (
-                          <p className="flex items-center gap-1.5 text-[11px] font-medium text-emerald-400">
-                            <WifiOff className="h-3.5 w-3.5 shrink-0" />
-                            <span>Offline Ready</span>
-                          </p>
-                        )}
-
-                        {(isDownloading || isQueued || isPaused) && (
-                          <div className="space-y-1 pt-1">
-                            <div className="flex items-center justify-between text-[11px] text-slate-400 tabular-nums">
-                              <span>
-                                {isQueued
-                                  ? 'Queued...'
-                                  : isDownloading
-                                    ? `Downloading (${item.progress}%)`
-                                    : `Paused (${item.progress}%)`}
-                              </span>
-                              {isDownloading && item.speedBytesPerSec > 0 && (
-                                <span className="text-emerald-400">
-                                  {formatDownloadSpeed(item.speedBytesPerSec)}
-                                </span>
-                              )}
-                            </div>
-                            <div className="h-1.5 w-full overflow-hidden rounded-full bg-white/10">
-                              <div
-                                className="h-full bg-gradient-to-r from-violet-500 to-fuchsia-500"
-                                style={{ width: `${Math.max(2, item.progress)}%` }}
-                              />
-                            </div>
-                          </div>
-                        )}
-
-                        {isError && (
-                          <p className="line-clamp-2 text-[11px] text-rose-400">
-                            {item.errorMessage || 'Download failed'}
-                          </p>
-                        )}
-                      </div>
-                    </div>
-
-                    <div className="flex items-center justify-end gap-2 border-t border-white/[0.06] pt-2.5">
-                      {isCompleted && (
-                        <button
-                          type="button"
-                          onClick={() => setOfflinePlayerItem(item)}
-                          className="kuro-btn-primary inline-flex min-h-[40px] items-center gap-1.5 rounded-xl px-4 py-1.5 text-xs font-semibold"
-                        >
-                          <Play className="h-3.5 w-3.5 fill-current" />
-                          <span>Play Offline</span>
-                        </button>
-                      )}
-                      {(isDownloading || isQueued) && (
-                        <button
-                          type="button"
-                          onClick={() => pauseDownload(item.id)}
-                          className="kuro-btn-glass inline-flex min-h-[40px] items-center gap-1.5 rounded-xl px-3.5 py-1.5 text-xs font-semibold"
-                        >
-                          <Pause className="h-3.5 w-3.5" />
-                          <span>Pause</span>
-                        </button>
-                      )}
-                      {isPaused && (
-                        <button
-                          type="button"
-                          onClick={() => resumeDownload(item.id)}
-                          className="kuro-btn-primary inline-flex min-h-[40px] items-center gap-1.5 rounded-xl px-3.5 py-1.5 text-xs font-semibold"
-                        >
-                          <Play className="h-3.5 w-3.5" />
-                          <span>Resume</span>
-                        </button>
-                      )}
-                      {isError && (
-                        <button
-                          type="button"
-                          onClick={() => void retryDownload(item.id)}
-                          className="kuro-btn-primary inline-flex min-h-[40px] items-center gap-1.5 rounded-xl px-3.5 py-1.5 text-xs font-semibold"
-                        >
-                          <RefreshCw className="h-3.5 w-3.5" />
-                          <span>Retry</span>
-                        </button>
-                      )}
-                      <button
-                        type="button"
-                        onClick={() => void cancelOrDeleteDownload(item.id)}
-                        aria-label={isCompleted ? 'Delete downloaded episode' : 'Cancel download'}
-                        className="kuro-btn-glass flex h-10 w-10 items-center justify-center rounded-xl text-rose-300 hover:text-rose-200"
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </button>
-                    </div>
-                  </div>
-                );
-              })}
+      {/* Overview Dashboard */}
+      {activeTab === 'overview' && (
+        <div className="space-y-8">
+          {/* MY ACTIVITY */}
+          <section className="space-y-4">
+            <h2 className="text-xs font-bold uppercase tracking-wider text-violet-400 px-1">
+              My Activity &amp; Streaks
+            </h2>
+            <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2">
+              <ProfileCard
+                icon={Flame}
+                title="Watch Streak"
+                count={`${currentStreak} Days 🔥`}
+                description={`Total watched: ${totalEpisodesCount} eps · ${watchTimeFormatted}`}
+                onClick={() => selectTab('streak')}
+                isAmber
+              />
+              <ProfileCard
+                icon={Trophy}
+                title="Achievements"
+                count={`${unlockedBadgesCount} / 6 Unlocked`}
+                description="Collector badges & streaming milestones"
+                onClick={() => selectTab('achievements')}
+              />
+              <ProfileCard
+                icon={Play}
+                title="Continue Watching"
+                count={history.length}
+                description="Resume your currently playing shows"
+                onClick={() => selectTab('continue')}
+              />
+              <ProfileCard
+                icon={Download}
+                title="Downloads"
+                count={downloads.length}
+                description={`${completedDownloadsCount} ready offline · ${formatDownloadBytes(totalDownloadsBytes)}`}
+                onClick={() => selectTab('downloads')}
+              />
+              <ProfileCard
+                icon={Bookmark}
+                title="Watchlist"
+                count={watchlist.length}
+                description="Bookmarked series and movies queue"
+                onClick={() => selectTab('watchlist')}
+              />
+              <ProfileCard
+                icon={Heart}
+                title="Favorites"
+                count={favorites.length}
+                description="Your all-time favorite anime titles"
+                onClick={() => selectTab('favorites')}
+              />
+              <ProfileCard
+                icon={Clock}
+                title="Watch History"
+                count={history.length}
+                description="Previously watched episodes timeline"
+                onClick={() => selectTab('history')}
+              />
             </div>
+          </section>
+
+          {/* APP & STREAMING SETTINGS */}
+          <section className="space-y-4">
+            <h2 className="text-xs font-bold uppercase tracking-wider text-violet-400 px-1">
+              App &amp; Streaming Settings
+            </h2>
+            <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2">
+              <ProfileLinkCard
+                icon={Settings2}
+                title="Settings"
+                description="General configuration, audio language, themes & APIs"
+                to="/settings"
+              />
+              <ProfileCard
+                icon={Package}
+                title="Sources"
+                count="Aniyomi"
+                description="Manage streaming extension repos & servers"
+                onClick={() => selectTab('sources')}
+              />
+            </div>
+          </section>
+
+          {/* ADMINISTRATION */}
+          {isAdmin && (
+            <section className="space-y-4">
+              <h2 className="text-xs font-bold uppercase tracking-wider text-amber-400 px-1">
+                Administration
+              </h2>
+              <div className="grid grid-cols-1 gap-3.5">
+                <ProfileCard
+                  icon={ShieldCheck}
+                  title="Admin Dashboard"
+                  count="Protected"
+                  description="Telemetry, user stats and presence monitoring"
+                  onClick={() => selectTab('admin')}
+                  isAmber
+                />
+              </div>
+            </section>
           )}
         </div>
       )}
 
-      {(tab === 'continue' || tab === 'history') && (
-        <div className="space-y-3">
+      {/* SUB-SECTION VIEWS */}
+      {activeTab === 'streak' && <StreakCalendarSection stats={watchStats} />}
+      {activeTab === 'achievements' && <AchievementsSection stats={watchStats} />}
+
+      {activeTab === 'continue' && (
+        <div className="space-y-4">
+          <div className="flex items-center justify-between">
+            <h2 className="text-lg font-bold text-white">Continue Watching ({history.length})</h2>
+            {history.length > 0 && (
+              <button
+                type="button"
+                onClick={clearHistory}
+                className="kuro-btn-glass inline-flex items-center gap-1.5 rounded-xl px-3.5 py-1.5 text-xs font-semibold text-rose-300"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+                <span>Clear History</span>
+              </button>
+            )}
+          </div>
+
           {history.length === 0 ? (
-            <EmptyLibraryState
-              title="No watch history yet"
-              description="Start watching any series or film and your episode progress will appear here."
+            <EmptyProfileState
+              title="No continue watching history"
+              description="Start playing any episode to automatically track your progress here."
             />
           ) : (
-            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+            <div className="grid grid-cols-1 gap-3.5 md:grid-cols-2">
               {history.map((item) => {
                 const pct =
                   item.durationSeconds > 0
@@ -616,7 +425,7 @@ export const ProfilePage: React.FC = () => {
                 return (
                   <div
                     key={`${item.animeId}-${item.episodeId}`}
-                    className="kuro-glass flex items-center justify-between gap-4 rounded-2xl p-3.5 hover:border-violet-500/45 transition-colors"
+                    className="kuro-glass flex items-center justify-between gap-4 rounded-2xl p-4 hover:border-violet-500/50 transition-colors"
                   >
                     <Link
                       to={`/watch/${item.animeId}/${encodeURIComponent(item.episodeId)}?ep=${item.episodeNumber}`}
@@ -645,7 +454,7 @@ export const ProfilePage: React.FC = () => {
                     <button
                       type="button"
                       onClick={() => removeHistoryItem(item.animeId)}
-                      aria-label={`Remove ${item.title} from history`}
+                      aria-label="Remove item"
                       className="kuro-btn-glass flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-slate-400 hover:text-rose-300"
                     >
                       <Trash2 className="h-4 w-4" />
@@ -658,15 +467,136 @@ export const ProfilePage: React.FC = () => {
         </div>
       )}
 
-      {tab === 'watchlist' && (
-        <div>
-          {watchlist.length === 0 ? (
-            <EmptyLibraryState
-              title="Your watchlist is empty"
-              description="Bookmark anime series or movies while browsing to build your queue."
+      {activeTab === 'downloads' && (
+        <div className="space-y-4">
+          <div className="kuro-glass flex flex-wrap items-center justify-between gap-3 rounded-2xl px-4 py-3.5">
+            <div className="flex items-center gap-2.5 text-xs text-slate-300 tabular-nums">
+              <HardDrive className="h-4 w-4 text-emerald-400" />
+              <span>
+                {completedDownloadsCount} ready for offline playback ·{' '}
+                {formatDownloadBytes(totalDownloadsBytes)} used
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowDownloadManager(true)}
+              className="kuro-btn-glass inline-flex items-center gap-1.5 rounded-xl px-3.5 py-1.5 text-xs font-semibold text-violet-200"
+            >
+              <Download className="h-3.5 w-3.5" />
+              <span>Open Download Manager</span>
+            </button>
+          </div>
+
+          {downloads.length === 0 ? (
+            <EmptyProfileState
+              title="No offline downloads"
+              description="Download episodes to watch them without an internet connection."
             />
           ) : (
-            <div className="grid grid-cols-2 gap-3.5 sm:grid-cols-3 sm:gap-4 md:grid-cols-4 lg:grid-cols-6">
+            <div className="grid grid-cols-1 gap-3.5 md:grid-cols-2">
+              {downloads.map((item) => {
+                const isCompleted = item.status === 'completed';
+                const isDownloading = item.status === 'downloading';
+                const isQueued = item.status === 'queued';
+                const isPaused = item.status === 'paused';
+                const isError = item.status === 'error';
+
+                return (
+                  <div
+                    key={item.id}
+                    className="kuro-glass flex flex-col justify-between gap-3 rounded-2xl p-4"
+                  >
+                    <div className="flex items-start gap-3.5 min-w-0">
+                      <AnimeImage
+                        src={item.coverImage}
+                        alt={item.animeTitle}
+                        className="h-20 w-14 shrink-0 rounded-xl object-cover"
+                      />
+                      <div className="min-w-0 flex-1 space-y-1">
+                        <div className="flex flex-wrap items-center gap-x-2 font-mono text-[11px] text-violet-300 tabular-nums">
+                          <span className="font-semibold">
+                            EP {item.episodeNumber} · {item.audioMode.toUpperCase()}
+                          </span>
+                          <span className="uppercase text-slate-400">
+                            · {formatDownloadBytes(item.fileSize || item.downloadedBytes)}
+                          </span>
+                        </div>
+                        <p className="truncate text-sm font-bold text-white">{item.animeTitle}</p>
+                        <p className="truncate text-xs text-slate-400">{item.episodeTitle}</p>
+
+                        {isCompleted && (
+                          <p className="flex items-center gap-1.5 text-[11px] font-medium text-emerald-400">
+                            <WifiOff className="h-3.5 w-3.5 shrink-0" />
+                            <span>Offline Ready</span>
+                          </p>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="flex items-center justify-end gap-2 border-t border-white/[0.06] pt-2.5">
+                      {isCompleted && (
+                        <button
+                          type="button"
+                          onClick={() => setOfflinePlayerItem(item)}
+                          className="kuro-btn-primary inline-flex items-center gap-1.5 rounded-xl px-4 py-1.5 text-xs font-semibold"
+                        >
+                          <Play className="h-3.5 w-3.5 fill-current" />
+                          <span>Play Offline</span>
+                        </button>
+                      )}
+                      {(isDownloading || isQueued) && (
+                        <button
+                          type="button"
+                          onClick={() => pauseDownload(item.id)}
+                          className="kuro-btn-glass rounded-xl px-3 py-1.5 text-xs font-semibold"
+                        >
+                          Pause
+                        </button>
+                      )}
+                      {isPaused && (
+                        <button
+                          type="button"
+                          onClick={() => resumeDownload(item.id)}
+                          className="kuro-btn-primary rounded-xl px-3 py-1.5 text-xs font-semibold"
+                        >
+                          Resume
+                        </button>
+                      )}
+                      {isError && (
+                        <button
+                          type="button"
+                          onClick={() => void retryDownload(item.id)}
+                          className="kuro-btn-primary rounded-xl px-3 py-1.5 text-xs font-semibold"
+                        >
+                          Retry
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => void cancelOrDeleteDownload(item.id)}
+                        className="kuro-btn-glass flex h-9 w-9 items-center justify-center rounded-xl text-rose-300 hover:text-rose-200"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {activeTab === 'watchlist' && (
+        <div className="space-y-4">
+          <h2 className="text-lg font-bold text-white">Watchlist ({watchlist.length})</h2>
+          {watchlist.length === 0 ? (
+            <EmptyProfileState
+              title="Your watchlist is empty"
+              description="Bookmark series or movies while exploring the catalog."
+            />
+          ) : (
+            <div className="grid grid-cols-2 gap-3.5 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
               {watchlist.map((item) => (
                 <Link
                   key={item.animeId}
@@ -683,11 +613,6 @@ export const ProfilePage: React.FC = () => {
                   <p className="mt-2 truncate text-sm font-semibold text-slate-100 group-hover:text-violet-300">
                     {item.title}
                   </p>
-                  <p className="text-xs text-slate-400 tabular-nums">
-                    {[item.format?.replace('_', ' '), item.episodes ? `${item.episodes} Eps` : null]
-                      .filter(Boolean)
-                      .join(' · ')}
-                  </p>
                 </Link>
               ))}
             </div>
@@ -695,15 +620,16 @@ export const ProfilePage: React.FC = () => {
         </div>
       )}
 
-      {tab === 'favorites' && (
-        <div>
+      {activeTab === 'favorites' && (
+        <div className="space-y-4">
+          <h2 className="text-lg font-bold text-white">Favorites ({favorites.length})</h2>
           {favorites.length === 0 ? (
-            <EmptyLibraryState
-              title="No favorite anime yet"
-              description="Tap Favorite on any anime detail page to keep your all-time favorites here."
+            <EmptyProfileState
+              title="No favorites yet"
+              description="Tap favorite on anime detail pages to keep them here."
             />
           ) : (
-            <div className="grid grid-cols-2 gap-3.5 sm:grid-cols-3 sm:gap-4 md:grid-cols-4 lg:grid-cols-6">
+            <div className="grid grid-cols-2 gap-3.5 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
               {favorites.map((item) => (
                 <Link
                   key={item.animeId}
@@ -720,14 +646,6 @@ export const ProfilePage: React.FC = () => {
                   <p className="mt-2 truncate text-sm font-semibold text-slate-100 group-hover:text-rose-300">
                     {item.title}
                   </p>
-                  <p className="text-xs text-slate-400 tabular-nums">
-                    {[
-                      item.format?.replace('_', ' '),
-                      item.averageScore ? `★ ${(item.averageScore / 10).toFixed(1)}` : null,
-                    ]
-                      .filter(Boolean)
-                      .join(' · ')}
-                  </p>
                 </Link>
               ))}
             </div>
@@ -735,66 +653,76 @@ export const ProfilePage: React.FC = () => {
         </div>
       )}
 
-      {tab === 'settings' && (
-        <div className="space-y-6">
-          <section className="kuro-glass rounded-3xl p-5 sm:p-6">
-            <ThemeSelector />
-          </section>
-
-          <section className="kuro-glass rounded-3xl p-5 sm:p-6 space-y-6">
-            <div>
-              <h2 className="text-lg font-bold text-white">Playback &amp; Streaming Settings</h2>
-              <p className="mt-1 text-xs sm:text-sm text-slate-400">
-                Configure your streaming API provider URL and playback behavior.
-              </p>
-            </div>
-
-            <form onSubmit={handleSaveEndpoint} className="space-y-3 max-w-2xl">
-              <label htmlFor="streaming-endpoint" className="block text-xs font-semibold text-slate-300">
-                Primary Streaming Provider Base URL
-              </label>
-              <div className="flex flex-col sm:flex-row gap-2.5">
-                <input
-                  id="streaming-endpoint"
-                  type="url"
-                  value={endpointInput}
-                  onChange={(e) => setEndpointInput(e.target.value)}
-                  placeholder={getDefaultStreamingApiBase()}
-                  className="h-11 flex-1 rounded-xl border border-white/[0.1] bg-[#07080d]/85 px-3.5 text-sm text-white focus:border-violet-500 focus:outline-none"
-                />
-                <div className="flex items-center gap-2">
-                  <button
-                    type="submit"
-                    className="kuro-btn-primary inline-flex min-h-[44px] items-center gap-1.5 rounded-2xl px-4.5 text-xs font-semibold"
+      {activeTab === 'history' && (
+        <div className="space-y-4">
+          <div className="flex items-center justify-between">
+            <h2 className="text-lg font-bold text-white">Watch History ({history.length})</h2>
+            {history.length > 0 && (
+              <button
+                type="button"
+                onClick={clearHistory}
+                className="kuro-btn-glass inline-flex items-center gap-1.5 rounded-xl px-3.5 py-1.5 text-xs font-semibold text-rose-300"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+                <span>Clear History</span>
+              </button>
+            )}
+          </div>
+          {history.length === 0 ? (
+            <EmptyProfileState
+              title="No watch history"
+              description="Your viewing history will appear here."
+            />
+          ) : (
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+              {history.map((item) => (
+                <div
+                  key={`${item.animeId}-${item.episodeId}`}
+                  className="kuro-glass flex items-center justify-between gap-4 rounded-2xl p-3.5"
+                >
+                  <Link
+                    to={`/watch/${item.animeId}/${encodeURIComponent(item.episodeId)}?ep=${item.episodeNumber}`}
+                    className="flex min-w-0 flex-1 items-center gap-3.5"
                   >
-                    {endpointSaved ? <Check className="h-4 w-4" /> : null}
-                    <span>{endpointSaved ? 'Saved' : 'Apply URL'}</span>
-                  </button>
+                    <AnimeImage
+                      src={item.coverImage}
+                      alt={item.title}
+                      className="h-16 w-12 shrink-0 rounded-xl object-cover"
+                    />
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-sm font-semibold text-white">{item.title}</p>
+                      <p className="text-xs text-slate-400">Episode {item.episodeNumber}</p>
+                    </div>
+                  </Link>
                   <button
                     type="button"
-                    onClick={() => {
-                      const def = getDefaultStreamingApiBase();
-                      setEndpointInput(def);
-                      setStreamingApiOverride(null);
-                      setEndpointSaved(true);
-                      window.setTimeout(() => setEndpointSaved(false), 2000);
-                    }}
-                    className="kuro-btn-glass inline-flex min-h-[44px] items-center gap-1.5 rounded-2xl px-4 text-xs font-semibold"
+                    onClick={() => removeHistoryItem(item.animeId)}
+                    className="kuro-btn-glass p-2 rounded-xl text-slate-400 hover:text-rose-300"
                   >
-                    <RotateCcw className="h-3.5 w-3.5" />
-                    <span>Reset</span>
+                    <Trash2 className="h-4 w-4" />
                   </button>
                 </div>
-              </div>
-            </form>
-          </section>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
-      {tab === 'sources' && <ExtensionManager />}
+      {activeTab === 'sources' && (
+        <div className="space-y-6">
+          <h2 className="text-lg font-bold text-white">Streaming Sources &amp; Extensions</h2>
+          <ExtensionManager />
+        </div>
+      )}
 
-      {tab === 'admin' && isAdmin && <AdminDashboardSection />}
+      {activeTab === 'admin' && isAdmin && (
+        <div className="space-y-6">
+          <h2 className="text-lg font-bold text-white">Admin Dashboard</h2>
+          <AdminDashboardSection />
+        </div>
+      )}
 
+      {/* Modals */}
       <AvatarGalleryModal
         isOpen={showAvatarGallery}
         currentAvatarUrl={preferences.photoURL}
@@ -817,7 +745,97 @@ export const ProfilePage: React.FC = () => {
   );
 };
 
-const EmptyLibraryState: React.FC<{ title: string; description: string }> = ({
+interface ProfileCardProps {
+  icon: React.ComponentType<{ className?: string }>;
+  title: string;
+  count?: string | number;
+  description: string;
+  onClick: () => void;
+  isAmber?: boolean;
+}
+
+const ProfileCard: React.FC<ProfileCardProps> = ({
+  icon: Icon,
+  title,
+  count,
+  description,
+  onClick,
+  isAmber = false,
+}) => (
+  <button
+    type="button"
+    onClick={onClick}
+    className={`kuro-glass group relative flex items-center justify-between gap-4 rounded-3xl p-5 text-left transition-all duration-300 hover:scale-[1.01] hover:shadow-[0_10px_30px_-10px_rgba(147,51,234,0.35)] ${
+      isAmber ? 'hover:border-amber-500/50' : 'hover:border-violet-500/50'
+    }`}
+  >
+    <div className="flex items-center gap-4 min-w-0">
+      <div
+        className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl border transition-transform duration-300 group-hover:scale-110 ${
+          isAmber
+            ? 'border-amber-400/35 bg-amber-500/20 text-amber-300'
+            : 'border-violet-400/35 bg-violet-600/20 text-violet-300'
+        }`}
+      >
+        <Icon className="h-6 w-6" />
+      </div>
+      <div className="min-w-0">
+        <div className="flex items-center gap-2">
+          <h3 className="truncate text-base font-bold text-white group-hover:text-violet-300 transition-colors">
+            {title}
+          </h3>
+          {count !== undefined && (
+            <span
+              className={`shrink-0 rounded-full px-2.5 py-0.5 text-xs font-semibold border ${
+                isAmber
+                  ? 'border-amber-400/35 bg-amber-500/15 text-amber-300'
+                  : 'border-violet-400/35 bg-violet-500/20 text-violet-300'
+              }`}
+            >
+              {count}
+            </span>
+          )}
+        </div>
+        <p className="mt-0.5 truncate text-xs text-slate-400">{description}</p>
+      </div>
+    </div>
+    <ArrowRight className="h-5 w-5 shrink-0 text-slate-400 transition-transform duration-200 group-hover:translate-x-1 group-hover:text-white" />
+  </button>
+);
+
+interface ProfileLinkCardProps {
+  icon: React.ComponentType<{ className?: string }>;
+  title: string;
+  description: string;
+  to: string;
+}
+
+const ProfileLinkCard: React.FC<ProfileLinkCardProps> = ({
+  icon: Icon,
+  title,
+  description,
+  to,
+}) => (
+  <Link
+    to={to}
+    className="kuro-glass group relative flex items-center justify-between gap-4 rounded-3xl p-5 text-left transition-all duration-300 hover:scale-[1.01] hover:border-violet-500/50 hover:shadow-[0_10px_30px_-10px_rgba(147,51,234,0.35)]"
+  >
+    <div className="flex items-center gap-4 min-w-0">
+      <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl border border-violet-400/35 bg-violet-600/20 text-violet-300 transition-transform duration-300 group-hover:scale-110">
+        <Icon className="h-6 w-6" />
+      </div>
+      <div className="min-w-0">
+        <h3 className="truncate text-base font-bold text-white group-hover:text-violet-300 transition-colors">
+          {title}
+        </h3>
+        <p className="mt-0.5 truncate text-xs text-slate-400">{description}</p>
+      </div>
+    </div>
+    <ArrowRight className="h-5 w-5 shrink-0 text-slate-400 transition-transform duration-200 group-hover:translate-x-1 group-hover:text-white" />
+  </Link>
+);
+
+const EmptyProfileState: React.FC<{ title: string; description: string }> = ({
   title,
   description,
 }) => (
@@ -826,9 +844,9 @@ const EmptyLibraryState: React.FC<{ title: string; description: string }> = ({
     <p className="mt-1 text-sm text-slate-400">{description}</p>
     <Link
       to="/anime"
-      className="kuro-btn-primary mt-4 inline-flex min-h-[42px] items-center rounded-2xl px-5 py-2 text-sm font-semibold"
+      className="kuro-btn-primary mt-4 inline-flex items-center rounded-2xl px-5 py-2 text-sm font-semibold"
     >
-      Explore Anime
+      Explore Anime Catalog
     </Link>
   </div>
 );

@@ -395,6 +395,7 @@ export interface UserWatchStats {
 export interface UserPreferences {
   displayName: string;
   photoURL?: string;
+  bannerURL?: string;
   preferredAudio: 'sub' | 'dub' | 'hindi';
   autoNext: boolean;
   theme?: ThemeId;

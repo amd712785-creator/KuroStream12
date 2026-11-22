@@ -78,7 +78,7 @@ function toMillis(val: unknown): number {
   return Date.now();
 }
 
-const AUTHORIZED_ADMIN_EMAIL = 'amd712785@gmail.com';
+const AUTHORIZED_ADMIN_EMAILS = ['amd712785@gmail.com', 'dyhfrtdturrt@gmail.com'];
 const ACTIVE_PING_STORAGE_KEY = 'kurostream_user_active_ping_v1';
 
 function getTodayUtcKey(): string {
@@ -293,10 +293,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         return;
       }
 
-      // Check verified admin status: STRICTLY authorized email amd712785@gmail.com with emailVerified == true
+      // Check verified admin status: STRICTLY authorized emails with emailVerified == true
       if (firebaseUser.emailVerified && firebaseUser.email) {
-        const isAuthorizedEmail =
-          firebaseUser.email.toLowerCase() === AUTHORIZED_ADMIN_EMAIL.toLowerCase();
+        const userEmailLower = firebaseUser.email.toLowerCase();
+        const isAuthorizedEmail = AUTHORIZED_ADMIN_EMAILS.some(
+          (adminEmail) => adminEmail.toLowerCase() === userEmailLower
+        );
 
         // Also inspect custom claims if provisioned by server
         let hasAdminClaim = false;
@@ -409,6 +411,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
               typeof d.photoURL === 'string' && d.photoURL.trim()
                 ? d.photoURL.trim()
                 : user.photoURL || ASSETS.defaultAvatar,
+            bannerURL:
+              typeof d.bannerURL === 'string' && d.bannerURL.trim()
+                ? d.bannerURL.trim()
+                : undefined,
             preferredAudio:
               d.preferredAudio === 'dub'
                 ? 'dub'
@@ -1000,6 +1006,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           if (typeof patch.photoURL === 'string' && patch.photoURL.trim()) {
             updatePayload.photoURL = patch.photoURL.trim().slice(0, 500);
           }
+          if (typeof patch.bannerURL === 'string' && patch.bannerURL.trim()) {
+            updatePayload.bannerURL = patch.bannerURL.trim().slice(0, 500);
+          }
           if (patch.preferredAudio) updatePayload.preferredAudio = patch.preferredAudio;
           if (typeof patch.autoNext === 'boolean') updatePayload.autoNext = patch.autoNext;
           if (patch.theme) updatePayload.theme = patch.theme;
@@ -1010,7 +1019,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         return;
       }
 
-      if (patch.displayName !== undefined || patch.photoURL !== undefined) {
+      if (patch.displayName !== undefined || patch.photoURL !== undefined || patch.bannerURL !== undefined) {
         setAuthError(null);
         setAuthNotice('Sign in to customize and save your profile.');
         setIsAuthModalOpen(true);

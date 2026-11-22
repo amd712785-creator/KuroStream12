@@ -153,6 +153,7 @@ export const DownloadManagerModal: React.FC<DownloadManagerModalProps> = ({
                   const isQueued = item.status === 'queued';
                   const isError = item.status === 'error';
                   const isPaused = item.status === 'paused';
+                  const isUnsupported = item.status === 'unsupported';
 
                   return (
                     <div
@@ -227,6 +228,16 @@ export const DownloadManagerModal: React.FC<DownloadManagerModalProps> = ({
                             </div>
                           )}
 
+                          {isUnsupported && (
+                            <p className="mt-1 flex items-start gap-1 text-[11px] text-amber-300">
+                              <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                              <span className="line-clamp-2">
+                                {item.errorMessage ||
+                                  'Download Not Supported: Embed-only or DRM-protected stream.'}
+                              </span>
+                            </p>
+                          )}
+
                           {isError && (
                             <p className="mt-1 flex items-start gap-1 text-[11px] text-rose-400">
                               <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
@@ -247,6 +258,11 @@ export const DownloadManagerModal: React.FC<DownloadManagerModalProps> = ({
 
                       {/* Actions (44x44 minimum mobile touch targets) */}
                       <div className="flex items-center justify-end gap-2 shrink-0 pt-1 sm:pt-0">
+                        {isUnsupported && (
+                          <span className="rounded-xl border border-amber-400/30 bg-amber-500/10 px-2.5 py-1.5 text-[11px] font-semibold text-amber-200">
+                            Download Not Supported
+                          </span>
+                        )}
                         {(isDownloading || isQueued) && (
                           <button
                             type="button"

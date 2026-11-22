@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { Capacitor } from '@capacitor/core';
 
 const INTRO_SESSION_KEY = 'kurostream_startup_intro_seen_v1';
-const LOGO_SRC = '/assets/aistudio/file_000000004ebc8211a223cbd3b7d37859_6ea9f159.png';
+const LOGO_SRC = '/assets/aistudio/file_00000000d64c8211a7a01231691e7256_8b4ae7b0.png';
 
 interface ParticleSpec {
   id: number;

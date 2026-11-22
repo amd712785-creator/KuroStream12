@@ -241,9 +241,30 @@ export async function readBinaryChunk(
   const safeKey = sanitizeSegment(chunkKey);
 
   if (Capacitor.isNativePlatform()) {
+    const filePath = `${NATIVE_ROOT_DIR}/${safeId}/${safeKey}.bin`;
+    // Fast native loopback read via WebViewLocalServer (_capacitor_file_) avoids Base64 bridge overhead
+    try {
+      const uriRes = await Filesystem.getUri({
+        path: filePath,
+        directory: Directory.Data,
+      });
+      if (uriRes?.uri) {
+        const localUrl = Capacitor.convertFileSrc(uriRes.uri);
+        const res = await fetch(localUrl);
+        if (res.ok) {
+          const buf = await res.arrayBuffer();
+          if (buf.byteLength > 0) {
+            return { bytes: new Uint8Array(buf) };
+          }
+        }
+      }
+    } catch {
+      // fall through to Filesystem.readFile
+    }
+
     try {
       const res = await Filesystem.readFile({
-        path: `${NATIVE_ROOT_DIR}/${safeId}/${safeKey}.bin`,
+        path: filePath,
         directory: Directory.Data,
       });
       if (typeof res.data === 'string') {
@@ -264,6 +285,143 @@ export async function readBinaryChunk(
     return { bytes: new Uint8Array(rec.data), mimeType: rec.mimeType };
   } catch {
     return null;
+  }
+}
+
+async function readNativeHeadBytes(relPath: string, length = 64): Promise<Uint8Array | null> {
+  try {
+    const res = await Filesystem.readFile({
+      path: relPath,
+      directory: Directory.Data,
+      offset: 0,
+      length,
+    });
+    if (typeof res.data === 'string' && res.data.length > 0) {
+      return base64ToUint8(res.data);
+    }
+  } catch {
+    // ignore partial head read failures
+  }
+  return null;
+}
+
+function isBytesHtmlPayload(bytes: Uint8Array | null): boolean {
+  if (!bytes || bytes.byteLength < 5) return false;
+  const head = new TextDecoder().decode(bytes.subarray(0, 64)).trimStart().toLowerCase();
+  return head.startsWith('<!doctype') || head.startsWith('<html') || head.startsWith('<head');
+}
+
+export async function downloadNativeBinaryChunk(
+  downloadId: string,
+  chunkKey: string,
+  url: string,
+  headers: Record<string, string>
+): Promise<number> {
+  const safeId = sanitizeSegment(downloadId);
+  const safeKey = sanitizeSegment(chunkKey);
+  const relPath = `${NATIVE_ROOT_DIR}/${safeId}/${safeKey}.bin`;
+  await ensureNativeDir(safeId);
+
+  try {
+    await Filesystem.downloadFile({
+      url,
+      path: relPath,
+      directory: Directory.Data,
+      headers,
+      progress: false,
+      recursive: true,
+      connectTimeout: 20000,
+      readTimeout: 45000,
+    });
+
+    const st = await Filesystem.stat({
+      path: relPath,
+      directory: Directory.Data,
+    });
+    const size = Number(st.size || 0);
+    if (size <= 0) {
+      await Filesystem.deleteFile({ path: relPath, directory: Directory.Data }).catch(() => {});
+      throw new Error('Downloaded segment is empty (0 bytes).');
+    }
+
+    const headBytes = await readNativeHeadBytes(relPath, 64);
+    if (isBytesHtmlPayload(headBytes)) {
+      await Filesystem.deleteFile({ path: relPath, directory: Directory.Data }).catch(() => {});
+      throw new Error('Provider returned an HTML page instead of video segment.');
+    }
+
+    return size;
+  } catch (err) {
+    if (isQuotaError(err)) {
+      throw new Error('Device storage full. Delete some downloaded episodes and retry.');
+    }
+    throw err instanceof Error ? err : new Error('Native segment download failed.');
+  }
+}
+
+export async function downloadNativeMp4File(options: {
+  downloadId: string;
+  fileName: string;
+  url: string;
+  headers: Record<string, string>;
+  onProgress: (bytes: number, totalBytes: number) => void;
+}): Promise<{ path: string; uri: string; size: number }> {
+  const safeId = sanitizeSegment(options.downloadId);
+  const safeFile = sanitizeSegment(options.fileName);
+  const relPath = `${NATIVE_ROOT_DIR}/${safeId}/${safeFile}`;
+  await ensureNativeDir(safeId);
+
+  const listener = await Filesystem.addListener('progress', (ev) => {
+    if (ev && (!ev.url || ev.url === options.url) && typeof ev.bytes === 'number') {
+      options.onProgress(ev.bytes, Number(ev.contentLength || 0));
+    }
+  });
+
+  try {
+    await Filesystem.downloadFile({
+      url: options.url,
+      path: relPath,
+      directory: Directory.Data,
+      headers: options.headers,
+      progress: true,
+      recursive: true,
+      connectTimeout: 25000,
+      readTimeout: 120000,
+    });
+
+    const st = await Filesystem.stat({
+      path: relPath,
+      directory: Directory.Data,
+    });
+    const size = Number(st.size || 0);
+    if (size <= 0) {
+      await Filesystem.deleteFile({ path: relPath, directory: Directory.Data }).catch(() => {});
+      throw new Error('Downloaded MP4 file is empty (0 bytes).');
+    }
+
+    const headBytes = await readNativeHeadBytes(relPath, 64);
+    if (isBytesHtmlPayload(headBytes)) {
+      await Filesystem.deleteFile({ path: relPath, directory: Directory.Data }).catch(() => {});
+      throw new Error('Provider returned an HTML webpage instead of an MP4 video.');
+    }
+
+    const uriRes = await Filesystem.getUri({
+      path: relPath,
+      directory: Directory.Data,
+    });
+
+    return {
+      path: relPath,
+      uri: uriRes.uri,
+      size,
+    };
+  } catch (err) {
+    if (isQuotaError(err)) {
+      throw new Error('Device storage full. Free up storage space and retry.');
+    }
+    throw err instanceof Error ? err : new Error('Native MP4 file download failed.');
+  } finally {
+    await listener.remove().catch(() => {});
   }
 }
 
@@ -365,6 +523,79 @@ export async function getOfflineManifest(
   } catch {
     return null;
   }
+}
+
+export async function verifyOfflineMediaPlayable(
+  manifest: OfflineManifestRecord
+): Promise<{ ok: boolean; reason?: string }> {
+  if (!manifest || manifest.totalBytes <= 0) {
+    return { ok: false, reason: 'Downloaded video size is 0 bytes.' };
+  }
+
+  if (manifest.format === 'hls') {
+    if (!manifest.playlistText || !manifest.playlistText.includes('#EXTM3U')) {
+      return { ok: false, reason: 'Offline HLS playlist is invalid.' };
+    }
+    const keys = manifest.segmentKeys || [];
+    if (keys.length === 0) {
+      return { ok: false, reason: 'Offline HLS playlist has no saved segments.' };
+    }
+    const firstChunk = await readBinaryChunk(manifest.downloadId, keys[0]);
+    if (!firstChunk || firstChunk.bytes.byteLength === 0) {
+      return { ok: false, reason: 'First HLS video segment is missing from local storage.' };
+    }
+    if (isBytesHtmlPayload(firstChunk.bytes)) {
+      return { ok: false, reason: 'Saved segment is an HTML error page instead of video.' };
+    }
+    if (keys.length > 1) {
+      const lastOk = await hasBinaryChunk(manifest.downloadId, keys[keys.length - 1]);
+      if (!lastOk) {
+        return { ok: false, reason: 'Final HLS video segment is incomplete.' };
+      }
+    }
+    return { ok: true };
+  }
+
+  // MP4 verification
+  if (Capacitor.isNativePlatform()) {
+    if (!manifest.nativeMp4Path && !manifest.nativeMp4Uri) {
+      return { ok: false, reason: 'Native MP4 file path is missing.' };
+    }
+    if (manifest.nativeMp4Path) {
+      try {
+        const st = await Filesystem.stat({
+          path: manifest.nativeMp4Path,
+          directory: Directory.Data,
+        });
+        if (!st || Number(st.size || 0) <= 0) {
+          return { ok: false, reason: 'Saved MP4 file on device is empty.' };
+        }
+        const headBytes = await readNativeHeadBytes(manifest.nativeMp4Path, 64);
+        if (isBytesHtmlPayload(headBytes)) {
+          return { ok: false, reason: 'Saved MP4 file is HTML markup instead of video.' };
+        }
+      } catch {
+        return { ok: false, reason: 'Saved MP4 file cannot be accessed on device storage.' };
+      }
+    }
+    return { ok: true };
+  }
+
+  const chunkCount = manifest.chunkCount || 0;
+  if (chunkCount <= 0) {
+    return { ok: false, reason: 'No offline MP4 chunks were stored.' };
+  }
+  const firstPart = await readBinaryChunk(manifest.downloadId, 'mp4_part_0');
+  if (!firstPart || firstPart.bytes.byteLength === 0 || isBytesHtmlPayload(firstPart.bytes)) {
+    return { ok: false, reason: 'Stored MP4 file header chunk is missing or invalid.' };
+  }
+  if (chunkCount > 1) {
+    const lastOk = await hasBinaryChunk(manifest.downloadId, `mp4_part_${chunkCount - 1}`);
+    if (!lastOk) {
+      return { ok: false, reason: 'Final MP4 chunk is incomplete.' };
+    }
+  }
+  return { ok: true };
 }
 
 export async function assembleWebMp4BlobUrl(

@@ -324,19 +324,24 @@ export const AnimeWorldWatchPage: React.FC = () => {
     setShowDownloadManager(true);
   };
 
-  const downloadLabel = currentDownload
-    ? currentDownload.status === 'completed'
+  const downloadLabel =
+    currentDownload?.status === 'completed'
       ? 'Play Offline'
-      : currentDownload.status === 'downloading'
+      : currentDownload?.status === 'downloading'
         ? `Downloading ${currentDownload.progress}%`
-        : currentDownload.status === 'queued'
+        : currentDownload?.status === 'queued'
           ? 'Queued'
-          : currentDownload.status === 'paused'
+          : currentDownload?.status === 'paused'
             ? `Paused ${currentDownload.progress}%`
-            : 'Retry Download'
-    : downloadSelection.ok
-      ? 'Download'
-      : 'Embed Stream';
+            : currentDownload?.status === 'unsupported' && !downloadSelection.ok
+              ? 'Download Not Supported'
+              : currentDownload?.status === 'error'
+                ? 'Retry Download'
+                : downloadSelection.ok
+                  ? 'Download'
+                  : streamData
+                    ? 'Download Not Supported'
+                    : 'Download';
 
   const backTarget = seriesIdParam
     ? `/animeworld-india/series/${encodeURIComponent(seriesIdParam)}`
@@ -490,13 +495,17 @@ export const AnimeWorldWatchPage: React.FC = () => {
                 className={`inline-flex min-h-[40px] items-center gap-1.5 rounded-xl px-3.5 py-2 text-xs font-semibold ${
                   currentDownload?.status === 'completed'
                     ? 'kuro-btn-active text-emerald-200'
-                    : 'kuro-btn-glass text-violet-200'
+                    : downloadLabel === 'Download Not Supported'
+                      ? 'kuro-btn-glass border-amber-400/35 text-amber-200'
+                      : 'kuro-btn-glass text-violet-200'
                 }`}
               >
                 {currentDownload?.status === 'completed' ? (
                   <CheckCircle2 className="h-4 w-4 text-emerald-400" />
                 ) : currentDownload?.status === 'downloading' ? (
                   <Loader2 className="h-4 w-4 animate-spin text-violet-300" />
+                ) : downloadLabel === 'Download Not Supported' ? (
+                  <AlertTriangle className="h-4 w-4 text-amber-300" />
                 ) : (
                   <Download className="h-4 w-4" />
                 )}

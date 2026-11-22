@@ -610,15 +610,24 @@ export const WatchPage: React.FC = () => {
     animeSeasonYear,
   ]);
 
+  const downloadSelection = useMemo(() => selectDownloadableSource(streamData), [streamData]);
+
   const downloadButtonLabel = useMemo(() => {
-    if (!currentDownload) return 'Download';
-    if (currentDownload.status === 'completed') return 'Play Offline';
-    if (currentDownload.status === 'downloading') return `Downloading ${currentDownload.progress}%`;
-    if (currentDownload.status === 'queued') return 'Queued';
-    if (currentDownload.status === 'paused') return `Paused ${currentDownload.progress}%`;
-    if (currentDownload.status === 'error') return 'Retry Download';
+    if (currentDownload) {
+      if (currentDownload.status === 'completed') return 'Play Offline';
+      if (currentDownload.status === 'downloading') return `Downloading ${currentDownload.progress}%`;
+      if (currentDownload.status === 'queued') return 'Queued';
+      if (currentDownload.status === 'paused') return `Paused ${currentDownload.progress}%`;
+      if (currentDownload.status === 'unsupported' && !downloadSelection.ok) {
+        return 'Download Not Supported';
+      }
+      if (currentDownload.status === 'error') return 'Retry Download';
+    }
+    if (streamData && !downloadSelection.ok && downloadSelection.reason === 'embed-only') {
+      return 'Download Not Supported';
+    }
     return 'Download';
-  }, [currentDownload]);
+  }, [currentDownload, streamData, downloadSelection]);
 
   const hasJapaneseAvailable = useMemo(() => {
     if (streamData && streamData.sources.length > 0 && audioMode === 'sub') return true;
@@ -862,13 +871,17 @@ export const WatchPage: React.FC = () => {
                 className={`inline-flex min-h-[40px] items-center gap-1.5 rounded-xl px-3.5 py-2 text-xs font-semibold ${
                   currentDownload?.status === 'completed'
                     ? 'kuro-btn-active text-emerald-200'
-                    : 'kuro-btn-glass text-violet-200'
+                    : downloadButtonLabel === 'Download Not Supported'
+                      ? 'kuro-btn-glass border-amber-400/35 text-amber-200'
+                      : 'kuro-btn-glass text-violet-200'
                 }`}
               >
                 {currentDownload?.status === 'completed' ? (
                   <CheckCircle2 className="h-4 w-4 text-emerald-400" />
                 ) : currentDownload?.status === 'downloading' ? (
                   <Loader2 className="h-4 w-4 animate-spin text-violet-300" />
+                ) : downloadButtonLabel === 'Download Not Supported' ? (
+                  <AlertTriangle className="h-4 w-4 text-amber-300" />
                 ) : (
                   <Download className="h-4 w-4" />
                 )}

@@ -939,3 +939,49 @@
     transition: none;
   }
 }
+
+/* Animated Header Logo & Brand Name */
+@keyframes kuroBrandLogoFloat {
+  0%, 100% {
+    transform: translate3d(0, 0, 0);
+  }
+  50% {
+    transform: translate3d(0, -2.5px, 0);
+  }
+}
+
+@keyframes kuroBrandGlowPulse {
+  0%, 100% {
+    box-shadow: 0 0 16px rgba(168, 85, 247, 0.45);
+  }
+  50% {
+    box-shadow: 0 0 28px rgba(168, 85, 247, 0.85);
+  }
+}
+
+@keyframes kuroBrandTextSweep {
+  0% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+  100% {
+    background-position: 0% 50%;
+  }
+}
+
+.kuro-brand-logo {
+  animation: kuroBrandLogoFloat 4s ease-in-out infinite, kuroBrandGlowPulse 3s ease-in-out infinite;
+}
+
+.kuro-brand-text {
+  background: linear-gradient(90deg, #ffffff 0%, #d8b4fe 30%, #f0abfc 65%, #ffffff 100%);
+  background-size: 200% auto;
+  color: transparent;
+  -webkit-background-clip: text;
+  background-clip: text;
+  animation: kuroBrandTextSweep 5s linear infinite;
+  text-shadow: 0 0 20px rgba(168, 85, 247, 0.35);
+}
+

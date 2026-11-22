@@ -15,6 +15,8 @@ import {
   Tv,
   User,
   X,
+  Settings2,
+  LogOut,
 } from 'lucide-react';
 import { AnimeImage } from '@/src/components/AnimeImage';
 import { ASSETS } from '@/src/config/env';
@@ -23,7 +25,7 @@ import { getDisplayTitle, searchAnime } from '@/src/services/anilistApi';
 import type { AnimeSummary } from '@/src/types/anime';
 
 export const Navbar: React.FC = () => {
-  const { user, preferences, openAuthModal } = useAuth();
+  const { user, preferences, openAuthModal, signOut } = useAuth();
   const navigate = useNavigate();
 
   const [query, setQuery] = useState('');
@@ -97,15 +99,19 @@ export const Navbar: React.FC = () => {
         {/* Brand Zone */}
         <Link
           to="/"
-          className="group flex items-center gap-2 sm:gap-3 whitespace-nowrap shrink-0 min-w-0 select-none"
+          className="group flex items-center gap-2.5 sm:gap-3.5 whitespace-nowrap shrink-0 min-w-0 select-none"
           aria-label="KuroStream Home"
         >
-          <span className="flex h-8 w-8 sm:h-9 sm:w-9 shrink-0 items-center justify-center rounded-xl border border-violet-400/30 bg-gradient-to-br from-violet-500 via-purple-600 to-fuchsia-600 text-white shadow-[0_0_20px_-2px_rgba(147,51,234,0.6)] transition-all duration-300 group-hover:scale-105 group-hover:shadow-[0_0_26px_0px_rgba(168,85,247,0.75)] group-active:scale-95">
-            <Play className="h-4 w-4 sm:h-4.5 sm:w-4.5 translate-x-0.5 fill-current" />
-          </span>
-          <span className="font-display text-lg max-[359px]:text-base sm:text-2xl font-black tracking-[-0.02em] leading-none drop-shadow-[0_0_16px_rgba(168,85,247,0.45)] transition-all duration-300 group-hover:drop-shadow-[0_0_24px_rgba(168,85,247,0.65)]">
-            <span className="text-white">Kuro</span>
-            <span className="bg-gradient-to-r from-violet-400 via-purple-300 to-fuchsia-400 bg-clip-text text-transparent">Stream</span>
+          <div className="relative flex h-8 w-8 sm:h-9 sm:w-9 shrink-0 items-center justify-center rounded-2xl overflow-hidden border border-violet-400/40 bg-[#12101f] kuro-brand-logo group-hover:scale-105 transition-transform duration-300">
+            <img
+              src="/assets/aistudio/file_00000000d64c8211a7a01231691e7256_8b4ae7b0.png"
+              alt="KuroStream Logo"
+              className="h-full w-full object-cover"
+            />
+            <div className="pointer-events-none absolute inset-0 bg-gradient-to-tr from-transparent via-white/20 to-transparent opacity-50 animate-pulse" />
+          </div>
+          <span className="font-display text-lg max-[359px]:text-base sm:text-2xl font-black tracking-[-0.02em] leading-none kuro-brand-text">
+            KuroStream
           </span>
         </Link>
 
@@ -264,8 +270,8 @@ export const Navbar: React.FC = () => {
 
       {/* Glass Mobile Menu Drawer */}
       {mobileMenuOpen && (
-        <div className="max-h-[calc(100dvh-4rem)] overflow-y-auto border-t border-white/[0.08] bg-[#0a0b13]/95 px-4 py-4 backdrop-blur-2xl md:hidden">
-          <form onSubmit={handleSubmit} className="relative mb-3 sm:hidden">
+        <div className="max-h-[calc(100dvh-4rem)] overflow-y-auto border-t border-white/[0.08] bg-[#0a0b13]/95 px-4 py-4 backdrop-blur-2xl md:hidden space-y-3.5">
+          <form onSubmit={handleSubmit} className="relative sm:hidden">
             <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
             <input
               type="search"
@@ -276,79 +282,65 @@ export const Navbar: React.FC = () => {
               className="h-11 w-full rounded-2xl border border-white/[0.1] bg-white/[0.05] pl-10 pr-4 text-sm text-slate-100 placeholder:text-slate-500 focus:border-violet-500 focus:outline-none"
             />
           </form>
-          <nav className="grid grid-cols-2 gap-2.5" aria-label="Quick navigation menu">
+
+          {/* User Account Card */}
+          <div className="rounded-2xl border border-white/[0.08] bg-white/[0.03] p-4 flex items-center gap-3">
+            <AnimeImage
+              src={preferences.photoURL}
+              alt={preferences.displayName}
+              variant="avatar"
+              className="h-12 w-12 rounded-full object-cover ring-1 ring-violet-400/50"
+            />
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-sm font-bold text-white">{preferences.displayName}</p>
+              <p className="truncate text-xs text-slate-400">
+                {user ? user.email : 'Signed out / Guest'}
+              </p>
+            </div>
+          </div>
+
+          <nav className="grid grid-cols-1 gap-2.5" aria-label="Account menu">
             <Link
-              to="/"
+              to="/settings"
               onClick={() => setMobileMenuOpen(false)}
-              className="kuro-btn-glass flex min-h-[46px] items-center gap-2.5 rounded-2xl px-3.5 py-2.5 text-sm font-medium"
+              className="kuro-btn-glass flex min-h-[46px] items-center gap-3 rounded-2xl px-4 py-2.5 text-sm font-medium text-violet-300"
             >
-              <Home className="h-4 w-4 text-violet-300" />
-              <span>Home</span>
+              <Settings2 className="h-4 w-4" />
+              <span>Settings</span>
             </Link>
             <Link
-              to="/anime"
+              to="/profile"
               onClick={() => setMobileMenuOpen(false)}
-              className="kuro-btn-glass flex min-h-[46px] items-center gap-2.5 rounded-2xl px-3.5 py-2.5 text-sm font-medium"
+              className="kuro-btn-glass flex min-h-[46px] items-center gap-3 rounded-2xl px-4 py-2.5 text-sm font-medium text-slate-200"
             >
-              <Film className="h-4 w-4 text-violet-300" />
-              <span>Anime</span>
+              <User className="h-4 w-4 text-violet-300" />
+              <span>User Profile &amp; Library</span>
             </Link>
-            <Link
-              to="/movies"
-              onClick={() => setMobileMenuOpen(false)}
-              className="kuro-btn-glass flex min-h-[46px] items-center gap-2.5 rounded-2xl px-3.5 py-2.5 text-sm font-medium"
-            >
-              <Film className="h-4 w-4 text-violet-300" />
-              <span>Movies</span>
-            </Link>
-            <Link
-              to="/tv-series"
-              onClick={() => setMobileMenuOpen(false)}
-              className="kuro-btn-glass flex min-h-[46px] items-center gap-2.5 rounded-2xl px-3.5 py-2.5 text-sm font-medium"
-            >
-              <Tv className="h-4 w-4 text-violet-300" />
-              <span>TV Series</span>
-            </Link>
-            <Link
-              to="/schedule"
-              onClick={() => setMobileMenuOpen(false)}
-              className="kuro-btn-glass flex min-h-[46px] items-center gap-2.5 rounded-2xl px-3.5 py-2.5 text-sm font-medium"
-            >
-              <Calendar className="h-4 w-4 text-violet-300" />
-              <span>Schedule</span>
-            </Link>
-            <Link
-              to="/profile?tab=watchlist"
-              onClick={() => setMobileMenuOpen(false)}
-              className="kuro-btn-glass flex min-h-[46px] items-center gap-2.5 rounded-2xl px-3.5 py-2.5 text-sm font-medium"
-            >
-              <Bookmark className="h-4 w-4 text-violet-300" />
-              <span>Watchlist</span>
-            </Link>
-            <Link
-              to="/animeworld-india"
-              onClick={() => setMobileMenuOpen(false)}
-              className="kuro-btn-glass col-span-2 flex min-h-[46px] items-center gap-2.5 rounded-2xl border-amber-400/30 px-3.5 py-2.5 text-sm font-medium text-amber-200"
-            >
-              <Server className="h-4 w-4 text-amber-300" />
-              <span>AnimeWorld India (Server)</span>
-            </Link>
-            <Link
-              to="/profile?tab=downloads"
-              onClick={() => setMobileMenuOpen(false)}
-              className="kuro-btn-glass col-span-2 flex min-h-[46px] items-center gap-2.5 rounded-2xl px-3.5 py-2.5 text-sm font-medium"
-            >
-              <Download className="h-4 w-4 text-emerald-400" />
-              <span>Offline Downloads</span>
-            </Link>
-            <Link
-              to="/profile?tab=sources"
-              onClick={() => setMobileMenuOpen(false)}
-              className="kuro-btn-glass col-span-2 flex min-h-[46px] items-center gap-2.5 rounded-2xl px-3.5 py-2.5 text-sm font-medium"
-            >
-              <Package className="h-4 w-4 text-violet-300" />
-              <span>Sources &amp; Extensions</span>
-            </Link>
+            {user ? (
+              <button
+                type="button"
+                onClick={() => {
+                  setMobileMenuOpen(false);
+                  signOut();
+                }}
+                className="kuro-btn-glass flex min-h-[46px] items-center gap-3 rounded-2xl px-4 py-2.5 text-sm font-medium text-rose-300"
+              >
+                <LogOut className="h-4 w-4" />
+                <span>Sign Out</span>
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => {
+                  setMobileMenuOpen(false);
+                  openAuthModal();
+                }}
+                className="kuro-btn-primary flex min-h-[46px] items-center justify-center gap-2.5 rounded-2xl px-4 py-2.5 text-sm font-semibold text-white"
+              >
+                <LogIn className="h-4 w-4" />
+                <span>Sign In / Create Account</span>
+              </button>
+            )}
           </nav>
         </div>
       )}

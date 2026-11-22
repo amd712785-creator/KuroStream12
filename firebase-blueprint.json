@@ -20,6 +20,10 @@
           "type": "string",
           "maxLength": 500
         },
+        "bannerURL": {
+          "type": "string",
+          "maxLength": 500
+        },
         "preferredAudio": {
           "type": "string",
           "enum": ["sub", "dub", "hindi"]
@@ -86,6 +90,111 @@
         }
       },
       "required": ["uid", "displayName", "preferredAudio", "autoNext", "createdAt", "updatedAt"]
+    },
+    "ProfileBanner": {
+      "title": "ProfileBanner",
+      "description": "Admin-managed and unlockable profile header banner.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "category": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 60
+        },
+        "imageUrl": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "isLocked": {
+          "type": "boolean"
+        },
+        "createdBy": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "category",
+        "imageUrl",
+        "enabled",
+        "isLocked",
+        "createdBy",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "CustomizationSettings": {
+      "title": "CustomizationSettings",
+      "description": "Global unlock settings for profile banners and avatars.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "enum": ["global"]
+        },
+        "globalBannersUnlocked": {
+          "type": "boolean"
+        },
+        "globalAvatarsUnlocked": {
+          "type": "boolean"
+        },
+        "lockedBannerIds": {
+          "type": "array",
+          "items": { "type": "string", "maxLength": 128 },
+          "maxItems": 500
+        },
+        "lockedAvatarIds": {
+          "type": "array",
+          "items": { "type": "string", "maxLength": 128 },
+          "maxItems": 500
+        },
+        "updatedBy": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "globalBannersUnlocked",
+        "globalAvatarsUnlocked",
+        "lockedBannerIds",
+        "lockedAvatarIds",
+        "updatedBy",
+        "updatedAt"
+      ]
     },
     "PopupBanner": {
       "title": "PopupBanner",
@@ -327,6 +436,14 @@
     "/banners/{bannerId}": {
       "schema": { "$ref": "#/entities/PopupBanner" },
       "description": "Admin-managed popup banners."
+    },
+    "/profile_banners/{bannerId}": {
+      "schema": { "$ref": "#/entities/ProfileBanner" },
+      "description": "Admin-managed and unlockable profile header banners."
+    },
+    "/customization_settings/{settingId}": {
+      "schema": { "$ref": "#/entities/CustomizationSettings" },
+      "description": "Global customization unlock settings."
     }
   }
 }

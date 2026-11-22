@@ -1,20 +1,21 @@
-import { Capacitor } from '@capacitor/core';
+import { Capacitor, CapacitorHttp } from '@capacitor/core';
 import { resolveApiUrl } from '@/src/config/env';
 import { isGenuineMediaDownloadUrl, resolveAnimeWorldStreamForAnime } from '@/src/services/animeWorldApi';
-import { authorizedApiFetch } from '@/src/services/authorizedFetch';
+import { authorizedApiFetch, getFreshFirebaseIdToken, notifySessionExpired } from '@/src/services/authorizedFetch';
 import {
   assembleWebMp4BlobUrl,
   deleteDownloadStorage,
-  getNativeMp4FileSize,
+  downloadNativeBinaryChunk,
+  downloadNativeMp4File,
   getOfflineManifest,
   hasBinaryChunk,
   saveBinaryChunk,
   saveOfflineManifest,
-  writeNativeMp4Chunk,
+  verifyOfflineMediaPlayable,
   type OfflineManifestRecord,
 } from '@/src/services/offlineStorage';
 import { fetchEpisodeStream } from '@/src/services/streamingApi';
-import type { MediaFormat, ParsedStreamResult, StreamSource } from '@/src/types/anime';
+import type { MediaFormat, ParsedStreamResult } from '@/src/types/anime';
 
 export interface DownloadRefreshContext {
   kind: 'standard' | 'animeworld';
@@ -30,6 +31,14 @@ export interface DownloadRefreshContext {
   format?: MediaFormat | null;
   seasonYear?: number | null;
 }
+
+export type DownloadStatus =
+  | 'queued'
+  | 'downloading'
+  | 'paused'
+  | 'completed'
+  | 'error'
+  | 'unsupported';
 
 export interface DownloadItem {
   id: string;
@@ -52,7 +61,7 @@ export interface DownloadItem {
   downloadedBytes: number;
   progress: number;
   speedBytesPerSec: number;
-  status: 'queued' | 'downloading' | 'paused' | 'completed' | 'error';
+  status: DownloadStatus;
   errorMessage?: string;
   completedSegments?: number;
   totalSegments?: number;
@@ -104,8 +113,8 @@ export type OfflinePlaybackHandle =
 
 const DOWNLOADS_STORAGE_KEY = 'kurostream_offline_downloads_v1';
 const MAX_CONCURRENT_DOWNLOADS = 2;
-const MP4_CHUNK_BYTES = 1536 * 1024; // 1.5 MB per HTTP range slice (fits Vercel payload & Capacitor RAM)
-const HLS_SEGMENT_CONCURRENCY = 3;
+const MP4_CHUNK_BYTES = 1536 * 1024; // 1.5 MB per HTTP range slice on Web
+const HLS_SEGMENT_CONCURRENCY = 2; // Ordered conservative concurrency to prevent CDN throttling
 
 const activeAbortControllers = new Map<string, AbortController>();
 const activeRunningIds = new Set<string>();
@@ -121,6 +130,13 @@ class ExpiredStreamUrlError extends Error {
   }
 }
 
+class UnsupportedSourceError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'UnsupportedSourceError';
+  }
+}
+
 function dispatchDownloadsUpdated(): void {
   if (typeof window !== 'undefined') {
     window.dispatchEvent(new CustomEvent('kurostream:downloads-updated'));
@@ -129,13 +145,16 @@ function dispatchDownloadsUpdated(): void {
 
 function inferFormatFromUrl(rawUrl: string): 'mp4' | 'hls' {
   const unwrapped = unwrapProxyUrl(rawUrl).targetUrl.toLowerCase();
-  if (unwrapped.includes('.m3u8') || unwrapped.includes('/master.txt')) return 'hls';
+  if (unwrapped.includes('.m3u8') || unwrapped.includes('/master.txt') || unwrapped.includes('.m3u?')) {
+    return 'hls';
+  }
   return 'mp4';
 }
 
 export function isEmbedLikeUrl(rawUrl?: string | null): boolean {
-  if (!rawUrl) return true;
+  if (!rawUrl || !rawUrl.trim()) return true;
   const unwrapped = unwrapProxyUrl(rawUrl).targetUrl.toLowerCase();
+  if (!unwrapped || unwrapped.startsWith('offline://')) return true;
   try {
     const parsed = new URL(unwrapped, 'https://kurostream.local');
     const host = parsed.hostname.toLowerCase();
@@ -145,6 +164,15 @@ export function isEmbedLikeUrl(rawUrl?: string | null): boolean {
       host.includes('abyssplayer.com') ||
       host.includes('megaplay.buzz') ||
       host.includes('short.icu') ||
+      host.includes('vidmoly') ||
+      host.includes('streamtape') ||
+      host.includes('filemoon') ||
+      host.includes('streamwish') ||
+      host.includes('voe.sx') ||
+      host.includes('dood') ||
+      host.includes('mixdrop') ||
+      host.includes('uqload') ||
+      host.includes('embedwish') ||
       unwrapped.includes('multi-lang-plyr')
     ) {
       return true;
@@ -175,7 +203,7 @@ export function unwrapProxyUrl(
       const parsed = new URL(current, 'https://kurostream.local');
       const inner = parsed.searchParams.get('url');
       const refParam = parsed.searchParams.get('referer');
-      if (refParam && !referer) referer = refParam;
+      if (refParam && !referer && refParam !== 'none') referer = refParam;
       if (inner && /^https?:\/\//i.test(inner)) {
         current = inner;
         continue;
@@ -193,7 +221,7 @@ function buildProxyMediaUrl(targetUrl: string, referer?: string, expectMedia = t
   const { targetUrl: cleanTarget, referer: cleanRef } = unwrapProxyUrl(targetUrl, referer || '');
   const params = new URLSearchParams();
   params.set('url', cleanTarget);
-  if (cleanRef) params.set('referer', cleanRef);
+  if (cleanRef && cleanRef !== 'none') params.set('referer', cleanRef);
   if (expectMedia) params.set('expectMedia', '1');
   return resolveApiUrl(`/api/anime/proxy?${params.toString()}`);
 }
@@ -296,7 +324,7 @@ export function selectDownloadableSource(
     ok: false,
     reason: 'embed-only',
     message:
-      'This mirror only supplies an embedded iframe player and does not expose a downloadable MP4 or HLS stream. Switch to Vidstreaming, Megacloud, or another downloadable server.',
+      'Download Not Supported: This mirror only supplies an embedded player iframe and does not expose a downloadable MP4 or HLS file. Switch to Vidstreaming, Megacloud, or another downloadable server.',
   };
 }
 
@@ -319,7 +347,7 @@ export async function resolveBestDownloadableStreamForEpisode(options: {
       serverName: string;
       refreshContext: DownloadRefreshContext;
     }
-  | { ok: false; message: string }
+  | { ok: false; unsupported?: boolean; message: string }
 > {
   if (options.audioMode === 'hindi') {
     const awRes = await resolveAnimeWorldStreamForAnime({
@@ -352,8 +380,9 @@ export async function resolveBestDownloadableStreamForEpisode(options: {
       }
       return {
         ok: false,
+        unsupported: true,
         message:
-          'Hindi (AnimeWorld India) mirror is currently embed-only for this episode. Switch Watch Audio to SUB/DUB to download from Vidstreaming or Megacloud.',
+          'Download Not Supported: AnimeWorld India only provides an embedded iframe player for this episode. Switch Audio to SUB or DUB to download from Vidstreaming or Megacloud.',
       };
     }
     return {
@@ -384,6 +413,7 @@ export async function resolveBestDownloadableStreamForEpisode(options: {
     : baseServers;
 
   let lastReason = 'No downloadable video source found across streaming servers.';
+  let sawUnsupported = false;
 
   for (const srv of orderedServers) {
     const res = await fetchEpisodeStream(epIdToUse, {
@@ -414,10 +444,11 @@ export async function resolveBestDownloadableStreamForEpisode(options: {
         },
       };
     }
+    if (sel.reason === 'embed-only') sawUnsupported = true;
     lastReason = sel.message;
   }
 
-  return { ok: false, message: lastReason };
+  return { ok: false, unsupported: sawUnsupported, message: lastReason };
 }
 
 export function getStoredDownloads(): DownloadItem[] {
@@ -432,15 +463,31 @@ export function getStoredDownloads(): DownloadItem[] {
       const format = item.format || inferFormatFromUrl(item.streamUrl || '');
       const isLiveInMemory =
         activeRunningIds.has(item.id) || pendingQueueIds.includes(item.id);
-      const normalizedStatus: DownloadItem['status'] =
-        (item.status === 'downloading' || item.status === 'queued') && !isLiveInMemory
-          ? 'paused'
-          : item.status;
+
+      let normalizedStatus: DownloadStatus = item.status;
+      let normalizedError = item.errorMessage;
+
+      if (
+        normalizedStatus !== 'completed' &&
+        isEmbedLikeUrl(item.streamUrl) &&
+        !item.refreshContext
+      ) {
+        normalizedStatus = 'unsupported';
+        normalizedError =
+          normalizedError ||
+          'Download Not Supported: This mirror does not expose a downloadable video stream.';
+      } else if (
+        (normalizedStatus === 'downloading' || normalizedStatus === 'queued') &&
+        !isLiveInMemory
+      ) {
+        normalizedStatus = 'paused';
+      }
 
       return {
         ...item,
         format,
         status: normalizedStatus,
+        errorMessage: normalizedError,
         speedBytesPerSec: normalizedStatus === 'downloading' ? item.speedBytesPerSec || 0 : 0,
       };
     });
@@ -494,7 +541,30 @@ function parseAttributesLine(attrStr: string): Record<string, string> {
   return out;
 }
 
-function resolvePlaylistLineUrl(rawLineUrl: string, baseTargetUrl: string, defaultReferer: string): {
+function parseByteRangeAttr(
+  rawAttr: string,
+  prevEnd: number
+): { start: number; end: number; nextPrevEnd: number } | null {
+  const cleaned = rawAttr.trim();
+  const atIdx = cleaned.indexOf('@');
+  const lenStr = atIdx >= 0 ? cleaned.slice(0, atIdx) : cleaned;
+  const offStr = atIdx >= 0 ? cleaned.slice(atIdx + 1) : '';
+  const length = Number(lenStr);
+  if (!Number.isFinite(length) || length <= 0) return null;
+  const offset = offStr ? Number(offStr) : prevEnd;
+  if (!Number.isFinite(offset) || offset < 0) return null;
+  return {
+    start: offset,
+    end: offset + length - 1,
+    nextPrevEnd: offset + length,
+  };
+}
+
+function resolvePlaylistLineUrl(
+  rawLineUrl: string,
+  baseTargetUrl: string,
+  defaultReferer: string
+): {
   targetUrl: string;
   referer: string;
 } {
@@ -513,14 +583,43 @@ function resolvePlaylistLineUrl(rawLineUrl: string, baseTargetUrl: string, defau
   }
 }
 
-function rewriteTagUri(
-  line: string,
-  replacementUri: string
-): string {
+function rewriteTagUri(line: string, replacementUri: string): string {
   if (/URI="[^"]*"/i.test(line)) {
     return line.replace(/URI="[^"]*"/i, `URI="${replacementUri}"`);
   }
   return line;
+}
+
+async function getAuthorizedProxyHeaders(
+  forceRefresh = false,
+  extra?: Record<string, string>
+): Promise<Record<string, string>> {
+  const token = await getFreshFirebaseIdToken(forceRefresh);
+  if (!token) {
+    notifySessionExpired('Please sign in to continue.');
+    throw new Error('Authentication required. Please sign in to download episodes.');
+  }
+  return {
+    Authorization: `Bearer ${token}`,
+    Accept: '*/*',
+    ...(extra || {}),
+  };
+}
+
+function getHeaderCaseInsensitive(
+  headers: Record<string, string> | undefined,
+  targetName: string
+): string | null {
+  if (!headers) return null;
+  const lower = targetName.toLowerCase();
+  for (const [k, v] of Object.entries(headers)) {
+    if (k.toLowerCase() === lower) return v;
+  }
+  return null;
+}
+
+function normalizeNativeHeadersMap(headers: Record<string, string> | undefined): Record<string, string> {
+  return headers || {};
 }
 
 async function fetchTextViaProxy(
@@ -528,8 +627,66 @@ async function fetchTextViaProxy(
   referer: string,
   signal: AbortSignal
 ): Promise<string> {
+  if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
   const proxied = buildProxyMediaUrl(targetUrl, referer, true);
+
+  if (Capacitor.isNativePlatform()) {
+    let headers = await getAuthorizedProxyHeaders(false);
+    let res = await CapacitorHttp.get({
+      url: proxied,
+      headers,
+      responseType: 'text',
+      connectTimeout: 20000,
+      readTimeout: 30000,
+    });
+    if (res.status === 401) {
+      headers = await getAuthorizedProxyHeaders(true);
+      res = await CapacitorHttp.get({
+        url: proxied,
+        headers,
+        responseType: 'text',
+        connectTimeout: 20000,
+        readTimeout: 30000,
+      });
+    }
+    if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
+
+    if (res.status === 415) {
+      throw new UnsupportedSourceError(
+        'Download Not Supported: Provider returned an HTML embed webpage instead of a downloadable playlist.'
+      );
+    }
+    if (res.status === 401 || res.status === 403 || res.status === 410) {
+      throw new ExpiredStreamUrlError(res.status, `Stream link expired or denied (HTTP ${res.status}).`);
+    }
+    if (res.status < 200 || res.status >= 300) {
+      throw new Error(`Playlist request failed with HTTP ${res.status}.`);
+    }
+
+    const text =
+      typeof res.data === 'string'
+        ? res.data
+        : res.data && typeof res.data === 'object'
+          ? JSON.stringify(res.data)
+          : String(res.data || '');
+    const trimmed = text.trimStart();
+    if (trimmed.toLowerCase().startsWith('<!doctype') || trimmed.toLowerCase().startsWith('<html')) {
+      throw new UnsupportedSourceError(
+        'Download Not Supported: Upstream URL returned an HTML player instead of a media playlist.'
+      );
+    }
+    if (!text.includes('#EXTM3U')) {
+      throw new Error('Upstream URL did not return a valid HLS (.m3u8) playlist.');
+    }
+    return text;
+  }
+
   const res = await authorizedApiFetch(proxied, { signal, timeoutMs: 30000 });
+  if (res.status === 415) {
+    throw new UnsupportedSourceError(
+      'Download Not Supported: Provider returned an HTML embed webpage instead of a downloadable playlist.'
+    );
+  }
   if (res.status === 401 || res.status === 403 || res.status === 410) {
     throw new ExpiredStreamUrlError(res.status, `Stream link expired or denied (HTTP ${res.status}).`);
   }
@@ -547,10 +704,26 @@ async function fetchTextViaProxy(
     );
   }
   const text = await res.text();
-  if (!text.trim().startsWith('#EXTM3U')) {
+  const trimmed = text.trimStart().toLowerCase();
+  if (trimmed.startsWith('<!doctype') || trimmed.startsWith('<html')) {
+    throw new UnsupportedSourceError(
+      'Download Not Supported: Provider returned an HTML embed player instead of video.'
+    );
+  }
+  if (!text.includes('#EXTM3U')) {
     throw new Error('Upstream URL did not return a valid HLS (.m3u8) playlist.');
   }
   return text;
+}
+
+function base64ToUint8(base64: string): Uint8Array {
+  const clean = base64.includes(',') ? base64.split(',')[1] : base64;
+  const binary = atob(clean);
+  const out = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    out[i] = binary.charCodeAt(i);
+  }
+  return out;
 }
 
 async function fetchBytesViaProxy(
@@ -565,26 +738,113 @@ async function fetchBytesViaProxy(
   contentRange: string | null;
   contentLength: number;
 }> {
+  if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
   const proxied = buildProxyMediaUrl(targetUrl, referer, true);
+
+  if (Capacitor.isNativePlatform()) {
+    let headers = await getAuthorizedProxyHeaders(false, extraHeaders);
+    let res = await CapacitorHttp.get({
+      url: proxied,
+      headers,
+      responseType: 'arraybuffer',
+      connectTimeout: 20000,
+      readTimeout: 45000,
+    });
+    if (res.status === 401) {
+      headers = await getAuthorizedProxyHeaders(true, extraHeaders);
+      res = await CapacitorHttp.get({
+        url: proxied,
+        headers,
+        responseType: 'arraybuffer',
+        connectTimeout: 20000,
+        readTimeout: 45000,
+      });
+    }
+    if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
+    if (res.status === 415) {
+      throw new UnsupportedSourceError(
+        'Download Not Supported: Provider returned an HTML webpage instead of a downloadable video file.'
+      );
+    }
+    if (res.status === 401 || res.status === 403 || res.status === 410) {
+      throw new ExpiredStreamUrlError(res.status, `Media URL expired or denied (HTTP ${res.status}).`);
+    }
+    if (res.status < 200 || (res.status >= 300 && res.status !== 206)) {
+      throw new Error(`Media fetch failed with HTTP ${res.status}.`);
+    }
+
+    const respHeaders = normalizeNativeHeadersMap(res.headers);
+    const mimeType = (
+      getHeaderCaseInsensitive(respHeaders, 'content-type') || 'application/octet-stream'
+    ).toLowerCase();
+    if (mimeType.includes('text/html') || mimeType.includes('application/xhtml+xml')) {
+      throw new UnsupportedSourceError(
+        'Download Not Supported: Upstream returned HTML instead of video data.'
+      );
+    }
+
+    let bytes: Uint8Array;
+    if (typeof res.data === 'string') {
+      bytes = base64ToUint8(res.data);
+    } else if (res.data instanceof ArrayBuffer) {
+      bytes = new Uint8Array(res.data);
+    } else if (ArrayBuffer.isView(res.data)) {
+      bytes = new Uint8Array(res.data.buffer, res.data.byteOffset, res.data.byteLength);
+    } else {
+      throw new Error('Unable to decode native binary response.');
+    }
+
+    if (bytes.byteLength === 0) {
+      throw new Error('Received empty media segment from provider.');
+    }
+
+    if (bytes.byteLength >= 12) {
+      const head = new TextDecoder().decode(bytes.subarray(0, 64)).trimStart().toLowerCase();
+      if (head.startsWith('<!doctype') || head.startsWith('<html')) {
+        throw new UnsupportedSourceError(
+          'Download Not Supported: Provider returned HTML markup instead of media.'
+        );
+      }
+    }
+
+    const contentRange = getHeaderCaseInsensitive(respHeaders, 'content-range');
+    const contentLengthHeader = getHeaderCaseInsensitive(respHeaders, 'content-length');
+    const contentLength = contentLengthHeader
+      ? parseInt(contentLengthHeader, 10)
+      : bytes.byteLength;
+
+    return {
+      status: res.status,
+      bytes,
+      mimeType,
+      contentRange,
+      contentLength: Number.isFinite(contentLength) ? contentLength : bytes.byteLength,
+    };
+  }
+
   const res = await authorizedApiFetch(proxied, {
     signal,
     timeoutMs: 45000,
     headers: extraHeaders,
   });
 
+  if (res.status === 415) {
+    throw new UnsupportedSourceError(
+      'Download Not Supported: Provider returned an HTML webpage instead of a downloadable video file.'
+    );
+  }
   if (res.status === 401 || res.status === 403 || res.status === 410) {
     throw new ExpiredStreamUrlError(res.status, `Media URL expired or denied (HTTP ${res.status}).`);
   }
-  if (res.status === 415) {
-    throw new Error('Provider returned an HTML webpage instead of a downloadable video file.');
-  }
-  if (!res.ok) {
+  if (!res.ok && res.status !== 206) {
     throw new Error(`Media fetch failed with HTTP ${res.status}.`);
   }
 
   const mimeType = (res.headers.get('content-type') || 'application/octet-stream').toLowerCase();
   if (mimeType.includes('text/html') || mimeType.includes('application/xhtml+xml')) {
-    throw new Error('Upstream server returned HTML instead of video data.');
+    throw new UnsupportedSourceError(
+      'Download Not Supported: Upstream server returned HTML instead of video data.'
+    );
   }
 
   const buf = await res.arrayBuffer();
@@ -593,11 +853,12 @@ async function fetchBytesViaProxy(
     throw new Error('Received empty media segment from provider.');
   }
 
-  // Verify response isn't an HTML error page disguised with wrong MIME
-  if (bytes.byteLength >= 15) {
+  if (bytes.byteLength >= 12) {
     const head = new TextDecoder().decode(bytes.subarray(0, 64)).trimStart().toLowerCase();
-    if (head.startsWith('<!doctype html') || head.startsWith('<html')) {
-      throw new Error('Provider returned an HTML error page instead of media binary.');
+    if (head.startsWith('<!doctype') || head.startsWith('<html')) {
+      throw new UnsupportedSourceError(
+        'Download Not Supported: Provider returned HTML markup instead of media.'
+      );
     }
   }
 
@@ -614,7 +875,71 @@ async function fetchBytesViaProxy(
   };
 }
 
-function parseMasterPlaylist(masterText: string, masterTargetUrl: string, referer: string): {
+async function downloadChunkToStorageWithRetry(options: {
+  downloadId: string;
+  chunkKey: string;
+  targetUrl: string;
+  referer: string;
+  rangeHeader?: string;
+  signal: AbortSignal;
+}): Promise<number> {
+  const { downloadId, chunkKey, targetUrl, referer, rangeHeader, signal } = options;
+  const maxAttempts = 3;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
+    try {
+      // On Android native without byte-range slicing, download straight to disk via Filesystem.downloadFile
+      // (avoids browser fetch(), ArrayBuffer allocations, and Base64 bridge copies)
+      if (Capacitor.isNativePlatform() && !rangeHeader) {
+        const proxied = buildProxyMediaUrl(targetUrl, referer, true);
+        const headers = await getAuthorizedProxyHeaders(attempt > 1);
+        try {
+          return await downloadNativeBinaryChunk(downloadId, chunkKey, proxied, headers);
+        } catch (nativeErr) {
+          const msg = nativeErr instanceof Error ? nativeErr.message : String(nativeErr);
+          if (msg.includes('401') || msg.includes('403') || msg.includes('410')) {
+            throw new ExpiredStreamUrlError(403, msg);
+          }
+          if (msg.includes('HTML') || msg.includes('415')) {
+            throw new UnsupportedSourceError(`Download Not Supported: ${msg}`);
+          }
+          throw nativeErr;
+        }
+      }
+
+      const fetched = await fetchBytesViaProxy(
+        targetUrl,
+        referer,
+        signal,
+        rangeHeader ? { Range: rangeHeader } : undefined
+      );
+      await saveBinaryChunk(downloadId, chunkKey, fetched.bytes, fetched.mimeType);
+      return fetched.bytes.byteLength;
+    } catch (err) {
+      if (
+        signal.aborted ||
+        (err as Error)?.name === 'AbortError' ||
+        err instanceof ExpiredStreamUrlError ||
+        err instanceof UnsupportedSourceError
+      ) {
+        throw err;
+      }
+      if (attempt >= maxAttempts) {
+        throw err;
+      }
+      await new Promise((r) => setTimeout(r, 600 * attempt));
+    }
+  }
+  throw new Error('Failed downloading media segment.');
+}
+
+function parseMasterPlaylist(
+  masterText: string,
+  masterTargetUrl: string,
+  referer: string,
+  preferredAudioMode: 'sub' | 'dub' | 'hindi'
+): {
   videoUrl: string;
   videoReferer: string;
   audioUrl?: string;
@@ -632,6 +957,8 @@ function parseMasterPlaylist(masterText: string, masterTargetUrl: string, refere
     groupId: string;
     url: string;
     referer: string;
+    name: string;
+    language: string;
     isDefault: boolean;
   }> = [];
 
@@ -645,6 +972,8 @@ function parseMasterPlaylist(masterText: string, masterTargetUrl: string, refere
           groupId: attrs['GROUP-ID'],
           url: resolved.targetUrl,
           referer: resolved.referer,
+          name: (attrs.NAME || '').toLowerCase(),
+          language: (attrs.LANGUAGE || '').toLowerCase(),
           isDefault: attrs.DEFAULT === 'YES' || attrs.AUTOSELECT === 'YES',
         });
       }
@@ -656,12 +985,10 @@ function parseMasterPlaylist(masterText: string, masterTargetUrl: string, refere
         const parts = attrs.RESOLUTION.toLowerCase().split('x');
         height = Number(parts[1] || parts[0]) || 0;
       }
-      // Next non-empty non-comment line is URI
       let nextUriLine = '';
       for (let j = i + 1; j < lines.length; j++) {
         const candidate = lines[j].trim();
-        if (!candidate) continue;
-        if (candidate.startsWith('#')) continue;
+        if (!candidate || candidate.startsWith('#')) continue;
         nextUriLine = candidate;
         break;
       }
@@ -682,7 +1009,7 @@ function parseMasterPlaylist(masterText: string, masterTargetUrl: string, refere
     return { videoUrl: masterTargetUrl, videoReferer: referer };
   }
 
-  // Prefer <= 1080p highest quality, else highest overall
+  // Prefer <= 1080p highest quality, else best available
   variants.sort((a, b) => {
     const aScore = a.height > 0 && a.height <= 1080 ? a.height * 100000 + a.bandwidth : a.bandwidth;
     const bScore = b.height > 0 && b.height <= 1080 ? b.height * 100000 + b.bandwidth : b.bandwidth;
@@ -693,7 +1020,19 @@ function parseMasterPlaylist(masterText: string, masterTargetUrl: string, refere
   let matchedAudio: { url: string; referer: string } | undefined;
   if (chosen.audioGroup && audioTracks.length > 0) {
     const groupTracks = audioTracks.filter((a) => a.groupId === chosen.audioGroup);
-    const preferredAudio = groupTracks.find((a) => a.isDefault) || groupTracks[0];
+    const pool = groupTracks.length > 0 ? groupTracks : audioTracks;
+    const targetKeywords =
+      preferredAudioMode === 'hindi'
+        ? ['hin', 'hindi']
+        : preferredAudioMode === 'dub'
+          ? ['eng', 'english']
+          : ['jpn', 'ja', 'japanese', 'orig'];
+
+    const preferredAudio =
+      pool.find((a) => targetKeywords.some((kw) => a.language.includes(kw) || a.name.includes(kw))) ||
+      pool.find((a) => a.isDefault) ||
+      pool[0];
+
     if (preferredAudio) {
       matchedAudio = { url: preferredAudio.url, referer: preferredAudio.referer };
     }
@@ -707,11 +1046,18 @@ function parseMasterPlaylist(masterText: string, masterTargetUrl: string, refere
   };
 }
 
+interface HlsFetchTask {
+  chunkKey: string;
+  targetUrl: string;
+  referer: string;
+  rangeHeader?: string;
+}
+
 interface ParsedMediaPlaylist {
   rewrittenPlaylist: string;
-  keys: Array<{ chunkKey: string; targetUrl: string; referer: string }>;
-  maps: Array<{ chunkKey: string; targetUrl: string; referer: string }>;
-  segments: Array<{ chunkKey: string; targetUrl: string; referer: string }>;
+  keys: HlsFetchTask[];
+  maps: HlsFetchTask[];
+  segments: HlsFetchTask[];
 }
 
 function parseAndRewriteMediaPlaylist(
@@ -721,14 +1067,16 @@ function parseAndRewriteMediaPlaylist(
   prefix: 'v' | 'a'
 ): ParsedMediaPlaylist {
   const lines = playlistText.split(/\r?\n/);
-  const keys: Array<{ chunkKey: string; targetUrl: string; referer: string }> = [];
-  const maps: Array<{ chunkKey: string; targetUrl: string; referer: string }> = [];
-  const segments: Array<{ chunkKey: string; targetUrl: string; referer: string }> = [];
+  const keys: HlsFetchTask[] = [];
+  const maps: HlsFetchTask[] = [];
+  const segments: HlsFetchTask[] = [];
   const outLines: string[] = [];
 
   const seenKeyUrls = new Map<string, string>();
-  const seenMapUrls = new Map<string, string>();
+  const seenMapKeys = new Map<string, string>();
   let hasEndList = false;
+  let pendingByteRange: { start: number; end: number; nextPrevEnd: number } | null = null;
+  let prevSegEnd = 0;
 
   for (const rawLine of lines) {
     const line = rawLine.trim();
@@ -752,8 +1100,8 @@ function parseAndRewriteMediaPlaylist(
         keyFormat.includes('com.apple.fps') ||
         keyFormat.includes('urn:uuid:')
       ) {
-        throw new Error(
-          `This stream uses DRM encryption (${method || 'DRM'}) and cannot be saved offline.`
+        throw new UnsupportedSourceError(
+          `Download Not Supported: This stream uses DRM encryption (${method || 'DRM'}).`
         );
       }
 
@@ -781,14 +1129,35 @@ function parseAndRewriteMediaPlaylist(
         continue;
       }
       const resolved = resolvePlaylistLineUrl(attrs.URI, playlistTargetUrl, referer);
-      let chunkKey = seenMapUrls.get(resolved.targetUrl);
+      const mapRange = attrs.BYTERANGE ? parseByteRangeAttr(attrs.BYTERANGE, 0) : null;
+      const rangeHeader = mapRange ? `bytes=${mapRange.start}-${mapRange.end}` : undefined;
+      const mapCacheId = `${resolved.targetUrl}::${rangeHeader || ''}`;
+
+      let chunkKey = seenMapKeys.get(mapCacheId);
       if (!chunkKey) {
         const idx = maps.length;
         chunkKey = `${prefix}_map_${idx}`;
-        seenMapUrls.set(resolved.targetUrl, chunkKey);
-        maps.push({ chunkKey, targetUrl: resolved.targetUrl, referer: resolved.referer });
+        seenMapKeys.set(mapCacheId, chunkKey);
+        maps.push({
+          chunkKey,
+          targetUrl: resolved.targetUrl,
+          referer: resolved.referer,
+          rangeHeader,
+        });
       }
-      outLines.push(rewriteTagUri(line, `kuro-offline://chunk/${chunkKey}`));
+      // Strip BYTERANGE since each saved chunk holds the exact slice
+      const strippedLine = line.replace(/,?\s*BYTERANGE="[^"]*"/i, '');
+      outLines.push(rewriteTagUri(strippedLine, `kuro-offline://chunk/${chunkKey}`));
+      continue;
+    }
+
+    if (line.startsWith('#EXT-X-BYTERANGE:')) {
+      const br = parseByteRangeAttr(line.slice('#EXT-X-BYTERANGE:'.length), prevSegEnd);
+      if (br) {
+        pendingByteRange = br;
+        prevSegEnd = br.nextPrevEnd;
+      }
+      // Do not emit EXT-X-BYTERANGE in offline playlist because each segment chunk stores the exact extracted byte slice
       continue;
     }
 
@@ -801,7 +1170,17 @@ function parseAndRewriteMediaPlaylist(
     const segIdx = segments.length;
     const chunkKey = `${prefix}_seg_${segIdx}`;
     const resolved = resolvePlaylistLineUrl(line, playlistTargetUrl, referer);
-    segments.push({ chunkKey, targetUrl: resolved.targetUrl, referer: resolved.referer });
+    const rangeHeader = pendingByteRange
+      ? `bytes=${pendingByteRange.start}-${pendingByteRange.end}`
+      : undefined;
+    pendingByteRange = null;
+
+    segments.push({
+      chunkKey,
+      targetUrl: resolved.targetUrl,
+      referer: resolved.referer,
+      rangeHeader,
+    });
     outLines.push(`kuro-offline://chunk/${chunkKey}`);
   }
 
@@ -829,12 +1208,19 @@ async function runHlsDownload(
 
   let rootPlaylistText = await fetchTextViaProxy(mediaTargetUrl, mediaReferer, signal);
 
-  if (rootPlaylistText.includes('#EXT-X-STREAM-INF')) {
-    const selected = parseMasterPlaylist(rootPlaylistText, mediaTargetUrl, mediaReferer);
+  for (let depth = 0; depth < 2 && rootPlaylistText.includes('#EXT-X-STREAM-INF'); depth++) {
+    const selected = parseMasterPlaylist(
+      rootPlaylistText,
+      mediaTargetUrl,
+      mediaReferer,
+      item.audioMode
+    );
     mediaTargetUrl = selected.videoUrl;
     mediaReferer = selected.videoReferer;
-    audioTargetUrl = selected.audioUrl;
-    audioReferer = selected.audioReferer;
+    if (selected.audioUrl) {
+      audioTargetUrl = selected.audioUrl;
+      audioReferer = selected.audioReferer;
+    }
     rootPlaylistText = await fetchTextViaProxy(mediaTargetUrl, mediaReferer, signal);
   }
 
@@ -883,17 +1269,28 @@ async function runHlsDownload(
     if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
     const alreadySaved = await hasBinaryChunk(item.id, task.chunkKey);
     if (alreadySaved) continue;
-    const fetched = await fetchBytesViaProxy(task.targetUrl, task.referer, signal);
-    await saveBinaryChunk(item.id, task.chunkKey, fetched.bytes, fetched.mimeType);
+    await downloadChunkToStorageWithRetry({
+      downloadId: item.id,
+      chunkKey: task.chunkKey,
+      targetUrl: task.targetUrl,
+      referer: task.referer,
+      rangeHeader: task.rangeHeader,
+      signal,
+    });
   }
 
   let finalPlaylistText = parsedVideo.rewrittenPlaylist;
   if (parsedAudio) {
-    const audioPlaylistBytes = new TextEncoder().encode(parsedAudio.rewrittenPlaylist);
     await saveBinaryChunk(
       item.id,
       'audio_playlist',
-      audioPlaylistBytes,
+      new TextEncoder().encode(parsedAudio.rewrittenPlaylist),
+      'application/vnd.apple.mpegurl'
+    );
+    await saveBinaryChunk(
+      item.id,
+      'video_playlist',
+      new TextEncoder().encode(parsedVideo.rewrittenPlaylist),
       'application/vnd.apple.mpegurl'
     );
     finalPlaylistText = [
@@ -903,32 +1300,40 @@ async function runHlsDownload(
       '#EXT-X-STREAM-INF:BANDWIDTH=2000000,AUDIO="offline_aud"',
       'kuro-offline://chunk/video_playlist',
     ].join('\n');
-    await saveBinaryChunk(
-      item.id,
-      'video_playlist',
-      new TextEncoder().encode(parsedVideo.rewrittenPlaylist),
-      'application/vnd.apple.mpegurl'
-    );
   }
 
-  let completedCount = 0;
-  let downloadedBytes = Math.max(0, item.downloadedBytes || 0);
+  // Scan which segments are already saved for accurate Resume counts
+  const existingMask = await Promise.all(
+    allSegTasks.map((seg) => hasBinaryChunk(item.id, seg.chunkKey))
+  );
+  let completedCount = existingMask.filter(Boolean).length;
+  let downloadedBytes = completedCount > 0 ? Math.max(0, item.downloadedBytes || 0) : 0;
   let newlyFetchedBytes = 0;
   let newlyFetchedSegments = 0;
   const startWall = Date.now();
   let lastUiUpdate = 0;
-  let nextIndex = 0;
+
+  const pendingIndices: number[] = [];
+  for (let i = 0; i < totalSegments; i++) {
+    if (!existingMask[i]) pendingIndices.push(i);
+  }
+  let pendingCursor = 0;
 
   updateStoredItem(item.id, {
     format: 'hls',
     totalSegments,
-    completedSegments: item.completedSegments || 0,
+    completedSegments: completedCount,
+    downloadedBytes,
+    progress:
+      completedCount >= totalSegments
+        ? 99
+        : Math.round((completedCount / totalSegments) * 100),
     mimeType: 'application/vnd.apple.mpegurl',
   });
 
   const emitProgress = (force = false) => {
     const now = Date.now();
-    if (!force && now - lastUiUpdate < 350) return;
+    if (!force && now - lastUiUpdate < 300) return;
     lastUiUpdate = now;
 
     const elapsedSec = Math.max(0.25, (now - startWall) / 1000);
@@ -963,30 +1368,34 @@ async function runHlsDownload(
   const worker = async () => {
     while (true) {
       if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
-      const idx = nextIndex++;
-      if (idx >= totalSegments) break;
-
+      const pos = pendingCursor++;
+      if (pos >= pendingIndices.length) break;
+      const idx = pendingIndices[pos];
       const seg = allSegTasks[idx];
-      const alreadyExists = await hasBinaryChunk(item.id, seg.chunkKey);
-      if (alreadyExists) {
-        completedCount += 1;
-        emitProgress(false);
-        continue;
-      }
 
-      const fetched = await fetchBytesViaProxy(seg.targetUrl, seg.referer, signal);
-      await saveBinaryChunk(item.id, seg.chunkKey, fetched.bytes, fetched.mimeType);
+      const writtenBytes = await downloadChunkToStorageWithRetry({
+        downloadId: item.id,
+        chunkKey: seg.chunkKey,
+        targetUrl: seg.targetUrl,
+        referer: seg.referer,
+        rangeHeader: seg.rangeHeader,
+        signal,
+      });
 
       completedCount += 1;
-      downloadedBytes += fetched.bytes.byteLength;
-      newlyFetchedBytes += fetched.bytes.byteLength;
+      downloadedBytes += writtenBytes;
+      newlyFetchedBytes += writtenBytes;
       newlyFetchedSegments += 1;
       emitProgress(false);
     }
   };
 
-  const workerCount = Math.min(HLS_SEGMENT_CONCURRENCY, totalSegments);
-  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  if (pendingIndices.length > 0) {
+    const workerCount = Math.min(HLS_SEGMENT_CONCURRENCY, pendingIndices.length);
+    await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  }
+
+  emitProgress(true);
 
   const segmentKeys = allSegTasks.map((s) => s.chunkKey);
   const manifest: OfflineManifestRecord = {
@@ -1009,32 +1418,140 @@ function parseTotalFromContentRange(header: string | null): number {
   return match ? Number(match[1]) || 0 : 0;
 }
 
+async function runNativeAndroidMp4Download(
+  item: DownloadItem,
+  targetUrl: string,
+  referer: string,
+  signal: AbortSignal
+): Promise<OfflineManifestRecord> {
+  const nativeFileName = `episode_${item.episodeNumber}.mp4`;
+  const proxiedUrl = buildProxyMediaUrl(targetUrl, referer, true);
+  let headers = await getAuthorizedProxyHeaders(false);
+
+  // Pre-flight native HEAD check (via CapacitorHttp, zero browser fetch()) to catch 401/403/415 HTML & get content-length
+  let expectedSize = 0;
+  let mimeType = 'video/mp4';
+  try {
+    let headRes = await CapacitorHttp.request({
+      method: 'HEAD',
+      url: proxiedUrl,
+      headers,
+      connectTimeout: 15000,
+      readTimeout: 15000,
+    });
+    if (headRes.status === 401) {
+      headers = await getAuthorizedProxyHeaders(true);
+      headRes = await CapacitorHttp.request({
+        method: 'HEAD',
+        url: proxiedUrl,
+        headers,
+        connectTimeout: 15000,
+        readTimeout: 15000,
+      });
+    }
+    if (headRes.status === 415) {
+      throw new UnsupportedSourceError(
+        'Download Not Supported: Provider returned an HTML embed webpage instead of a downloadable MP4.'
+      );
+    }
+    if (headRes.status === 401 || headRes.status === 403 || headRes.status === 410) {
+      throw new ExpiredStreamUrlError(
+        headRes.status,
+        `MP4 URL expired or denied (HTTP ${headRes.status}).`
+      );
+    }
+    const respHeaders = normalizeNativeHeadersMap(headRes.headers);
+    const ct = getHeaderCaseInsensitive(respHeaders, 'content-type');
+    if (ct && (ct.toLowerCase().includes('text/html') || ct.toLowerCase().includes('xhtml'))) {
+      throw new UnsupportedSourceError(
+        'Download Not Supported: Provider returned HTML instead of MP4 video.'
+      );
+    }
+    if (ct && !ct.toLowerCase().includes('octet-stream')) {
+      mimeType = ct.split(';')[0].trim();
+    }
+    const len = Number(getHeaderCaseInsensitive(respHeaders, 'content-length') || 0);
+    if (Number.isFinite(len) && len > 0) expectedSize = len;
+  } catch (err) {
+    if (err instanceof ExpiredStreamUrlError || err instanceof UnsupportedSourceError) {
+      throw err;
+    }
+    // Proceed cleanly even if upstream rejects HEAD (405)
+  }
+
+  if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
+
+  const startWall = Date.now();
+  let lastUiUpdate = 0;
+
+  const dlRes = await downloadNativeMp4File({
+    downloadId: item.id,
+    fileName: nativeFileName,
+    url: proxiedUrl,
+    headers,
+    onProgress: (bytes, totalBytes) => {
+      if (signal.aborted) return;
+      const now = Date.now();
+      if (now - lastUiUpdate < 300) return;
+      lastUiUpdate = now;
+      const knownTotal = totalBytes > 0 ? totalBytes : expectedSize;
+      const elapsedSec = Math.max(0.25, (now - startWall) / 1000);
+      const speedBytesPerSec = Math.round(bytes / elapsedSec);
+      const progress =
+        knownTotal > 0
+          ? Math.min(99, Math.round((bytes / knownTotal) * 100))
+          : Math.min(95, Math.round(bytes / 150000));
+      updateStoredItem(item.id, {
+        format: 'mp4',
+        mimeType,
+        downloadedBytes: bytes,
+        fileSize: knownTotal || bytes,
+        progress,
+        speedBytesPerSec,
+        status: 'downloading',
+      });
+    },
+  });
+
+  if (signal.aborted) {
+    throw new DOMException('Aborted', 'AbortError');
+  }
+
+  const manifest: OfflineManifestRecord = {
+    downloadId: item.id,
+    format: 'mp4',
+    mimeType,
+    nativeMp4Path: dlRes.path,
+    nativeMp4Uri: dlRes.uri,
+    totalBytes: dlRes.size,
+    updatedAt: Date.now(),
+  };
+
+  await saveOfflineManifest(manifest);
+  return manifest;
+}
+
 async function runMp4Download(
   item: DownloadItem,
   signal: AbortSignal
 ): Promise<OfflineManifestRecord> {
   const { targetUrl, referer } = unwrapProxyUrl(item.streamUrl, item.referer || '');
-  const isNative = Capacitor.isNativePlatform();
-  const nativeFileName = `episode_${item.episodeNumber}.mp4`;
 
-  // Resume offset check
-  let existingBytes = 0;
-  let existingChunkCount = 0;
-
-  if (isNative) {
-    existingBytes = await getNativeMp4FileSize(item.id, nativeFileName);
-  } else {
-    let idx = 0;
-    while (idx < (item.mp4ChunkCount || 0)) {
-      const ok = await hasBinaryChunk(item.id, `mp4_part_${idx}`);
-      if (!ok) break;
-      idx += 1;
-    }
-    existingChunkCount = idx;
-    existingBytes = existingChunkCount * MP4_CHUNK_BYTES;
+  // Android APK: Always use native Capacitor Filesystem.downloadFile / CapacitorHttp (never browser fetch() for large video files)
+  if (Capacitor.isNativePlatform()) {
+    return runNativeAndroidMp4Download(item, targetUrl, referer, signal);
   }
 
-  // Probe range 0..1023 (or 0..MP4_CHUNK_BYTES-1 cleanly!)
+  // Web browser: HTTP Range chunked persistence in IndexedDB
+  let idx = 0;
+  while (idx < (item.mp4ChunkCount || 0)) {
+    const ok = await hasBinaryChunk(item.id, `mp4_part_${idx}`);
+    if (!ok) break;
+    idx += 1;
+  }
+  const existingChunkCount = idx;
+  const existingBytes = existingChunkCount * MP4_CHUNK_BYTES;
+
   const probeStart = existingBytes > 0 ? existingBytes : 0;
   const probeEnd = probeStart + MP4_CHUNK_BYTES - 1;
 
@@ -1054,31 +1571,16 @@ async function runMp4Download(
     const totalSize = totalFromRange;
     let currentOffset = probeStart;
     let currentChunkIndex = existingChunkCount;
-    let nativeUri = item.fileUri || '';
-    let nativePath = '';
     const startWall = Date.now();
     let lastUiUpdate = 0;
 
-    // Persist first slice
-    if (isNative) {
-      const writeRes = await writeNativeMp4Chunk(
-        item.id,
-        nativeFileName,
-        firstSlice.bytes,
-        currentOffset > 0
-      );
-      nativeUri = writeRes.uri;
-      nativePath = writeRes.path;
-    } else {
-      await saveBinaryChunk(
-        item.id,
-        `mp4_part_${currentChunkIndex}`,
-        firstSlice.bytes,
-        mimeType
-      );
-      currentChunkIndex += 1;
-    }
-
+    await saveBinaryChunk(
+      item.id,
+      `mp4_part_${currentChunkIndex}`,
+      firstSlice.bytes,
+      mimeType
+    );
+    currentChunkIndex += 1;
     currentOffset += firstSlice.bytes.byteLength;
     let sessionFetchedBytes = firstSlice.bytes.byteLength;
 
@@ -1099,30 +1601,18 @@ async function runMp4Download(
         Range: `bytes=${currentOffset}-${endByte}`,
       });
 
-      if (isNative) {
-        const writeRes = await writeNativeMp4Chunk(
-          item.id,
-          nativeFileName,
-          slice.bytes,
-          true
-        );
-        nativeUri = writeRes.uri;
-        nativePath = writeRes.path;
-      } else {
-        await saveBinaryChunk(
-          item.id,
-          `mp4_part_${currentChunkIndex}`,
-          slice.bytes,
-          mimeType
-        );
-        currentChunkIndex += 1;
-      }
-
+      await saveBinaryChunk(
+        item.id,
+        `mp4_part_${currentChunkIndex}`,
+        slice.bytes,
+        mimeType
+      );
+      currentChunkIndex += 1;
       currentOffset += slice.bytes.byteLength;
       sessionFetchedBytes += slice.bytes.byteLength;
 
       const now = Date.now();
-      if (now - lastUiUpdate >= 350 || currentOffset >= totalSize) {
+      if (now - lastUiUpdate >= 300 || currentOffset >= totalSize) {
         lastUiUpdate = now;
         const elapsedSec = Math.max(0.25, (now - startWall) / 1000);
         const speedBytesPerSec = Math.round(sessionFetchedBytes / elapsedSec);
@@ -1130,7 +1620,6 @@ async function runMp4Download(
           downloadedBytes: currentOffset,
           fileSize: totalSize,
           mp4ChunkCount: currentChunkIndex,
-          fileUri: nativeUri || undefined,
           progress: Math.min(99, Math.round((currentOffset / totalSize) * 100)),
           speedBytesPerSec,
           status: 'downloading',
@@ -1142,9 +1631,7 @@ async function runMp4Download(
       downloadId: item.id,
       format: 'mp4',
       mimeType,
-      nativeMp4Path: nativePath || undefined,
-      nativeMp4Uri: nativeUri || undefined,
-      chunkCount: isNative ? undefined : currentChunkIndex,
+      chunkCount: currentChunkIndex,
       totalBytes: totalSize,
       updatedAt: Date.now(),
     };
@@ -1152,9 +1639,14 @@ async function runMp4Download(
     return manifest;
   }
 
-  // Non-range provider fallback: stream full file via ReadableStream in 1.5MB flushes
+  // Non-range Web fallback: stream full file via ReadableStream in 1.5MB flushes
   const fullProxyUrl = buildProxyMediaUrl(targetUrl, referer, true);
   const fullRes = await authorizedApiFetch(fullProxyUrl, { signal, timeoutMs: 120000 });
+  if (fullRes.status === 415) {
+    throw new UnsupportedSourceError(
+      'Download Not Supported: Provider returned an HTML webpage instead of an MP4 file.'
+    );
+  }
   if (fullRes.status === 401 || fullRes.status === 403 || fullRes.status === 410) {
     throw new ExpiredStreamUrlError(fullRes.status, `Download URL expired (HTTP ${fullRes.status}).`);
   }
@@ -1163,7 +1655,9 @@ async function runMp4Download(
   }
   const ct = (fullRes.headers.get('content-type') || mimeType).toLowerCase();
   if (ct.includes('text/html') || ct.includes('application/xhtml+xml')) {
-    throw new Error('Upstream server returned HTML instead of an MP4 file.');
+    throw new UnsupportedSourceError(
+      'Download Not Supported: Upstream server returned HTML instead of an MP4 file.'
+    );
   }
 
   const totalBytesHeader = Number(fullRes.headers.get('content-length') || 0);
@@ -1176,8 +1670,6 @@ async function runMp4Download(
   let bufferedLen = 0;
   let totalReceived = 0;
   let chunkIndex = 0;
-  let nativeUri = '';
-  let nativePath = '';
   const startWall = Date.now();
   let lastUiUpdate = 0;
 
@@ -1192,25 +1684,16 @@ async function runMp4Download(
     bufferParts.length = 0;
     bufferedLen = 0;
 
-    if (chunkIndex === 0 && merged.byteLength >= 15) {
+    if (chunkIndex === 0 && merged.byteLength >= 12) {
       const head = new TextDecoder().decode(merged.subarray(0, 64)).trimStart().toLowerCase();
-      if (head.startsWith('<!doctype html') || head.startsWith('<html')) {
-        throw new Error('Upstream server returned HTML instead of video bytes.');
+      if (head.startsWith('<!doctype') || head.startsWith('<html')) {
+        throw new UnsupportedSourceError(
+          'Download Not Supported: Upstream server returned HTML instead of video bytes.'
+        );
       }
     }
 
-    if (isNative) {
-      const writeRes = await writeNativeMp4Chunk(
-        item.id,
-        nativeFileName,
-        merged,
-        chunkIndex > 0
-      );
-      nativeUri = writeRes.uri;
-      nativePath = writeRes.path;
-    } else {
-      await saveBinaryChunk(item.id, `mp4_part_${chunkIndex}`, merged, ct);
-    }
+    await saveBinaryChunk(item.id, `mp4_part_${chunkIndex}`, merged, ct);
     chunkIndex += 1;
   };
 
@@ -1228,7 +1711,7 @@ async function runMp4Download(
       }
 
       const now = Date.now();
-      if (now - lastUiUpdate >= 350) {
+      if (now - lastUiUpdate >= 300) {
         lastUiUpdate = now;
         const elapsedSec = Math.max(0.25, (now - startWall) / 1000);
         const speedBytesPerSec = Math.round(totalReceived / elapsedSec);
@@ -1257,9 +1740,7 @@ async function runMp4Download(
     downloadId: item.id,
     format: 'mp4',
     mimeType: ct,
-    nativeMp4Path: nativePath || undefined,
-    nativeMp4Uri: nativeUri || undefined,
-    chunkCount: isNative ? undefined : chunkIndex,
+    chunkCount: chunkIndex,
     totalBytes: totalReceived,
     updatedAt: Date.now(),
   };
@@ -1267,9 +1748,11 @@ async function runMp4Download(
   return manifest;
 }
 
-async function refreshExpiredItemStreamUrl(item: DownloadItem): Promise<DownloadItem | null> {
+async function refreshExpiredItemStreamUrl(
+  item: DownloadItem
+): Promise<{ refreshed?: DownloadItem; unsupportedMessage?: string; errorMessage?: string }> {
   const ctx = item.refreshContext;
-  if (!ctx) return null;
+  if (!ctx) return {};
 
   if (ctx.kind === 'animeworld') {
     const awRes = await resolveAnimeWorldStreamForAnime({
@@ -1281,15 +1764,22 @@ async function refreshExpiredItemStreamUrl(item: DownloadItem): Promise<Download
       preferHindi: ctx.audioMode === 'hindi',
       preferLang: ctx.audioMode,
     });
-    if (!awRes.data) return null;
+    if (!awRes.data) {
+      return { errorMessage: awRes.error?.message };
+    }
     const sel = selectDownloadableSource(awRes.data);
-    if (!sel.ok) return null;
-    return updateStoredItem(item.id, {
+    if (!sel.ok) {
+      return sel.reason === 'embed-only'
+        ? { unsupportedMessage: sel.message }
+        : { errorMessage: sel.message };
+    }
+    const updated = updateStoredItem(item.id, {
       streamUrl: sel.candidate.url,
       format: sel.candidate.format,
       quality: sel.candidate.quality,
       referer: sel.candidate.referer || item.referer,
     });
+    return updated ? { refreshed: updated } : {};
   }
 
   const streamRes = await fetchEpisodeStream(ctx.episodeId || item.episodeId, {
@@ -1299,31 +1789,56 @@ async function refreshExpiredItemStreamUrl(item: DownloadItem): Promise<Download
     malId: ctx.malId,
     episodeNumber: ctx.episodeNumber || item.episodeNumber,
   });
-  if (!streamRes.data) return null;
+  if (!streamRes.data) {
+    return { errorMessage: streamRes.error?.message };
+  }
   const sel = selectDownloadableSource(streamRes.data);
-  if (!sel.ok) return null;
-  return updateStoredItem(item.id, {
+  if (!sel.ok) {
+    return sel.reason === 'embed-only'
+      ? { unsupportedMessage: sel.message }
+      : { errorMessage: sel.message };
+  }
+  const updated = updateStoredItem(item.id, {
     streamUrl: sel.candidate.url,
     format: sel.candidate.format,
     quality: sel.candidate.quality,
     referer: sel.candidate.referer || item.referer,
   });
+  return updated ? { refreshed: updated } : {};
 }
 
 function pumpDownloadQueue(): void {
   while (activeRunningIds.size < MAX_CONCURRENT_DOWNLOADS && pendingQueueIds.length > 0) {
-    const nextId = pendingQueueIds.shift();
-    if (!nextId) break;
-    if (activeRunningIds.has(nextId)) continue;
+    const nextId = pendingQueueIds[0];
+    if (!nextId) {
+      pendingQueueIds.shift();
+      continue;
+    }
+    if (activeRunningIds.has(nextId)) {
+      pendingQueueIds.shift();
+      continue;
+    }
     const item = getDownloadById(nextId);
-    if (!item || item.status === 'completed' || item.status === 'paused') continue;
+    pendingQueueIds.shift();
+    if (
+      !item ||
+      item.status === 'completed' ||
+      item.status === 'paused' ||
+      item.status === 'unsupported'
+    ) {
+      continue;
+    }
+    activeRunningIds.add(nextId);
     void executeDownloadTask(nextId);
   }
 }
 
 async function executeDownloadTask(downloadId: string): Promise<void> {
   const initialItem = getDownloadById(downloadId);
-  if (!initialItem) return;
+  if (!initialItem) {
+    activeRunningIds.delete(downloadId);
+    return;
+  }
 
   activeRunningIds.add(downloadId);
   const controller = new AbortController();
@@ -1337,6 +1852,28 @@ async function executeDownloadTask(downloadId: string): Promise<void> {
     }) || initialItem;
 
   try {
+    // Before downloading: validate stream URL or refresh expired/stale 0% links cleanly
+    const needsPreRefresh =
+      Boolean(workingItem.refreshContext) &&
+      (isEmbedLikeUrl(workingItem.streamUrl) ||
+        (workingItem.progress === 0 && (workingItem.downloadedBytes || 0) === 0));
+
+    if (needsPreRefresh) {
+      const refreshRes = await refreshExpiredItemStreamUrl(workingItem).catch(() => ({}));
+      if ('unsupportedMessage' in refreshRes && refreshRes.unsupportedMessage) {
+        throw new UnsupportedSourceError(refreshRes.unsupportedMessage);
+      }
+      if ('refreshed' in refreshRes && refreshRes.refreshed) {
+        workingItem = refreshRes.refreshed;
+      }
+    }
+
+    if (isEmbedLikeUrl(workingItem.streamUrl)) {
+      throw new UnsupportedSourceError(
+        'Download Not Supported: This provider only supplies an embedded iframe player and does not allow direct offline video downloads.'
+      );
+    }
+
     let manifest: OfflineManifestRecord | null = null;
     let refreshedOnce = false;
 
@@ -1351,17 +1888,27 @@ async function executeDownloadTask(downloadId: string): Promise<void> {
         if (
           err instanceof ExpiredStreamUrlError &&
           !refreshedOnce &&
-          workingItem.refreshContext
+          workingItem.refreshContext &&
+          !controller.signal.aborted
         ) {
           refreshedOnce = true;
-          const refreshed = await refreshExpiredItemStreamUrl(workingItem);
-          if (refreshed) {
-            workingItem = refreshed;
+          const refreshRes = await refreshExpiredItemStreamUrl(workingItem).catch(() => ({}));
+          if ('unsupportedMessage' in refreshRes && refreshRes.unsupportedMessage) {
+            throw new UnsupportedSourceError(refreshRes.unsupportedMessage);
+          }
+          if ('refreshed' in refreshRes && refreshRes.refreshed) {
+            workingItem = refreshRes.refreshed;
             continue;
           }
         }
         throw err;
       }
+    }
+
+    // Never mark complete unless offline media is verified readable and playable
+    const verification = await verifyOfflineMediaPlayable(manifest);
+    if (!verification.ok) {
+      throw new Error(verification.reason || 'Offline media verification failed.');
     }
 
     updateStoredItem(downloadId, {
@@ -1375,18 +1922,36 @@ async function executeDownloadTask(downloadId: string): Promise<void> {
       errorMessage: undefined,
     });
   } catch (err) {
-    if ((err as Error)?.name === 'AbortError' || controller.signal.aborted) {
+    // Only return silently when the user explicitly paused or cancelled this task
+    if (controller.signal.aborted) {
       return;
     }
-    const msg = err instanceof Error ? err.message : 'Download failed.';
+
+    if (err instanceof UnsupportedSourceError) {
+      updateStoredItem(downloadId, {
+        status: 'unsupported',
+        errorMessage: err.message,
+        speedBytesPerSec: 0,
+      });
+      return;
+    }
+
+    const msg =
+      err instanceof Error
+        ? err.message
+        : 'Download failed. Tap Retry to refresh the stream URL and try again.';
     updateStoredItem(downloadId, {
       status: 'error',
       errorMessage: msg,
       speedBytesPerSec: 0,
     });
   } finally {
-    activeAbortControllers.delete(downloadId);
-    activeRunningIds.delete(downloadId);
+    if (activeAbortControllers.get(downloadId) === controller) {
+      activeAbortControllers.delete(downloadId);
+      activeRunningIds.delete(downloadId);
+    } else if (!activeAbortControllers.has(downloadId)) {
+      activeRunningIds.delete(downloadId);
+    }
     pumpDownloadQueue();
   }
 }
@@ -1406,13 +1971,39 @@ export async function startDownloadEpisode(
   const existing = existingIdx >= 0 ? all[existingIdx] : undefined;
   const detectedFormat = input.format || inferFormatFromUrl(input.streamUrl);
 
-  // If already completed with valid offline storage, keep it
   if (existing && existing.status === 'completed') {
     const manifest = await getOfflineManifest(downloadId);
     if (manifest) {
-      onUpdate?.(existing);
-      return existing;
+      const check = await verifyOfflineMediaPlayable(manifest);
+      if (check.ok) {
+        onUpdate?.(existing);
+        return existing;
+      }
     }
+  }
+
+  // Never enqueue non-downloadable embed iframe URLs as fake 0% downloads
+  if (isEmbedLikeUrl(input.streamUrl)) {
+    const unsupportedItem: DownloadItem = {
+      ...input,
+      format: detectedFormat,
+      fileSize: 0,
+      downloadedBytes: 0,
+      progress: 0,
+      speedBytesPerSec: 0,
+      status: 'unsupported',
+      errorMessage:
+        'Download Not Supported: This mirror only supplies an embedded player and does not provide a downloadable video file.',
+      createdAt: existing?.createdAt || Date.now(),
+    };
+    if (existingIdx >= 0) {
+      all[existingIdx] = unsupportedItem;
+    } else {
+      all.unshift(unsupportedItem);
+    }
+    saveStoredDownloads(all);
+    onUpdate?.(unsupportedItem);
+    return unsupportedItem;
   }
 
   const willQueue =
@@ -1473,8 +2064,18 @@ export function pauseDownload(downloadId: string): void {
 
 export function resumeDownload(downloadId: string): void {
   const item = getDownloadById(downloadId);
-  if (!item || item.status === 'completed') return;
+  if (!item || item.status === 'completed' || item.status === 'unsupported') return;
   if (activeRunningIds.has(downloadId) || pendingQueueIds.includes(downloadId)) return;
+
+  if (isEmbedLikeUrl(item.streamUrl) && !item.refreshContext) {
+    updateStoredItem(downloadId, {
+      status: 'unsupported',
+      errorMessage:
+        'Download Not Supported: This mirror does not provide a downloadable video file.',
+      speedBytesPerSec: 0,
+    });
+    return;
+  }
 
   const willQueue = activeRunningIds.size >= MAX_CONCURRENT_DOWNLOADS;
   updateStoredItem(downloadId, {
@@ -1492,9 +2093,13 @@ export async function retryDownload(downloadId: string): Promise<void> {
   if (!item) return;
 
   if (item.refreshContext) {
-    const refreshed = await refreshExpiredItemStreamUrl(item).catch(() => null);
-    if (refreshed) {
-      resumeDownload(downloadId);
+    const refreshRes = await refreshExpiredItemStreamUrl(item).catch(() => ({}));
+    if ('unsupportedMessage' in refreshRes && refreshRes.unsupportedMessage) {
+      updateStoredItem(downloadId, {
+        status: 'unsupported',
+        errorMessage: refreshRes.unsupportedMessage,
+        speedBytesPerSec: 0,
+      });
       return;
     }
   }
@@ -1532,17 +2137,12 @@ export async function getOfflinePlaybackHandle(
     );
   }
 
+  const check = await verifyOfflineMediaPlayable(manifest);
+  if (!check.ok) {
+    throw new Error(check.reason || 'Offline episode file is incomplete or corrupted.');
+  }
+
   if (manifest.format === 'hls') {
-    if (!manifest.playlistText) {
-      throw new Error('Offline HLS playlist is missing.');
-    }
-    const firstKey = manifest.segmentKeys?.[0];
-    if (firstKey) {
-      const ok = await hasBinaryChunk(item.id, firstKey);
-      if (!ok) {
-        throw new Error('Offline video segments are missing from local storage.');
-      }
-    }
     return {
       mode: 'hls',
       manifest,
