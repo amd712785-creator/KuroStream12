@@ -202,6 +202,11 @@ export interface AnimeWorldStreamResponse {
   type: 'episode' | 'movie';
   source: string;
   title: string;
+  poster?: string | null;
+  banner?: string | null;
+  year?: string | null;
+  rating?: string | null;
+  description?: string | null;
   hasHindiAudio: boolean;
   audioLanguages: string[];
   stream: {

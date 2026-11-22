@@ -6,21 +6,32 @@ import {
   Check,
   Clock,
   Cloud,
+  Download,
+  HardDrive,
   Heart,
   LogIn,
   LogOut,
   Package,
+  Pause,
   Play,
+  RefreshCw,
   RotateCcw,
   Settings2,
   ShieldCheck,
   Trash2,
   User,
+  WifiOff,
 } from 'lucide-react';
 import { AdminDashboardSection } from '@/src/components/AdminDashboardSection';
 import { AnimeImage } from '@/src/components/AnimeImage';
 import { AvatarGalleryModal } from '@/src/components/AvatarGalleryModal';
+import {
+  DownloadManagerModal,
+  formatDownloadBytes,
+  formatDownloadSpeed,
+} from '@/src/components/DownloadManagerModal';
 import { ExtensionManager } from '@/src/components/ExtensionManager';
+import { OfflinePlayerModal } from '@/src/components/OfflinePlayerModal';
 import { ThemeSelector } from '@/src/components/ThemeSelector';
 import {
   getDefaultStreamingApiBase,
@@ -28,9 +39,18 @@ import {
   setStreamingApiOverride,
 } from '@/src/config/env';
 import { useAuth } from '@/src/context/AuthContext';
+import {
+  cancelOrDeleteDownload,
+  getStoredDownloads,
+  pauseDownload,
+  resumeDownload,
+  retryDownload,
+  type DownloadItem,
+} from '@/src/services/downloadService';
 
 type ProfileTab =
   | 'continue'
+  | 'downloads'
   | 'watchlist'
   | 'favorites'
   | 'history'
@@ -59,6 +79,7 @@ export const ProfilePage: React.FC = () => {
   const initialTabParam = searchParams.get('tab');
   const [tab, setTab] = useState<ProfileTab>(
     initialTabParam === 'sources' ||
+      initialTabParam === 'downloads' ||
       initialTabParam === 'watchlist' ||
       initialTabParam === 'favorites' ||
       initialTabParam === 'history' ||
@@ -73,6 +94,20 @@ export const ProfilePage: React.FC = () => {
   const [avatarSavedToast, setAvatarSavedToast] = useState(false);
   const [endpointInput, setEndpointInput] = useState(() => getStreamingApiBase());
   const [endpointSaved, setEndpointSaved] = useState(false);
+  const [downloads, setDownloads] = useState<DownloadItem[]>(() => getStoredDownloads());
+  const [showDownloadManager, setShowDownloadManager] = useState(false);
+  const [offlinePlayerItem, setOfflinePlayerItem] = useState<DownloadItem | null>(null);
+
+  useEffect(() => {
+    const sync = () => setDownloads(getStoredDownloads());
+    sync();
+    window.addEventListener('kurostream:downloads-updated', sync);
+    const timer = window.setInterval(sync, 1200);
+    return () => {
+      window.removeEventListener('kurostream:downloads-updated', sync);
+      window.clearInterval(timer);
+    };
+  }, []);
 
   useEffect(() => {
     setNameInput(preferences.displayName);
@@ -82,6 +117,7 @@ export const ProfilePage: React.FC = () => {
     const p = searchParams.get('tab');
     if (
       p === 'sources' ||
+      p === 'downloads' ||
       p === 'watchlist' ||
       p === 'favorites' ||
       p === 'history' ||
@@ -313,6 +349,16 @@ export const ProfilePage: React.FC = () => {
           </button>
           <button
             type="button"
+            onClick={() => selectTab('downloads')}
+            className={`inline-flex min-h-[40px] shrink-0 items-center gap-1.5 rounded-xl px-3.5 py-2 text-xs font-semibold ${
+              tab === 'downloads' ? 'kuro-segment-active' : 'kuro-segment-idle'
+            }`}
+          >
+            <Download className="h-3.5 w-3.5" />
+            <span>Downloads ({downloads.length})</span>
+          </button>
+          <button
+            type="button"
             onClick={() => selectTab('watchlist')}
             className={`inline-flex min-h-[40px] shrink-0 items-center gap-1.5 rounded-xl px-3.5 py-2 text-xs font-semibold ${
               tab === 'watchlist' ? 'kuro-segment-active' : 'kuro-segment-idle'
@@ -388,6 +434,171 @@ export const ProfilePage: React.FC = () => {
       </div>
 
       {/* Tab Content */}
+      {tab === 'downloads' && (
+        <div className="space-y-4">
+          <div className="kuro-glass flex flex-wrap items-center justify-between gap-3 rounded-2xl px-4 py-3.5">
+            <div className="flex items-center gap-2.5 text-xs text-slate-300 tabular-nums">
+              <HardDrive className="h-4 w-4 text-emerald-400" />
+              <span>
+                {downloads.filter((d) => d.status === 'completed').length} ready for offline playback ·{' '}
+                {formatDownloadBytes(
+                  downloads.reduce(
+                    (sum, d) => sum + (d.status === 'completed' ? d.fileSize || d.downloadedBytes : d.downloadedBytes),
+                    0
+                  )
+                )}{' '}
+                used
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowDownloadManager(true)}
+              className="kuro-btn-glass inline-flex min-h-[38px] items-center gap-1.5 rounded-xl px-3.5 py-1.5 text-xs font-semibold text-violet-200"
+            >
+              <Download className="h-3.5 w-3.5" />
+              <span>Open Manager</span>
+            </button>
+          </div>
+
+          {downloads.length === 0 ? (
+            <EmptyLibraryState
+              title="No offline downloads yet"
+              description="Tap Download on any anime episode or inside the video player to save episodes for offline playback."
+            />
+          ) : (
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+              {downloads.map((item) => {
+                const isCompleted = item.status === 'completed';
+                const isDownloading = item.status === 'downloading';
+                const isQueued = item.status === 'queued';
+                const isPaused = item.status === 'paused';
+                const isError = item.status === 'error';
+
+                return (
+                  <div
+                    key={item.id}
+                    className="kuro-glass flex flex-col justify-between gap-3 rounded-2xl p-3.5 sm:p-4"
+                  >
+                    <div className="flex items-start gap-3.5 min-w-0">
+                      <AnimeImage
+                        src={item.coverImage}
+                        alt={item.animeTitle}
+                        className="h-20 w-14 shrink-0 rounded-xl object-cover"
+                      />
+                      <div className="min-w-0 flex-1 space-y-1">
+                        <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 font-mono text-[11px] text-violet-300 tabular-nums">
+                          <span className="font-semibold">
+                            EP {item.episodeNumber} · {item.audioMode.toUpperCase()}
+                          </span>
+                          <span className="uppercase text-slate-400">
+                            · {item.format}
+                            {item.serverName ? ` (${item.serverName})` : ''}
+                          </span>
+                          <span className="text-slate-400">
+                            · {formatDownloadBytes(item.fileSize || item.downloadedBytes)}
+                          </span>
+                        </div>
+                        <p className="truncate text-sm font-bold text-white">{item.animeTitle}</p>
+                        <p className="truncate text-xs text-slate-400">{item.episodeTitle}</p>
+
+                        {isCompleted && (
+                          <p className="flex items-center gap-1.5 text-[11px] font-medium text-emerald-400">
+                            <WifiOff className="h-3.5 w-3.5 shrink-0" />
+                            <span>Offline Ready</span>
+                          </p>
+                        )}
+
+                        {(isDownloading || isQueued || isPaused) && (
+                          <div className="space-y-1 pt-1">
+                            <div className="flex items-center justify-between text-[11px] text-slate-400 tabular-nums">
+                              <span>
+                                {isQueued
+                                  ? 'Queued...'
+                                  : isDownloading
+                                    ? `Downloading (${item.progress}%)`
+                                    : `Paused (${item.progress}%)`}
+                              </span>
+                              {isDownloading && item.speedBytesPerSec > 0 && (
+                                <span className="text-emerald-400">
+                                  {formatDownloadSpeed(item.speedBytesPerSec)}
+                                </span>
+                              )}
+                            </div>
+                            <div className="h-1.5 w-full overflow-hidden rounded-full bg-white/10">
+                              <div
+                                className="h-full bg-gradient-to-r from-violet-500 to-fuchsia-500"
+                                style={{ width: `${Math.max(2, item.progress)}%` }}
+                              />
+                            </div>
+                          </div>
+                        )}
+
+                        {isError && (
+                          <p className="line-clamp-2 text-[11px] text-rose-400">
+                            {item.errorMessage || 'Download failed'}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="flex items-center justify-end gap-2 border-t border-white/[0.06] pt-2.5">
+                      {isCompleted && (
+                        <button
+                          type="button"
+                          onClick={() => setOfflinePlayerItem(item)}
+                          className="kuro-btn-primary inline-flex min-h-[40px] items-center gap-1.5 rounded-xl px-4 py-1.5 text-xs font-semibold"
+                        >
+                          <Play className="h-3.5 w-3.5 fill-current" />
+                          <span>Play Offline</span>
+                        </button>
+                      )}
+                      {(isDownloading || isQueued) && (
+                        <button
+                          type="button"
+                          onClick={() => pauseDownload(item.id)}
+                          className="kuro-btn-glass inline-flex min-h-[40px] items-center gap-1.5 rounded-xl px-3.5 py-1.5 text-xs font-semibold"
+                        >
+                          <Pause className="h-3.5 w-3.5" />
+                          <span>Pause</span>
+                        </button>
+                      )}
+                      {isPaused && (
+                        <button
+                          type="button"
+                          onClick={() => resumeDownload(item.id)}
+                          className="kuro-btn-primary inline-flex min-h-[40px] items-center gap-1.5 rounded-xl px-3.5 py-1.5 text-xs font-semibold"
+                        >
+                          <Play className="h-3.5 w-3.5" />
+                          <span>Resume</span>
+                        </button>
+                      )}
+                      {isError && (
+                        <button
+                          type="button"
+                          onClick={() => void retryDownload(item.id)}
+                          className="kuro-btn-primary inline-flex min-h-[40px] items-center gap-1.5 rounded-xl px-3.5 py-1.5 text-xs font-semibold"
+                        >
+                          <RefreshCw className="h-3.5 w-3.5" />
+                          <span>Retry</span>
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => void cancelOrDeleteDownload(item.id)}
+                        aria-label={isCompleted ? 'Delete downloaded episode' : 'Cancel download'}
+                        className="kuro-btn-glass flex h-10 w-10 items-center justify-center rounded-xl text-rose-300 hover:text-rose-200"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
       {(tab === 'continue' || tab === 'history') && (
         <div className="space-y-3">
           {history.length === 0 ? (
@@ -590,6 +801,17 @@ export const ProfilePage: React.FC = () => {
         displayName={preferences.displayName}
         onClose={() => setShowAvatarGallery(false)}
         onSave={handleSaveAvatar}
+      />
+
+      <DownloadManagerModal
+        isOpen={showDownloadManager}
+        onClose={() => setShowDownloadManager(false)}
+        onPlayOffline={(item) => setOfflinePlayerItem(item)}
+      />
+
+      <OfflinePlayerModal
+        item={offlinePlayerItem}
+        onClose={() => setOfflinePlayerItem(null)}
       />
     </div>
   );

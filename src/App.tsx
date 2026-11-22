@@ -9,6 +9,9 @@ import { PopupBannerModal } from '@/src/components/PopupBannerModal';
 import { StartupSplashIntro } from '@/src/components/StartupSplashIntro';
 import { AuthProvider, useAuth } from '@/src/context/AuthContext';
 import { AnimeDetailPage } from '@/src/pages/AnimeDetailPage';
+import { AnimeWorldBrowsePage } from '@/src/pages/AnimeWorldBrowsePage';
+import { AnimeWorldSeriesPage } from '@/src/pages/AnimeWorldSeriesPage';
+import { AnimeWorldWatchPage } from '@/src/pages/AnimeWorldWatchPage';
 import { CatalogPage } from '@/src/pages/CatalogPage';
 import { HomePage } from '@/src/pages/HomePage';
 import { ProfilePage } from '@/src/pages/ProfilePage';
@@ -117,6 +120,9 @@ function AnimatedRoutes() {
           />
           <Route path="/anime/:id" element={<AnimeDetailPage />} />
           <Route path="/watch/:id/:episodeId" element={<WatchPage />} />
+          <Route path="/animeworld-india" element={<AnimeWorldBrowsePage />} />
+          <Route path="/animeworld-india/series/:seriesId" element={<AnimeWorldSeriesPage />} />
+          <Route path="/animeworld-india/watch/:kind/:contentId" element={<AnimeWorldWatchPage />} />
           <Route path="/profile" element={<ProfilePage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

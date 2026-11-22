@@ -44,8 +44,41 @@ export interface AnimeWorldSeriesListResponse {
 export interface AnimeWorldSearchResponse {
   success: boolean;
   query: string;
-  currentPage: number;
+  currentPage?: number;
+  current_page?: number;
+  total_pages?: number;
+  has_next?: boolean;
+  has_prev?: boolean;
+  pages?: number[];
+  total_results?: number;
   source: string;
+  results: AnimeWorldItem[];
+  error?: string;
+}
+
+export interface AnimeWorldMoviesListResponse {
+  success: boolean;
+  source: string;
+  current_page: number;
+  total_pages: number;
+  has_next: boolean;
+  has_prev: boolean;
+  pages: number[];
+  total_results: number;
+  movies: AnimeWorldItem[];
+  error?: string;
+}
+
+export interface AnimeWorldA2ZResponse {
+  success: boolean;
+  letter: string;
+  source: string;
+  current_page: number;
+  total_pages: number;
+  has_next: boolean;
+  has_prev: boolean;
+  pages: number[];
+  total_results: number;
   results: AnimeWorldItem[];
   error?: string;
 }
@@ -57,9 +90,13 @@ export interface AnimeWorldSeasonsResponse {
     seriesId: string;
     title: string;
     poster: string | null;
+    banner?: string | null;
     year: string | null;
+    rating?: string | null;
     totalSeasons: string;
+    totalEpisodes?: string;
     languages: string[];
+    genres?: string[];
     description: string | null;
   };
   seasons: AnimeWorldSeason[];
@@ -88,11 +125,34 @@ async function fetchAwWithTimeout(endpointUrl: string, timeoutMs = 15000): Promi
   return { resolvedUrl, res };
 }
 
+export function isGenuineMediaDownloadUrl(rawUrl?: string | null): rawUrl is string {
+  if (!rawUrl || !isPlayableStreamUrl(rawUrl)) return false;
+  try {
+    const parsed = new URL(rawUrl, typeof window !== 'undefined' ? window.location.origin : 'https://kurostream.local');
+    const host = parsed.hostname.toLowerCase();
+    const pathLower = parsed.pathname.toLowerCase();
+    const fullLower = rawUrl.toLowerCase();
+    if (
+      host.includes('ravok.buzz') ||
+      host.includes('abyssplayer.com') ||
+      host.includes('megaplay.buzz') ||
+      fullLower.includes('multi-lang-plyr') ||
+      pathLower.includes('/embed') ||
+      pathLower.includes('/video/')
+    ) {
+      return false;
+    }
+    return /\.(mp4|mkv|webm|m3u8)(\?|$)/i.test(fullLower);
+  } catch {
+    return false;
+  }
+}
+
 export async function fetchAnimeWorldHome(): Promise<AnimeWorldHomeResponse> {
   const endpoint = `${AW_BASE}/home.php`;
   const { resolvedUrl, res } = await fetchAwWithTimeout(endpoint);
   const parsed = await parseSafeJsonResponse<AnimeWorldHomeResponse>(res);
-  if (!parsed.ok || !parsed.data) {
+  if (!parsed.ok || !parsed.data || parsed.data.success === false) {
     const msg = extractErrorMessage(
       parsed.data || parsed.rawText,
       `AnimeWorld India homepage returned HTTP ${parsed.status}`
@@ -107,7 +167,7 @@ export async function fetchAnimeWorldSeries(page = 1): Promise<AnimeWorldSeriesL
   const endpoint = `${AW_BASE}/series.php?p=${encodeURIComponent(String(page))}`;
   const { resolvedUrl, res } = await fetchAwWithTimeout(endpoint);
   const parsed = await parseSafeJsonResponse<AnimeWorldSeriesListResponse>(res);
-  if (!parsed.ok || !parsed.data) {
+  if (!parsed.ok || !parsed.data || parsed.data.success === false) {
     const msg = extractErrorMessage(
       parsed.data || parsed.rawText,
       `AnimeWorld India series list returned HTTP ${parsed.status}`
@@ -118,11 +178,44 @@ export async function fetchAnimeWorldSeries(page = 1): Promise<AnimeWorldSeriesL
   return parsed.data;
 }
 
+export async function fetchAnimeWorldMovies(page = 1): Promise<AnimeWorldMoviesListResponse> {
+  const endpoint = `${AW_BASE}/movie.php?p=${encodeURIComponent(String(page))}`;
+  const { resolvedUrl, res } = await fetchAwWithTimeout(endpoint);
+  const parsed = await parseSafeJsonResponse<AnimeWorldMoviesListResponse>(res);
+  if (!parsed.ok || !parsed.data || parsed.data.success === false) {
+    const msg = extractErrorMessage(
+      parsed.data || parsed.rawText,
+      `AnimeWorld India movies list returned HTTP ${parsed.status}`
+    );
+    logApiDiagnostic('AnimeWorldMovies', resolvedUrl, { status: parsed.status, message: msg });
+    throw new Error(msg);
+  }
+  return parsed.data;
+}
+
+export async function fetchAnimeWorldA2Z(
+  letter = 'A',
+  page = 1
+): Promise<AnimeWorldA2ZResponse> {
+  const endpoint = `${AW_BASE}/a2z.php?letter=${encodeURIComponent(letter)}&p=${encodeURIComponent(String(page))}`;
+  const { resolvedUrl, res } = await fetchAwWithTimeout(endpoint);
+  const parsed = await parseSafeJsonResponse<AnimeWorldA2ZResponse>(res);
+  if (!parsed.ok || !parsed.data || parsed.data.success === false) {
+    const msg = extractErrorMessage(
+      parsed.data || parsed.rawText,
+      `AnimeWorld India A-Z catalog returned HTTP ${parsed.status}`
+    );
+    logApiDiagnostic('AnimeWorldA2Z', resolvedUrl, { status: parsed.status, message: msg });
+    throw new Error(msg);
+  }
+  return parsed.data;
+}
+
 export async function searchAnimeWorld(query: string, page = 1): Promise<AnimeWorldSearchResponse> {
   const endpoint = `${AW_BASE}/search.php?query=${encodeURIComponent(query)}&p=${encodeURIComponent(String(page))}`;
   const { resolvedUrl, res } = await fetchAwWithTimeout(endpoint);
   const parsed = await parseSafeJsonResponse<AnimeWorldSearchResponse>(res);
-  if (!parsed.ok || !parsed.data) {
+  if (!parsed.ok || !parsed.data || parsed.data.success === false) {
     const details = extractErrorDetails(
       parsed.data || parsed.rawText,
       resolvedUrl,
@@ -173,7 +266,7 @@ export async function fetchAnimeWorldEpisodes(
 export async function fetchAnimeWorldStream(params: {
   episodeId?: string;
   movieId?: string;
-  lang?: 'hindi' | 'sub' | 'dub';
+  lang?: 'hindi' | 'sub' | 'dub' | string;
 }): Promise<{ status: number; data: AnimeWorldStreamResponse | null; rawText?: string; endpointUrl: string }> {
   const qp = new URLSearchParams();
   if (params.episodeId) {
@@ -191,6 +284,83 @@ export async function fetchAnimeWorldStream(params: {
     logApiDiagnostic('AnimeWorldStream', resolvedUrl, { status: parsed.status });
   }
   return { status: parsed.status, data: parsed.data, rawText: parsed.rawText, endpointUrl: resolvedUrl };
+}
+
+export function parseAnimeWorldStreamToResult(
+  payload: AnimeWorldStreamResponse,
+  endpointUrl: string,
+  requestedLang: 'hindi' | 'sub' | 'dub' = 'hindi'
+): { data?: ParsedStreamResult; error?: StreamFetchError } {
+  const parsed = parseWatchResponse(payload);
+  const candidateSources: StreamSource[] = [];
+  const seenUrls = new Set<string>();
+
+  const pushSource = (src: StreamSource) => {
+    if (!isPlayableStreamUrl(src.url) || seenUrls.has(src.url)) return;
+    seenUrls.add(src.url);
+    candidateSources.push(src);
+  };
+
+  // Preserve primary streamLink first if present, then additional mirrors
+  if (payload.stream?.streamLink && isPlayableStreamUrl(payload.stream.streamLink)) {
+    const primaryUrl = payload.stream.streamLink;
+    const primaryType =
+      payload.stream.type ||
+      (primaryUrl.toLowerCase().includes('.m3u8')
+        ? 'hls'
+        : /\.(mp4|mkv|webm)(\?|$)/i.test(primaryUrl)
+          ? 'mp4'
+          : 'embed');
+    const matchingStream = (payload.streams || []).find((s) => s.url === primaryUrl);
+    pushSource({
+      url: primaryUrl,
+      quality:
+        matchingStream?.label ||
+        (payload.hasHindiAudio ? 'AnimeWorld India · Hindi Audio' : 'AnimeWorld India · Stream'),
+      type: primaryType,
+      isM3U8: primaryType === 'hls',
+      language:
+        matchingStream?.language ||
+        (payload.hasHindiAudio ? 'Hindi' : payload.audioLanguages?.[0]),
+    });
+  }
+
+  for (const src of parsed.sources) {
+    pushSource(src);
+  }
+
+  if (candidateSources.length === 0) {
+    return {
+      error: {
+        statusCode: 404,
+        endpointUrl,
+        message: 'AnimeWorld India returned no playable streamLink for this title.',
+      },
+    };
+  }
+
+  const detectedLanguages = payload.audioLanguages || parsed.audioLanguages || [];
+  const hasHindiAudio =
+    Boolean(payload.hasHindiAudio) ||
+    detectedLanguages.some((l) => l.toLowerCase().includes('hindi') || l.toLowerCase() === 'hin');
+  const validatedDownload = isGenuineMediaDownloadUrl(payload.stream?.file)
+    ? payload.stream.file
+    : isGenuineMediaDownloadUrl(parsed.downloadUrl)
+      ? parsed.downloadUrl
+      : undefined;
+
+  return {
+    data: {
+      ...parsed,
+      sources: candidateSources,
+      downloadUrl: validatedDownload,
+      hasHindiAudio,
+      audioLanguages: detectedLanguages,
+      requestedLanguage: requestedLang,
+      providerSource: payload.source || endpointUrl,
+      servers: [{ name: 'animeworld-india' }],
+    },
+  };
 }
 
 function normalizeText(raw: string): string {
@@ -690,7 +860,11 @@ export async function resolveAnimeWorldStreamForAnime(options: {
     data: {
       ...parsed,
       sources: mappedSources,
-      downloadUrl: streamPayload.stream?.file || parsed.downloadUrl,
+      downloadUrl: isGenuineMediaDownloadUrl(streamPayload.stream?.file)
+        ? streamPayload.stream.file
+        : isGenuineMediaDownloadUrl(parsed.downloadUrl)
+          ? parsed.downloadUrl
+          : undefined,
       hasHindiAudio,
       audioLanguages: detectedLanguages,
       requestedLanguage: effectiveLang,

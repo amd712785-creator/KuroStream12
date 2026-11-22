@@ -3,6 +3,7 @@ import { Link, NavLink, useNavigate } from 'react-router-dom';
 import {
   Bookmark,
   Calendar,
+  Download,
   Film,
   Home,
   LogIn,
@@ -10,6 +11,7 @@ import {
   Package,
   Play,
   Search,
+  Server,
   Tv,
   User,
   X,
@@ -108,7 +110,7 @@ export const Navbar: React.FC = () => {
         </Link>
 
         {/* Desktop Nav Zone */}
-        <nav className="hidden md:flex items-center gap-6 shrink-0" aria-label="Main navigation">
+        <nav className="hidden md:flex items-center gap-4 lg:gap-6 shrink-0" aria-label="Main navigation">
           <NavLink to="/" end className={navLinkClass}>
             Home
           </NavLink>
@@ -120,6 +122,9 @@ export const Navbar: React.FC = () => {
           </NavLink>
           <NavLink to="/tv-series" className={navLinkClass}>
             TV Series
+          </NavLink>
+          <NavLink to="/animeworld-india" className={navLinkClass}>
+            AnimeWorld<span className="hidden lg:inline"> India</span>
           </NavLink>
           <NavLink to="/schedule" className={navLinkClass}>
             Schedule
@@ -319,6 +324,22 @@ export const Navbar: React.FC = () => {
             >
               <Bookmark className="h-4 w-4 text-violet-300" />
               <span>Watchlist</span>
+            </Link>
+            <Link
+              to="/animeworld-india"
+              onClick={() => setMobileMenuOpen(false)}
+              className="kuro-btn-glass col-span-2 flex min-h-[46px] items-center gap-2.5 rounded-2xl border-amber-400/30 px-3.5 py-2.5 text-sm font-medium text-amber-200"
+            >
+              <Server className="h-4 w-4 text-amber-300" />
+              <span>AnimeWorld India (Server)</span>
+            </Link>
+            <Link
+              to="/profile?tab=downloads"
+              onClick={() => setMobileMenuOpen(false)}
+              className="kuro-btn-glass col-span-2 flex min-h-[46px] items-center gap-2.5 rounded-2xl px-3.5 py-2.5 text-sm font-medium"
+            >
+              <Download className="h-4 w-4 text-emerald-400" />
+              <span>Offline Downloads</span>
             </Link>
             <Link
               to="/profile?tab=sources"

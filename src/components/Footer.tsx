@@ -115,6 +115,11 @@ export const Footer: React.FC = () => {
                 </Link>
               </li>
               <li>
+                <Link to="/animeworld-india" className="hover:text-white transition-colors">
+                  AnimeWorld India
+                </Link>
+              </li>
+              <li>
                 <Link to="/schedule" className="hover:text-white transition-colors">
                   Airing Schedule
                 </Link>

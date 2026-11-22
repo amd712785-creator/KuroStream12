@@ -58,6 +58,9 @@ interface VideoPlayerProps {
   onProgress?: (currentTime: number, duration: number) => void;
   onRefreshStream?: () => Promise<boolean>;
   onRetry: () => void;
+  onDownload?: () => void;
+  downloadStatusLabel?: string;
+  isDownloading?: boolean;
 }
 
 const PLAYBACK_RATES = [0.5, 0.75, 1, 1.25, 1.5, 2];
@@ -110,6 +113,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   onProgress,
   onRefreshStream,
   onRetry,
+  onDownload,
+  downloadStatusLabel,
+  isDownloading,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -1169,6 +1175,23 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                 </select>
               </label>
 
+              {onDownload && (
+                <button
+                  type="button"
+                  onClick={onDownload}
+                  aria-label={downloadStatusLabel || 'Download episode'}
+                  title={downloadStatusLabel || 'Download episode'}
+                  className="kuro-btn-glass inline-flex h-9 items-center gap-1.5 rounded-xl px-2.5 text-xs font-semibold text-violet-200"
+                >
+                  {isDownloading ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin text-violet-300" />
+                  ) : (
+                    <Download className="h-3.5 w-3.5" />
+                  )}
+                  <span className="hidden sm:inline">{downloadStatusLabel || 'Download'}</span>
+                </button>
+              )}
+
               <button
                 type="button"
                 onClick={toggleFullscreen}
@@ -1251,7 +1274,20 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                 </label>
               )}
 
-              {streamData?.downloadUrl && (
+              {onDownload ? (
+                <button
+                  type="button"
+                  onClick={onDownload}
+                  className="kuro-btn-glass inline-flex h-9 items-center gap-1.5 rounded-xl px-3 text-xs font-semibold text-violet-200"
+                >
+                  {isDownloading ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin text-violet-300" />
+                  ) : (
+                    <Download className="h-3.5 w-3.5" />
+                  )}
+                  <span>{downloadStatusLabel || 'Download'}</span>
+                </button>
+              ) : streamData?.downloadUrl ? (
                 <a
                   href={streamData.downloadUrl}
                   target="_blank"
@@ -1261,7 +1297,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                   <Download className="h-3.5 w-3.5" />
                   <span>Download</span>
                 </a>
-              )}
+              ) : null}
 
               <button
                 type="button"

@@ -570,7 +570,7 @@ function applyProtectedCorsHeaders(
   res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, Range, If-Range');
   res.setHeader(
     'Access-Control-Expose-Headers',
-    'Content-Length, Content-Range, Accept-Ranges, Content-Type'
+    'Content-Length, Content-Range, Accept-Ranges, Content-Type, Content-Disposition'
   );
 }
 
@@ -829,6 +829,11 @@ const ANISKIP_API_URL = 'https://api.aniskip.com/v2/skip-times';
 const ANIMEWORLD_UPSTREAM = (
   process.env.ANIMEWORLD_UPSTREAM_URL || 'https://animesky.app'
 ).replace(/\/+$/, '');
+const ANIMEWORLD_INDIA_API_URL = (
+  process.env.ANIMEWORLD_INDIA_API_URL || ''
+)
+  .trim()
+  .replace(/\/+$/, '');
 
 const BROWSER_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
@@ -1492,6 +1497,162 @@ function classifyAnimeWorldStreamType(url: string): 'hls' | 'mp4' | 'embed' {
   if (lower.includes('.m3u8')) return 'hls';
   if (/\.(mp4|webm|mkv)(\?|$)/i.test(lower)) return 'mp4';
   return 'embed';
+}
+
+function isGenuineMediaDownloadUrl(rawUrl?: string | null): rawUrl is string {
+  if (!rawUrl || !isValidHttpUrl(rawUrl)) return false;
+  try {
+    const parsed = new URL(rawUrl);
+    const host = parsed.hostname.toLowerCase();
+    const pathLower = parsed.pathname.toLowerCase();
+    const fullLower = rawUrl.toLowerCase();
+    // Never treat known iframe/embed players as direct downloadable media files
+    if (
+      host.includes('ravok.buzz') ||
+      host.includes('abyssplayer.com') ||
+      host.includes('megaplay.buzz') ||
+      fullLower.includes('multi-lang-plyr') ||
+      pathLower.includes('/embed') ||
+      pathLower.includes('/video/')
+    ) {
+      return false;
+    }
+    return /\.(mp4|mkv|webm|m3u8)(\?|$)/i.test(fullLower);
+  } catch {
+    return false;
+  }
+}
+
+function parseAnimeWorldPagination($: cheerio.CheerioAPI, page: number) {
+  const pages: number[] = [];
+  $('nav.pagination a.page-numbers, nav.pagination a.page-link, .pagination a, .nav-links a').each((_, el) => {
+    const num = Number($(el).text().trim());
+    if (Number.isFinite(num) && num > 0) pages.push(num);
+  });
+  const hasNextLink =
+    $('a.next, .nav-links a').filter((_, el) => /next|›|»/i.test($(el).text().trim())).length > 0;
+  const totalPages = pages.length > 0 ? Math.max(...pages, page) : hasNextLink ? page + 1 : page;
+  return {
+    current_page: page,
+    total_pages: totalPages,
+    has_next: page < totalPages || hasNextLink,
+    has_prev: page > 1,
+    pages: Array.from(new Set(pages)).sort((a, b) => a - b),
+  };
+}
+
+function extractAnimeWorldPageMeta($: cheerio.CheerioAPI, fallbackTitle: string) {
+  const title = $('h1.hero-title, h1.episode-title, h1.entry-title').first().text().trim() || fallbackTitle;
+  const poster = normalizeAnimeWorldImg(
+    $('.hero-poster img, .post-thumbnail img').first().attr('data-src') ||
+      $('.hero-poster img, .post-thumbnail img').first().attr('src')
+  );
+  const ogImg = normalizeAnimeWorldImg($('meta[property="og:image"]').attr('content'));
+  const backdropAttr = normalizeAnimeWorldImg(
+    $('.hero-backdrop img, .backdrop img, .hero-bg img').first().attr('data-src') ||
+      $('.hero-backdrop img, .backdrop img, .hero-bg img').first().attr('src')
+  );
+  const banner = backdropAttr || (ogImg && ogImg !== poster ? ogImg : null);
+  const description = $('#overview-text p, .description p, .hero-description').first().text().trim() || null;
+
+  const heroBadges: string[] = [];
+  $('.hero-badge').each((_, el) => {
+    const txt = $(el).text().trim();
+    if (txt) heroBadges.push(txt);
+  });
+  const year = heroBadges.find((b) => /^\d{4}$/.test(b)) || null;
+  const ratingText =
+    $('[class*="rating"], [class*="vote"], [class*="score"], .tmdb-rating')
+      .first()
+      .text()
+      .trim() || null;
+  const ratingMatch = ratingText ? ratingText.match(/(\d+(?:\.\d+)?)/) : null;
+  const rating = ratingMatch ? ratingMatch[1] : null;
+
+  const languages: string[] = [];
+  $('a.language-tag').each((_, el) => {
+    const lang = $(el).text().trim();
+    if (lang && !languages.includes(lang)) languages.push(lang);
+  });
+
+  const genres: string[] = [];
+  $('a[href*="/genre/"], .genres a, .hero-genres a').each((_, el) => {
+    const g = $(el).text().trim();
+    if (g && !genres.includes(g)) genres.push(g);
+  });
+
+  return { title, poster, banner, description, heroBadges, year, rating, languages, genres };
+}
+
+async function tryProxyAnimeWorldPhpApi(
+  endpointFile: string,
+  req: Request,
+  res: Response
+): Promise<boolean> {
+  if (!ANIMEWORLD_INDIA_API_URL) return false;
+  let baseUrl: URL;
+  try {
+    baseUrl = new URL(ANIMEWORLD_INDIA_API_URL);
+    if ((baseUrl.protocol !== 'https:' && baseUrl.protocol !== 'http:') || isBlockedPrivateHost(baseUrl.hostname)) {
+      res.status(500).json({
+        success: false,
+        error: 'Configured ANIMEWORLD_INDIA_API_URL is invalid or points to a blocked private host.',
+      });
+      return true;
+    }
+  } catch {
+    res.status(500).json({
+      success: false,
+      error: 'Configured ANIMEWORLD_INDIA_API_URL is malformed.',
+    });
+    return true;
+  }
+
+  try {
+    const qs = new URLSearchParams();
+    for (const [k, v] of Object.entries(req.query)) {
+      if (typeof v === 'string' && v.length > 0) qs.set(k, v);
+    }
+    const baseStr = baseUrl.toString().replace(/\/+$/, '');
+    const target = `${baseStr}/${endpointFile}${qs.toString() ? `?${qs.toString()}` : ''}`;
+    const upstreamRes = await fetchWithTimeout(
+      target,
+      {
+        method: 'GET',
+        redirect: 'follow',
+        headers: {
+          Accept: 'application/json',
+          'User-Agent': BROWSER_UA,
+        },
+      },
+      15000
+    );
+    const text = await upstreamRes.text();
+    let parsed: Record<string, unknown> | null = null;
+    try {
+      parsed = JSON.parse(text) as Record<string, unknown>;
+    } catch {
+      parsed = null;
+    }
+    if (!parsed) {
+      res.status(502).json({
+        success: false,
+        error: `Hosted PHP API (${endpointFile}) returned non-JSON response (HTTP ${upstreamRes.status}).`,
+      });
+      return true;
+    }
+    res.status(upstreamRes.status).json(parsed);
+    return true;
+  } catch (err) {
+    res.status(502).json({
+      success: false,
+      error:
+        err instanceof Error
+          ? `Failed to reach hosted AnimeWorld India PHP API: ${err.message}`
+          : 'Failed to reach hosted AnimeWorld India PHP API.',
+    });
+    return true;
+  }
 }
 
 async function fetchAnimeWorldHtml(url: string): Promise<{
@@ -3442,7 +3603,8 @@ export function createExpressApp() {
   });
 
   // Actual AnimeWorld India PHP API v1 endpoints (protected by Firebase authentication)
-  app.get('/api/anime-world-india/v1/home.php', requireFirebaseAuth, async (_req: Request, res: Response) => {
+  app.get('/api/anime-world-india/v1/home.php', requireFirebaseAuth, async (req: Request, res: Response) => {
+    if (await tryProxyAnimeWorldPhpApi('home.php', req, res)) return;
     try {
       const { ok, status, html, blockedByUpstream } = await fetchAnimeWorldHtml(`${ANIMEWORLD_UPSTREAM}/`);
       if (!ok || !html) {
@@ -3472,6 +3634,7 @@ export function createExpressApp() {
   });
 
   app.get('/api/anime-world-india/v1/series.php', requireFirebaseAuth, async (req: Request, res: Response) => {
+    if (await tryProxyAnimeWorldPhpApi('series.php', req, res)) return;
     const page = Math.max(1, Number(req.query.p || 1));
     const targetUrl =
       page > 1 ? `${ANIMEWORLD_UPSTREAM}/series/page/${page}/` : `${ANIMEWORLD_UPSTREAM}/series/`;
@@ -3487,20 +3650,11 @@ export function createExpressApp() {
       }
       const $ = cheerio.load(html);
       const series = parseAnimeWorldCards($).filter((x) => x.seriesId);
-      const pages: number[] = [];
-      $('nav.pagination a.page-numbers, nav.pagination a.page-link, .pagination a').each((_, el) => {
-        const num = Number($(el).text().trim());
-        if (Number.isFinite(num) && num > 0) pages.push(num);
-      });
-      const totalPages = pages.length > 0 ? Math.max(...pages, page) : page;
+      const pagination = parseAnimeWorldPagination($, page);
       res.json({
         success: true,
         source: `${ANIMEWORLD_UPSTREAM}/series`,
-        current_page: page,
-        total_pages: totalPages,
-        has_next: page < totalPages || $('a.next').length > 0,
-        has_prev: page > 1,
-        pages: Array.from(new Set(pages)).sort((a, b) => a - b),
+        ...pagination,
         total_results: series.length,
         series,
       });
@@ -3512,7 +3666,79 @@ export function createExpressApp() {
     }
   });
 
+  app.get('/api/anime-world-india/v1/movie.php', requireFirebaseAuth, async (req: Request, res: Response) => {
+    if (await tryProxyAnimeWorldPhpApi('movie.php', req, res)) return;
+    const page = Math.max(1, Number(req.query.p || 1));
+    const targetUrl =
+      page > 1 ? `${ANIMEWORLD_UPSTREAM}/movies/page/${page}/` : `${ANIMEWORLD_UPSTREAM}/movies/`;
+    try {
+      const { ok, status, html, blockedByUpstream } = await fetchAnimeWorldHtml(targetUrl);
+      if (!ok || !html) {
+        res.status(status || 404).json({
+          success: false,
+          blockedByCloudflare: Boolean(blockedByUpstream || status === 403),
+          error: formatAnimeWorldUpstreamError(status, blockedByUpstream, 'movies list'),
+        });
+        return;
+      }
+      const $ = cheerio.load(html);
+      const movies = parseAnimeWorldCards($).filter((x) => x.movieId || x.type === 'movie');
+      const pagination = parseAnimeWorldPagination($, page);
+      res.json({
+        success: true,
+        source: `${ANIMEWORLD_UPSTREAM}/movies`,
+        ...pagination,
+        total_results: movies.length,
+        movies,
+      });
+    } catch (err) {
+      res.status(502).json({
+        success: false,
+        error: err instanceof Error ? err.message : 'Failed to fetch movies list.',
+      });
+    }
+  });
+
+  app.get('/api/anime-world-india/v1/a2z.php', requireFirebaseAuth, async (req: Request, res: Response) => {
+    if (await tryProxyAnimeWorldPhpApi('a2z.php', req, res)) return;
+    const rawLetter = typeof req.query.letter === 'string' ? req.query.letter.trim().toUpperCase() : 'A';
+    const letter = rawLetter === '0-9' || /^[A-Z]$/.test(rawLetter) ? rawLetter : 'A';
+    const page = Math.max(1, Number(req.query.p || 1));
+    const targetUrl =
+      page > 1
+        ? `${ANIMEWORLD_UPSTREAM}/letter/${encodeURIComponent(letter)}/page/${page}/`
+        : `${ANIMEWORLD_UPSTREAM}/letter/${encodeURIComponent(letter)}/`;
+    try {
+      const { ok, status, html, blockedByUpstream } = await fetchAnimeWorldHtml(targetUrl);
+      if (!ok || !html) {
+        res.status(status || 404).json({
+          success: false,
+          blockedByCloudflare: Boolean(blockedByUpstream || status === 403),
+          error: formatAnimeWorldUpstreamError(status, blockedByUpstream, `A-Z letter "${letter}"`),
+        });
+        return;
+      }
+      const $ = cheerio.load(html);
+      const results = parseAnimeWorldCards($);
+      const pagination = parseAnimeWorldPagination($, page);
+      res.json({
+        success: true,
+        letter,
+        source: `${ANIMEWORLD_UPSTREAM}/letter/${letter}`,
+        ...pagination,
+        total_results: results.length,
+        results,
+      });
+    } catch (err) {
+      res.status(502).json({
+        success: false,
+        error: err instanceof Error ? err.message : 'Failed to fetch A-Z list.',
+      });
+    }
+  });
+
   app.get('/api/anime-world-india/v1/search.php', requireFirebaseAuth, async (req: Request, res: Response) => {
+    if (await tryProxyAnimeWorldPhpApi('search.php', req, res)) return;
     const query = typeof req.query.query === 'string' ? req.query.query.trim() : '';
     const page = Math.max(1, Number(req.query.p || 1));
     if (!query) {
@@ -3535,10 +3761,13 @@ export function createExpressApp() {
       }
       const $ = cheerio.load(html);
       const results = parseAnimeWorldCards($);
+      const pagination = parseAnimeWorldPagination($, page);
       res.json({
         success: true,
         query,
         currentPage: page,
+        ...pagination,
+        total_results: results.length,
         source: `${ANIMEWORLD_UPSTREAM}/search`,
         results,
       });
@@ -3551,6 +3780,7 @@ export function createExpressApp() {
   });
 
   app.get('/api/anime-world-india/v1/seasons.php', requireFirebaseAuth, async (req: Request, res: Response) => {
+    if (await tryProxyAnimeWorldPhpApi('seasons.php', req, res)) return;
     const seriesID =
       typeof req.query.seriesID === 'string'
         ? req.query.seriesID.trim()
@@ -3573,33 +3803,21 @@ export function createExpressApp() {
         return;
       }
       const $ = cheerio.load(html);
-      const title = $('h1.hero-title, h1.entry-title').first().text().trim() || seriesID;
-      const poster = normalizeAnimeWorldImg(
-        $('.hero-poster img, .post-thumbnail img').first().attr('data-src') ||
-          $('.hero-poster img, .post-thumbnail img').first().attr('src')
-      );
-      const description =
-        $('#overview-text p, .description p').first().text().trim() || null;
-
-      const heroBadges: string[] = [];
-      $('.hero-badge').each((_, el) => {
-        const txt = $(el).text().trim();
-        if (txt) heroBadges.push(txt);
-      });
-      const year = heroBadges.find((b) => /^\d{4}$/.test(b)) || null;
-      const languages: string[] = [];
-      $('a.language-tag').each((_, el) => {
-        const lang = $(el).text().trim();
-        if (lang && !languages.includes(lang)) languages.push(lang);
-      });
+      const meta = extractAnimeWorldPageMeta($, seriesID);
 
       const seasons: Array<Record<string, unknown>> = [];
+      let summedEpisodes = 0;
       $('a.season-btn.sel-temp').each((_, el) => {
         const btn = $(el);
         const postId = btn.attr('data-post') || '';
         const seasonNum = btn.attr('data-season') || '1';
         const seasonName = btn.find('.season-label').text().trim() || `Season ${seasonNum}`;
         const episodesText = btn.find('.season-episodes').text().trim() || '';
+        const parenMatch = episodesText.match(/\((\d+)\)/);
+        const countMatch = parenMatch || episodesText.match(/^(\d+)/);
+        if (countMatch) {
+          summedEpisodes += Number(countMatch[1]) || 0;
+        }
         const isSubOnly = btn.hasClass('non-regional');
         const seasonId = postId
           ? `${seriesID}__post-${postId}__season-${seasonNum}`
@@ -3617,6 +3835,7 @@ export function createExpressApp() {
       // Fallback if single-season series has no season selector buttons
       if (seasons.length === 0) {
         const epCount = $('article.tr-episode-card').length;
+        summedEpisodes = epCount;
         seasons.push({
           seasonNumber: '1',
           seasonName: 'Season 1',
@@ -3626,17 +3845,25 @@ export function createExpressApp() {
         });
       }
 
+      const epsBadge = meta.heroBadges.find((b) => /\d+\s*Eps?/i.test(b));
+      const badgeEpNum = epsBadge ? Number(epsBadge.match(/(\d+)/)?.[1] || 0) : 0;
+      const totalEpisodes = badgeEpNum > 0 ? badgeEpNum : summedEpisodes;
+
       res.json({
         success: true,
         source: `${ANIMEWORLD_UPSTREAM}/series`,
         series: {
           seriesId: seriesID,
-          title,
-          poster,
-          year,
+          title: meta.title,
+          poster: meta.poster,
+          banner: meta.banner,
+          year: meta.year,
+          rating: meta.rating,
           totalSeasons: String(seasons.length),
-          languages,
-          description,
+          totalEpisodes: String(totalEpisodes),
+          languages: meta.languages,
+          genres: meta.genres,
+          description: meta.description,
         },
         seasons,
       });
@@ -3649,6 +3876,7 @@ export function createExpressApp() {
   });
 
   app.get('/api/anime-world-india/v1/episodes.php', requireFirebaseAuth, async (req: Request, res: Response) => {
+    if (await tryProxyAnimeWorldPhpApi('episodes.php', req, res)) return;
     const seasonId = typeof req.query.seasonId === 'string' ? req.query.seasonId.trim() : '';
     if (!seasonId) {
       res.status(400).json({ success: false, error: 'Missing seasonId parameter' });
@@ -3770,6 +3998,7 @@ export function createExpressApp() {
   });
 
   app.get('/api/anime-world-india/v1/stream.php', requireFirebaseAuth, async (req: Request, res: Response) => {
+    if (await tryProxyAnimeWorldPhpApi('stream.php', req, res)) return;
     const episodeId = typeof req.query.episodeId === 'string' ? req.query.episodeId.trim() : '';
     const movieId = typeof req.query.movieId === 'string' ? req.query.movieId.trim() : '';
     const requestedLang = typeof req.query.lang === 'string' ? req.query.lang.trim().toLowerCase() : 'hindi';
@@ -3796,6 +4025,7 @@ export function createExpressApp() {
       }
 
       const $ = cheerio.load(html);
+      const pageMeta = extractAnimeWorldPageMeta($, episodeId || movieId);
       const iframeSrcs: string[] = [];
       $('#aa-options iframe, .video-player iframe, .video-embed iframe').each((_, el) => {
         const s = ($(el).attr('src') || $(el).attr('data-src') || '').trim();
@@ -3804,8 +4034,11 @@ export function createExpressApp() {
         }
       });
 
-      const downloadLink =
+      const rawDownloadCandidate =
         $('.archive-link-wrap a, a[download], a.btn-download').first().attr('href') || null;
+      const downloadLink = isGenuineMediaDownloadUrl(rawDownloadCandidate)
+        ? rawDownloadCandidate
+        : null;
 
       const streams: Array<{
         language: string;
@@ -3947,16 +4180,16 @@ export function createExpressApp() {
         return;
       }
 
-      const title =
-        $('h1.hero-title, h1.episode-title, h1.entry-title').first().text().trim() ||
-        episodeId ||
-        movieId;
-
       res.json({
         success: true,
         type,
         source: targetUrl,
-        title,
+        title: pageMeta.title,
+        poster: pageMeta.poster,
+        banner: pageMeta.banner,
+        year: pageMeta.year,
+        rating: pageMeta.rating,
+        description: pageMeta.description,
         hasHindiAudio,
         audioLanguages,
         stream: {
@@ -4541,6 +4774,7 @@ export function createExpressApp() {
 
     const rawUrl = typeof req.query.url === 'string' ? req.query.url : '';
     const rawReferer = typeof req.query.referer === 'string' ? req.query.referer.trim() : '';
+    const expectMedia = req.query.expectMedia === '1' || req.query.expectMedia === 'true';
     const disableReferer = rawReferer.toLowerCase() === 'none';
     const referer = disableReferer
       ? ''
@@ -4580,33 +4814,80 @@ export function createExpressApp() {
       upstreamHeaders['If-Range'] = req.headers['if-range'];
     }
 
+    const fetchFollowingSafeRedirects = async (
+      initialUrl: URL,
+      method: 'GET' | 'HEAD'
+    ): Promise<{ upstream: globalThis.Response; finalUrl: URL }> => {
+      let currentUrl = initialUrl;
+      for (let hop = 0; hop < 6; hop++) {
+        const response = await fetchWithTimeout(
+          currentUrl.toString(),
+          {
+            method,
+            redirect: 'manual',
+            headers: upstreamHeaders,
+          },
+          25000
+        );
+
+        const isRedirect = response.status >= 300 && response.status < 400;
+        const locationHeader = response.headers.get('location');
+        if (!isRedirect || !locationHeader) {
+          return { upstream: response, finalUrl: currentUrl };
+        }
+
+        let nextUrl: URL;
+        try {
+          nextUrl = new URL(locationHeader, currentUrl);
+        } catch {
+          throw new Error('Upstream returned a malformed redirect location.');
+        }
+
+        if (!['http:', 'https:'].includes(nextUrl.protocol) || isBlockedPrivateHost(nextUrl.hostname)) {
+          const blockedErr = new Error('Redirect target host is blocked by security policy.') as Error & {
+            statusCode?: number;
+          };
+          blockedErr.statusCode = 403;
+          throw blockedErr;
+        }
+        currentUrl = nextUrl;
+      }
+      throw new Error('Upstream proxy exceeded maximum redirect hops.');
+    };
+
     try {
-      const upstream = await fetchWithTimeout(
-        parsedUrl.toString(),
-        {
-          method: req.method === 'HEAD' ? 'HEAD' : 'GET',
-          redirect: 'follow',
-          headers: upstreamHeaders,
-        },
-        25000
-      );
+      const method = req.method === 'HEAD' ? 'HEAD' : 'GET';
+      const { upstream, finalUrl } = await fetchFollowingSafeRedirects(parsedUrl, method);
 
       if (!upstream.ok && upstream.status !== 206) {
         res.status(upstream.status).send(`Upstream proxy error: HTTP ${upstream.status}`);
         return;
       }
 
-      const finalUrl = upstream.url ? new URL(upstream.url) : parsedUrl;
       const lowerPath = finalUrl.pathname.toLowerCase();
       let contentType = upstream.headers.get('content-type') || 'application/octet-stream';
+      const lowerCt = contentType.toLowerCase();
+
+      if (expectMedia && (lowerCt.includes('text/html') || lowerCt.includes('application/xhtml+xml'))) {
+        res.status(415).json({
+          success: false,
+          error: 'Upstream URL returned an HTML player/page instead of a downloadable media file.',
+          message: 'Upstream URL returned an HTML player/page instead of a downloadable media file.',
+          contentType,
+        });
+        return;
+      }
+
       if (
         lowerPath.endsWith('.ts') &&
-        (!contentType || contentType.includes('linguist') || contentType.includes('octet-stream'))
+        (!contentType || lowerCt.includes('linguist') || lowerCt.includes('octet-stream'))
       ) {
         contentType = 'video/mp2t';
-      } else if (lowerPath.endsWith('.mp4') && contentType.includes('octet-stream')) {
+      } else if (lowerPath.endsWith('.m4s') && lowerCt.includes('octet-stream')) {
+        contentType = 'video/iso.segment';
+      } else if (lowerPath.endsWith('.mp4') && lowerCt.includes('octet-stream')) {
         contentType = 'video/mp4';
-      } else if (lowerPath.endsWith('.webm') && contentType.includes('octet-stream')) {
+      } else if (lowerPath.endsWith('.webm') && lowerCt.includes('octet-stream')) {
         contentType = 'video/webm';
       }
 
@@ -4619,11 +4900,13 @@ export function createExpressApp() {
         if (len && !upstream.headers.get('content-encoding')) {
           res.setHeader('Content-Length', len);
         }
+        const disp = upstream.headers.get('content-disposition');
+        if (disp) res.setHeader('Content-Disposition', disp);
         res.end();
         return;
       }
 
-      if (lowerPath.endsWith('.srt') || contentType.includes('subrip')) {
+      if (lowerPath.endsWith('.srt') || lowerCt.includes('subrip')) {
         const srtText = await upstream.text();
         res.setHeader('Content-Type', 'text/vtt; charset=utf-8');
         res.send(convertSrtToVtt(srtText));
@@ -4631,7 +4914,7 @@ export function createExpressApp() {
       }
 
       const maybePlaylist =
-        contentType.toLowerCase().includes('mpegurl') ||
+        lowerCt.includes('mpegurl') ||
         lowerPath.endsWith('.m3u8') ||
         lowerPath.endsWith('.m3u') ||
         lowerPath.endsWith('.txt');
@@ -4670,6 +4953,14 @@ export function createExpressApp() {
           res.send(rewritten);
           return;
         }
+        if (expectMedia && textBody.trimStart().startsWith('<')) {
+          res.status(415).json({
+            success: false,
+            error: 'Upstream URL returned HTML markup instead of a video stream.',
+            message: 'Upstream URL returned HTML markup instead of a video stream.',
+          });
+          return;
+        }
         res.setHeader('Content-Type', contentType);
         res.send(textBody);
         return;
@@ -4682,8 +4973,8 @@ export function createExpressApp() {
 
       const hasCompression = Boolean(upstream.headers.get('content-encoding'));
       const passthroughHeaders = hasCompression
-        ? ['content-range', 'cache-control', 'etag', 'last-modified']
-        : ['content-range', 'content-length', 'cache-control', 'etag', 'last-modified'];
+        ? ['content-range', 'content-disposition', 'cache-control', 'etag', 'last-modified']
+        : ['content-range', 'content-length', 'content-disposition', 'cache-control', 'etag', 'last-modified'];
       for (const h of passthroughHeaders) {
         const val = upstream.headers.get(h);
         if (val) res.setHeader(h, val);
@@ -4708,7 +4999,11 @@ export function createExpressApp() {
       }
     } catch (err) {
       if (!res.headersSent) {
-        res.status(502).send(err instanceof Error ? err.message : 'Proxy fetch failed.');
+        const status =
+          err && typeof err === 'object' && 'statusCode' in err && typeof (err as { statusCode?: unknown }).statusCode === 'number'
+            ? (err as { statusCode: number }).statusCode
+            : 502;
+        res.status(status).send(err instanceof Error ? err.message : 'Proxy fetch failed.');
       }
     }
   };

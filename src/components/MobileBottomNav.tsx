@@ -49,7 +49,8 @@ export const MobileBottomNav: React.FC = () => {
       pathname === '/anime' ||
       pathname === '/movies' ||
       pathname === '/tv-series' ||
-      pathname.startsWith('/anime/')
+      pathname.startsWith('/anime/') ||
+      pathname.startsWith('/animeworld-india')
     ) {
       return 'anime';
     }

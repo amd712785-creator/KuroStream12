@@ -6,22 +6,31 @@ import {
   ArrowUpRight,
   Bookmark,
   Check,
+  CheckCircle2,
   ChevronLeft,
   ChevronRight,
   Download,
   Keyboard,
   Languages,
+  Loader2,
   Package,
+  Play,
   Search,
   Server,
   X,
 } from 'lucide-react';
 import { DownloadManagerModal } from '@/src/components/DownloadManagerModal';
 import { ExtensionManager } from '@/src/components/ExtensionManager';
+import { OfflinePlayerModal } from '@/src/components/OfflinePlayerModal';
 import { VideoPlayer } from '@/src/components/VideoPlayer';
 import { isNativeCapacitorRuntime, resolveApiUrl } from '@/src/config/env';
 import { useAuth } from '@/src/context/AuthContext';
-import { startDownloadEpisode } from '@/src/services/downloadService';
+import {
+  getDownloadById,
+  selectDownloadableSource,
+  startDownloadEpisode,
+  type DownloadItem,
+} from '@/src/services/downloadService';
 import { getAnimeDetails, getDisplayTitle } from '@/src/services/anilistApi';
 import { resolveAnimeWorldStreamForAnime } from '@/src/services/animeWorldApi';
 import {
@@ -134,28 +143,12 @@ export const WatchPage: React.FC = () => {
   const [showShortcuts, setShowShortcuts] = useState(false);
   const [showSourceManager, setShowSourceManager] = useState(false);
   const [showDownloadManager, setShowDownloadManager] = useState(false);
-
-  const handleDownloadCurrentEpisode = () => {
-    const primarySource = streamData?.sources?.[0]?.url;
-    if (!primarySource) return;
-    const downloadId = `${animeId}-${effectiveEpisodeId}`;
-    startDownloadEpisode(
-      {
-        id: downloadId,
-        animeId,
-        animeTitle: displayTitle,
-        coverImage: anime?.coverImage?.large || anime?.coverImage?.extraLarge || '',
-        episodeId: effectiveEpisodeId,
-        episodeNumber: epNumber,
-        episodeTitle: epTitle,
-        audioMode,
-        streamUrl: primarySource,
-        fileSize: 0,
-      },
-      () => {}
-    );
-    setShowDownloadManager(true);
-  };
+  const [offlinePlayerItem, setOfflinePlayerItem] = useState<DownloadItem | null>(null);
+  const [currentDownload, setCurrentDownload] = useState<DownloadItem | null>(null);
+  const [downloadNotice, setDownloadNotice] = useState<{
+    message: string;
+    canFallbackToSub?: boolean;
+  } | null>(null);
 
   // Load enabled compatible Aniyomi source adapters
   useEffect(() => {
@@ -520,6 +513,112 @@ export const WatchPage: React.FC = () => {
   );
 
   const isAnimeWorldSelected = selectedServer.toLowerCase() === 'animeworld-india';
+  const currentDownloadId = `${animeId}-${effectiveEpisodeId}`;
+
+  useEffect(() => {
+    const syncDownload = () => {
+      setCurrentDownload(getDownloadById(currentDownloadId) || null);
+    };
+    syncDownload();
+    window.addEventListener('kurostream:downloads-updated', syncDownload);
+    return () => window.removeEventListener('kurostream:downloads-updated', syncDownload);
+  }, [currentDownloadId]);
+
+  useEffect(() => {
+    setDownloadNotice(null);
+  }, [episodeKey]);
+
+  const handleDownloadCurrentEpisode = useCallback(() => {
+    const existing = getDownloadById(currentDownloadId);
+    if (existing?.status === 'completed') {
+      setOfflinePlayerItem(existing);
+      return;
+    }
+    if (
+      existing &&
+      (existing.status === 'downloading' ||
+        existing.status === 'queued' ||
+        existing.status === 'paused')
+    ) {
+      setShowDownloadManager(true);
+      return;
+    }
+
+    const selection = selectDownloadableSource(streamData);
+    if (!selection.ok) {
+      setDownloadNotice({
+        message: selection.message,
+        canFallbackToSub: selection.reason === 'embed-only' && audioMode === 'hindi',
+      });
+      return;
+    }
+
+    setDownloadNotice(null);
+    void startDownloadEpisode({
+      id: currentDownloadId,
+      animeId,
+      animeTitle: displayTitle,
+      coverImage: anime?.coverImage?.large || anime?.coverImage?.extraLarge || '',
+      episodeId: effectiveEpisodeId,
+      episodeNumber: epNumber,
+      episodeTitle: epTitle,
+      audioMode,
+      streamUrl: selection.candidate.url,
+      format: selection.candidate.format,
+      quality: selection.candidate.quality,
+      referer: selection.candidate.referer,
+      serverName: selectedServer || 'vidstreaming',
+      refreshContext:
+        audioMode === 'hindi' || isAnimeWorldSelected
+          ? {
+              kind: 'animeworld',
+              episodeId: effectiveEpisodeId,
+              episodeNumber: epNumber,
+              audioMode,
+              title: animeTitle || undefined,
+              romajiTitle: animeRomajiTitle || undefined,
+              format: animeFormat,
+              seasonYear: animeSeasonYear,
+            }
+          : {
+              kind: 'standard',
+              episodeId: effectiveEpisodeId,
+              anilistId: animeId,
+              malId: malIdRef.current,
+              episodeNumber: epNumber,
+              server: selectedServer || 'vidstreaming',
+              audioMode,
+            },
+      fileSize: 0,
+    });
+    setShowDownloadManager(true);
+  }, [
+    currentDownloadId,
+    streamData,
+    audioMode,
+    animeId,
+    displayTitle,
+    anime,
+    effectiveEpisodeId,
+    epNumber,
+    epTitle,
+    selectedServer,
+    isAnimeWorldSelected,
+    animeTitle,
+    animeRomajiTitle,
+    animeFormat,
+    animeSeasonYear,
+  ]);
+
+  const downloadButtonLabel = useMemo(() => {
+    if (!currentDownload) return 'Download';
+    if (currentDownload.status === 'completed') return 'Play Offline';
+    if (currentDownload.status === 'downloading') return `Downloading ${currentDownload.progress}%`;
+    if (currentDownload.status === 'queued') return 'Queued';
+    if (currentDownload.status === 'paused') return `Paused ${currentDownload.progress}%`;
+    if (currentDownload.status === 'error') return 'Retry Download';
+    return 'Download';
+  }, [currentDownload]);
 
   const hasJapaneseAvailable = useMemo(() => {
     if (streamData && streamData.sources.length > 0 && audioMode === 'sub') return true;
@@ -644,6 +743,9 @@ export const WatchPage: React.FC = () => {
             }}
             onRefreshStream={refreshStream}
             onRetry={loadStream}
+            onDownload={handleDownloadCurrentEpisode}
+            downloadStatusLabel={downloadButtonLabel}
+            isDownloading={currentDownload?.status === 'downloading'}
           />
 
           {/* Facebook Community Section Banner */}
@@ -757,10 +859,29 @@ export const WatchPage: React.FC = () => {
               <button
                 type="button"
                 onClick={handleDownloadCurrentEpisode}
-                className="kuro-btn-glass inline-flex min-h-[40px] items-center gap-1.5 rounded-xl px-3.5 py-2 text-xs font-semibold text-violet-200"
+                className={`inline-flex min-h-[40px] items-center gap-1.5 rounded-xl px-3.5 py-2 text-xs font-semibold ${
+                  currentDownload?.status === 'completed'
+                    ? 'kuro-btn-active text-emerald-200'
+                    : 'kuro-btn-glass text-violet-200'
+                }`}
               >
-                <Download className="h-4 w-4" />
-                <span>Download</span>
+                {currentDownload?.status === 'completed' ? (
+                  <CheckCircle2 className="h-4 w-4 text-emerald-400" />
+                ) : currentDownload?.status === 'downloading' ? (
+                  <Loader2 className="h-4 w-4 animate-spin text-violet-300" />
+                ) : (
+                  <Download className="h-4 w-4" />
+                )}
+                <span>{downloadButtonLabel}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setShowDownloadManager(true)}
+                className="kuro-btn-glass inline-flex min-h-[40px] items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-semibold text-slate-300"
+              >
+                <Play className="h-3.5 w-3.5" />
+                <span>Queue</span>
               </button>
 
               <button
@@ -798,6 +919,31 @@ export const WatchPage: React.FC = () => {
               </button>
             </div>
           </div>
+
+          {downloadNotice && (
+            <div className="kuro-glass flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 rounded-2xl border-amber-400/35 bg-amber-500/10 px-4 py-3 text-xs text-amber-100">
+              <p className="leading-relaxed">{downloadNotice.message}</p>
+              <div className="flex items-center gap-2 shrink-0">
+                {downloadNotice.canFallbackToSub && (
+                  <button
+                    type="button"
+                    onClick={() => handleSelectAudioMode('sub')}
+                    className="kuro-btn-primary min-h-[36px] rounded-xl px-3.5 py-1.5 text-xs font-semibold"
+                  >
+                    Switch to SUB Server
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setDownloadNotice(null)}
+                  aria-label="Dismiss download notice"
+                  className="kuro-btn-glass flex h-9 w-9 items-center justify-center rounded-xl"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+            </div>
+          )}
 
           {/* Audio Language & Server Selector Card */}
           <div className="kuro-glass rounded-3xl p-4 space-y-4">
@@ -1079,6 +1225,12 @@ export const WatchPage: React.FC = () => {
       <DownloadManagerModal
         isOpen={showDownloadManager}
         onClose={() => setShowDownloadManager(false)}
+        onPlayOffline={(item) => setOfflinePlayerItem(item)}
+      />
+
+      <OfflinePlayerModal
+        item={offlinePlayerItem}
+        onClose={() => setOfflinePlayerItem(null)}
       />
     </div>
   );

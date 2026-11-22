@@ -1,10 +1,30 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { Bookmark, Check, Film, Heart, Layers, Play, Search, X } from 'lucide-react';
+import {
+  Bookmark,
+  Check,
+  CheckCircle2,
+  Download,
+  Film,
+  Heart,
+  Layers,
+  Loader2,
+  Play,
+  Search,
+  X,
+} from 'lucide-react';
 import { AnimeCard } from '@/src/components/AnimeCard';
 import { AnimeImage } from '@/src/components/AnimeImage';
+import { DownloadManagerModal } from '@/src/components/DownloadManagerModal';
+import { OfflinePlayerModal } from '@/src/components/OfflinePlayerModal';
 import { useAuth } from '@/src/context/AuthContext';
 import { getAnimeDetails, getDisplayTitle, stripHtml } from '@/src/services/anilistApi';
+import {
+  getStoredDownloads,
+  resolveBestDownloadableStreamForEpisode,
+  startDownloadEpisode,
+  type DownloadItem,
+} from '@/src/services/downloadService';
 import { isHindiDubbedAnime } from '@/src/services/hindiAnime';
 import { fetchAnimeEpisodes } from '@/src/services/streamingApi';
 import type { AnimeDetail, EpisodeItem } from '@/src/types/anime';
@@ -16,6 +36,7 @@ export const AnimeDetailPage: React.FC = () => {
   const animeId = Number(id);
 
   const {
+    preferences,
     isInWatchlist,
     isFavorite,
     toggleWatchlist,
@@ -25,12 +46,31 @@ export const AnimeDetailPage: React.FC = () => {
 
   const [anime, setAnime] = useState<AnimeDetail | null>(null);
   const [episodes, setEpisodes] = useState<EpisodeItem[]>([]);
+  const [aniZipMalId, setAniZipMalId] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [epFilter, setEpFilter] = useState('');
   const [chunkIndex, setChunkIndex] = useState(0);
   const [showTrailer, setShowTrailer] = useState(false);
   const [reloadNonce, setReloadNonce] = useState(0);
+  const [downloadsMap, setDownloadsMap] = useState<Record<string, DownloadItem>>({});
+  const [resolvingEpId, setResolvingEpId] = useState<string | null>(null);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
+  const [showDownloadManager, setShowDownloadManager] = useState(false);
+  const [offlinePlayerItem, setOfflinePlayerItem] = useState<DownloadItem | null>(null);
+
+  useEffect(() => {
+    const sync = () => {
+      const next: Record<string, DownloadItem> = {};
+      for (const item of getStoredDownloads()) {
+        next[item.id] = item;
+      }
+      setDownloadsMap(next);
+    };
+    sync();
+    window.addEventListener('kurostream:downloads-updated', sync);
+    return () => window.removeEventListener('kurostream:downloads-updated', sync);
+  }, []);
 
   useEffect(() => {
     if (!Number.isFinite(animeId) || animeId <= 0) {
@@ -52,6 +92,7 @@ export const AnimeDetailPage: React.FC = () => {
         const epRes = await fetchAnimeEpisodes(animeId, detail);
         if (!active) return;
         setEpisodes(epRes.episodes);
+        setAniZipMalId(epRes.aniZipMalId ?? null);
       } catch (err) {
         if (!active) return;
         setError(err instanceof Error ? err.message : 'Unable to load anime details.');
@@ -146,6 +187,79 @@ export const AnimeDetailPage: React.FC = () => {
     'Unknown Studio';
   const score = anime.averageScore ? `${(anime.averageScore / 10).toFixed(1)} / 10` : 'Unrated';
   const firstEpisode = episodes[0];
+  const primaryEpisodeForDownload =
+    (historyEntry
+      ? episodes.find((e) => e.number === historyEntry.episodeNumber)
+      : undefined) || firstEpisode;
+
+  const handleEpisodeDownload = async (ep: EpisodeItem) => {
+    const audioMode = preferences.preferredAudio || 'sub';
+    const effectiveEpId = audioMode === 'dub' && ep.dubId ? ep.dubId : ep.id;
+    const downloadId = `${anime.id}-${effectiveEpId}`;
+    const existing = downloadsMap[downloadId] || downloadsMap[`${anime.id}-${ep.id}`];
+
+    if (existing?.status === 'completed') {
+      setOfflinePlayerItem(existing);
+      return;
+    }
+    if (
+      existing &&
+      (existing.status === 'downloading' ||
+        existing.status === 'queued' ||
+        existing.status === 'paused')
+    ) {
+      setShowDownloadManager(true);
+      return;
+    }
+
+    setDownloadError(null);
+    setResolvingEpId(ep.id);
+    try {
+      const resolved = await resolveBestDownloadableStreamForEpisode({
+        episodeId: ep.id,
+        dubId: ep.dubId,
+        episodeNumber: ep.number,
+        anilistId: anime.id,
+        malId: anime.idMal || aniZipMalId,
+        audioMode,
+        animeTitle: anime.title.english || anime.title.romaji || displayTitle,
+        romajiTitle: anime.title.romaji || undefined,
+        format: anime.format,
+        seasonYear: anime.seasonYear,
+      });
+
+      if (!resolved.ok) {
+        setDownloadError(resolved.message);
+        return;
+      }
+
+      await startDownloadEpisode({
+        id: downloadId,
+        animeId: anime.id,
+        animeTitle: displayTitle,
+        coverImage: anime.coverImage?.large || anime.coverImage?.extraLarge || '',
+        episodeId: effectiveEpId,
+        episodeNumber: ep.number,
+        episodeTitle: ep.title,
+        audioMode,
+        streamUrl: resolved.candidate.url,
+        format: resolved.candidate.format,
+        quality: resolved.candidate.quality,
+        referer: resolved.candidate.referer,
+        serverName: resolved.serverName,
+        refreshContext: resolved.refreshContext,
+        fileSize: 0,
+      });
+      setShowDownloadManager(true);
+    } catch (err) {
+      setDownloadError(
+        err instanceof Error ? err.message : 'Unable to prepare episode download.'
+      );
+    } finally {
+      setResolvingEpId((curr) => (curr === ep.id ? null : curr));
+    }
+  };
+
   const watchTarget = historyEntry
     ? `/watch/${anime.id}/${encodeURIComponent(historyEntry.episodeId)}?ep=${historyEntry.episodeNumber}`
     : firstEpisode
@@ -249,6 +363,22 @@ export const AnimeDetailPage: React.FC = () => {
                 <span>{favored ? 'Favorited' : 'Favorite'}</span>
               </button>
 
+              {primaryEpisodeForDownload && (
+                <button
+                  type="button"
+                  onClick={() => void handleEpisodeDownload(primaryEpisodeForDownload)}
+                  disabled={resolvingEpId === primaryEpisodeForDownload.id}
+                  className="kuro-btn-glass inline-flex min-h-[46px] items-center gap-2 rounded-2xl px-4.5 py-3 text-sm font-semibold text-violet-200 whitespace-nowrap shrink-0 disabled:opacity-60"
+                >
+                  {resolvingEpId === primaryEpisodeForDownload.id ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Download className="h-4 w-4" />
+                  )}
+                  <span>Download EP {primaryEpisodeForDownload.number}</span>
+                </button>
+              )}
+
               {anime.trailer?.site === 'youtube' && anime.trailer.id && (
                 <button
                   type="button"
@@ -260,6 +390,20 @@ export const AnimeDetailPage: React.FC = () => {
                 </button>
               )}
             </div>
+
+            {downloadError && (
+              <div className="kuro-glass flex items-center justify-between gap-3 rounded-2xl border-amber-400/35 bg-amber-500/10 px-4 py-3 text-xs text-amber-100">
+                <span>{downloadError}</span>
+                <button
+                  type="button"
+                  onClick={() => setDownloadError(null)}
+                  aria-label="Dismiss error"
+                  className="kuro-btn-glass flex h-8 w-8 shrink-0 items-center justify-center rounded-lg"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            )}
 
             {/* Frosted Glass Metadata Grid */}
             <dl className="kuro-glass grid grid-cols-2 gap-4 rounded-2xl p-4 sm:grid-cols-5">
@@ -421,28 +565,82 @@ export const AnimeDetailPage: React.FC = () => {
             <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4">
               {filteredEpisodes.map((ep) => {
                 const isLastWatched = historyEntry?.episodeNumber === ep.number;
+                const audioMode = preferences.preferredAudio || 'sub';
+                const effectiveEpId = audioMode === 'dub' && ep.dubId ? ep.dubId : ep.id;
+                const dlItem =
+                  downloadsMap[`${anime.id}-${effectiveEpId}`] ||
+                  downloadsMap[`${anime.id}-${ep.id}`];
+                const isResolving = resolvingEpId === ep.id;
+                const isCompleted = dlItem?.status === 'completed';
+                const isDownloading = dlItem?.status === 'downloading';
+
                 return (
-                  <Link
+                  <div
                     key={ep.id}
-                    to={`/watch/${anime.id}/${encodeURIComponent(ep.id)}?ep=${ep.number}`}
-                    className={`group flex min-h-[60px] items-center justify-between gap-3 rounded-2xl border p-3.5 transition-all active:scale-[0.98] ${
+                    className={`flex min-h-[64px] items-center justify-between gap-2 rounded-2xl border p-2.5 pl-3.5 transition-all ${
                       isLastWatched
                         ? 'border-violet-500 bg-violet-600/20 shadow-lg shadow-violet-950/30'
                         : 'border-white/[0.08] bg-[#10121c]/85 hover:border-violet-500/50 hover:bg-[#161927]'
                     }`}
                   >
-                    <div className="min-w-0">
-                      <p className="font-mono text-xs font-semibold text-violet-300 tabular-nums">
-                        Episode {ep.number}
-                      </p>
-                      <p className="mt-0.5 truncate text-sm font-medium text-slate-100">
-                        {ep.title}
-                      </p>
-                    </div>
-                    <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-white/[0.06] text-slate-200 group-hover:bg-violet-600 group-hover:text-white transition-colors">
-                      <Play className="h-3.5 w-3.5 fill-current" />
-                    </span>
-                  </Link>
+                    <Link
+                      to={`/watch/${anime.id}/${encodeURIComponent(effectiveEpId)}?ep=${ep.number}`}
+                      className="group flex min-w-0 flex-1 items-center gap-2.5 py-0.5 active:scale-[0.98]"
+                    >
+                      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-white/[0.06] text-slate-200 group-hover:bg-violet-600 group-hover:text-white transition-colors">
+                        <Play className="h-3.5 w-3.5 fill-current" />
+                      </span>
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-1.5 font-mono text-xs font-semibold text-violet-300 tabular-nums">
+                          <span>Episode {ep.number}</span>
+                          {isCompleted && (
+                            <span className="text-[10px] font-bold text-emerald-400">· OFFLINE</span>
+                          )}
+                          {isDownloading && dlItem && (
+                            <span className="text-[10px] text-amber-300">· {dlItem.progress}%</span>
+                          )}
+                        </div>
+                        <p className="mt-0.5 truncate text-sm font-medium text-slate-100">
+                          {ep.title}
+                        </p>
+                      </div>
+                    </Link>
+
+                    <button
+                      type="button"
+                      onClick={() => void handleEpisodeDownload(ep)}
+                      disabled={isResolving}
+                      aria-label={
+                        isCompleted
+                          ? `Play Episode ${ep.number} offline`
+                          : isDownloading
+                            ? `Episode ${ep.number} downloading`
+                            : `Download Episode ${ep.number}`
+                      }
+                      title={
+                        isCompleted
+                          ? 'Saved offline — Tap to play offline'
+                          : isDownloading
+                            ? `Downloading (${dlItem?.progress || 0}%)`
+                            : 'Download episode for offline viewing'
+                      }
+                      className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border transition-colors ${
+                        isCompleted
+                          ? 'border-emerald-400/35 bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25'
+                          : isDownloading
+                            ? 'border-violet-400/35 bg-violet-500/15 text-violet-300'
+                            : 'border-white/[0.08] bg-white/[0.04] text-slate-300 hover:border-violet-400/45 hover:text-white'
+                      }`}
+                    >
+                      {isResolving || isDownloading ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : isCompleted ? (
+                        <CheckCircle2 className="h-4 w-4" />
+                      ) : (
+                        <Download className="h-4 w-4" />
+                      )}
+                    </button>
+                  </div>
                 );
               })}
             </div>
@@ -498,6 +696,16 @@ export const AnimeDetailPage: React.FC = () => {
           </div>
         </div>
       )}
+      <DownloadManagerModal
+        isOpen={showDownloadManager}
+        onClose={() => setShowDownloadManager(false)}
+        onPlayOffline={(item) => setOfflinePlayerItem(item)}
+      />
+
+      <OfflinePlayerModal
+        item={offlinePlayerItem}
+        onClose={() => setOfflinePlayerItem(null)}
+      />
     </div>
   );
 };
