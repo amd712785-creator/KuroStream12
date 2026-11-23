@@ -14,7 +14,7 @@ interface AnimeCardProps {
   priorityImage?: boolean;
 }
 
-export const AnimeCard: React.FC<AnimeCardProps> = ({
+export const AnimeCard: React.FC<AnimeCardProps> = React.memo(({
   anime,
   badgeText,
   showHindiBadge = true,
@@ -122,4 +122,4 @@ export const AnimeCard: React.FC<AnimeCardProps> = ({
       </div>
     </article>
   );
-};
+});

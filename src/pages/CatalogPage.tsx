@@ -1,6 +1,6 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { ChevronLeft, ChevronRight, Filter, Languages, RotateCcw, Search, X } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Filter, Languages, Loader2, RotateCcw, Search, X } from 'lucide-react';
 import { AnimeCard } from '@/src/components/AnimeCard';
 import { ANIME_GENRES, searchAnime } from '@/src/services/anilistApi';
 import { isHindiDubbedAnime, VERIFIED_HINDI_DUBBED_ID_LIST } from '@/src/services/hindiAnime';
@@ -10,6 +10,7 @@ interface CatalogPageProps {
   presetFormat?: 'MOVIE' | 'TV';
   heading: string;
   subheading: string;
+  topSlot?: React.ReactNode;
 }
 
 type LanguageFilter = 'ALL' | 'hindi' | 'original';
@@ -18,6 +19,7 @@ export const CatalogPage: React.FC<CatalogPageProps> = ({
   presetFormat,
   heading,
   subheading,
+  topSlot,
 }) => {
   const [searchParams, setSearchParams] = useSearchParams();
 
@@ -42,11 +44,14 @@ export const CatalogPage: React.FC<CatalogPageProps> = ({
   const [page, setPage] = useState(initialPage);
 
   const [items, setItems] = useState<AnimeSummary[]>([]);
+  const [loadedPage, setLoadedPage] = useState(initialPage);
   const [hasNextPage, setHasNextPage] = useState(false);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [reloadNonce, setReloadNonce] = useState(0);
+  const loadMoreControllerRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     const q = searchParams.get('q') || '';
@@ -72,6 +77,8 @@ export const CatalogPage: React.FC<CatalogPageProps> = ({
 
   useEffect(() => {
     let active = true;
+    const controller = new AbortController();
+    loadMoreControllerRef.current?.abort();
     const run = async () => {
       setLoading(true);
       setError(null);
@@ -85,23 +92,81 @@ export const CatalogPage: React.FC<CatalogPageProps> = ({
           idIn: language === 'hindi' ? VERIFIED_HINDI_DUBBED_ID_LIST : undefined,
           page,
           perPage: 24,
+          signal: controller.signal,
         });
-        if (!active) return;
+        if (!active || controller.signal.aborted) return;
         setItems(res.items);
+        setLoadedPage(page);
         setHasNextPage(res.hasNextPage);
         setTotal(res.total);
       } catch (err) {
-        if (!active) return;
+        if (!active || controller.signal.aborted || (err instanceof Error && err.name === 'AbortError')) {
+          return;
+        }
         setError(err instanceof Error ? err.message : 'Failed to search catalog.');
       } finally {
-        if (active) setLoading(false);
+        if (active && !controller.signal.aborted) setLoading(false);
       }
     };
     run();
     return () => {
       active = false;
+      controller.abort();
     };
   }, [debouncedQuery, genre, format, presetFormat, status, language, sort, page, reloadNonce]);
+
+  const handleLoadMore = useCallback(async () => {
+    if (loadingMore || !hasNextPage) return;
+    loadMoreControllerRef.current?.abort();
+    const controller = new AbortController();
+    loadMoreControllerRef.current = controller;
+    const nextPage = loadedPage + 1;
+    setLoadingMore(true);
+    try {
+      const res = await searchAnime({
+        query: debouncedQuery,
+        genre,
+        format: presetFormat || format,
+        status,
+        sort,
+        idIn: language === 'hindi' ? VERIFIED_HINDI_DUBBED_ID_LIST : undefined,
+        page: nextPage,
+        perPage: 24,
+        signal: controller.signal,
+      });
+      if (controller.signal.aborted) return;
+      setItems((prev) => {
+        const seen = new Set(prev.map((x) => x.id));
+        const merged = [...prev];
+        for (const entry of res.items) {
+          if (!seen.has(entry.id)) {
+            seen.add(entry.id);
+            merged.push(entry);
+          }
+        }
+        return merged;
+      });
+      setLoadedPage(nextPage);
+      setHasNextPage(res.hasNextPage);
+      setTotal(res.total);
+    } catch (err) {
+      if (err instanceof Error && err.name === 'AbortError') return;
+      setError(err instanceof Error ? err.message : 'Failed to load more anime.');
+    } finally {
+      if (!controller.signal.aborted) setLoadingMore(false);
+    }
+  }, [
+    loadingMore,
+    hasNextPage,
+    loadedPage,
+    debouncedQuery,
+    genre,
+    presetFormat,
+    format,
+    status,
+    sort,
+    language,
+  ]);
 
   const displayedItems = useMemo(() => {
     if (language === 'original') {
@@ -133,6 +198,7 @@ export const CatalogPage: React.FC<CatalogPageProps> = ({
 
   return (
     <div className="mx-auto max-w-7xl space-y-6 sm:space-y-8 px-4 py-6 sm:px-6 sm:py-8">
+      {topSlot}
       <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <h1 className="text-2xl sm:text-3xl font-extrabold tracking-tight text-white">
@@ -350,7 +416,7 @@ export const CatalogPage: React.FC<CatalogPageProps> = ({
         </div>
       ) : (
         <>
-          <div className="grid grid-cols-2 gap-3.5 sm:grid-cols-3 sm:gap-4 md:grid-cols-4 lg:grid-cols-6">
+          <div className="kuro-content-auto grid grid-cols-2 gap-3.5 sm:grid-cols-3 sm:gap-4 md:grid-cols-4 lg:grid-cols-6">
             {displayedItems.map((anime, index) => (
               <AnimeCard
                 key={anime.id}
@@ -361,36 +427,58 @@ export const CatalogPage: React.FC<CatalogPageProps> = ({
             ))}
           </div>
 
-          <div className="flex items-center justify-center gap-3 pt-4">
-            <button
-              type="button"
-              disabled={page <= 1}
-              onClick={() => {
-                const next = Math.max(1, page - 1);
-                setPage(next);
-                updateUrlParam({ page: String(next) });
-                window.scrollTo({ top: 0, behavior: 'smooth' });
-              }}
-              className="kuro-btn-glass inline-flex min-h-[44px] items-center gap-1.5 rounded-2xl px-4 py-2 text-sm font-semibold disabled:opacity-40 disabled:pointer-events-none"
-            >
-              <ChevronLeft className="h-4 w-4" />
-              <span>Previous</span>
-            </button>
-            <span className="font-mono text-sm text-slate-400 tabular-nums">Page {page}</span>
-            <button
-              type="button"
-              disabled={!hasNextPage}
-              onClick={() => {
-                const next = page + 1;
-                setPage(next);
-                updateUrlParam({ page: String(next) });
-                window.scrollTo({ top: 0, behavior: 'smooth' });
-              }}
-              className="kuro-btn-glass inline-flex min-h-[44px] items-center gap-1.5 rounded-2xl px-4 py-2 text-sm font-semibold disabled:opacity-40 disabled:pointer-events-none"
-            >
-              <span>Next</span>
-              <ChevronRight className="h-4 w-4" />
-            </button>
+          <div className="flex flex-col items-center justify-center gap-3 pt-4">
+            {hasNextPage && (
+              <button
+                type="button"
+                disabled={loadingMore}
+                onClick={handleLoadMore}
+                className="kuro-btn-primary inline-flex min-h-[44px] items-center gap-2 rounded-2xl px-6 py-2.5 text-sm font-semibold disabled:opacity-60"
+              >
+                {loadingMore ? (
+                  <>
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    <span>Loading more...</span>
+                  </>
+                ) : (
+                  <span>Load More Anime</span>
+                )}
+              </button>
+            )}
+
+            <div className="flex items-center justify-center gap-3">
+              <button
+                type="button"
+                disabled={page <= 1}
+                onClick={() => {
+                  const next = Math.max(1, page - 1);
+                  setPage(next);
+                  updateUrlParam({ page: String(next) });
+                  window.scrollTo({ top: 0, behavior: 'smooth' });
+                }}
+                className="kuro-btn-glass inline-flex min-h-[44px] items-center gap-1.5 rounded-2xl px-4 py-2 text-sm font-semibold disabled:opacity-40 disabled:pointer-events-none"
+              >
+                <ChevronLeft className="h-4 w-4" />
+                <span>Previous</span>
+              </button>
+              <span className="font-mono text-sm text-slate-400 tabular-nums">
+                {loadedPage > page ? `Pages ${page}–${loadedPage}` : `Page ${page}`}
+              </span>
+              <button
+                type="button"
+                disabled={!hasNextPage}
+                onClick={() => {
+                  const next = loadedPage + 1;
+                  setPage(next);
+                  updateUrlParam({ page: String(next) });
+                  window.scrollTo({ top: 0, behavior: 'smooth' });
+                }}
+                className="kuro-btn-glass inline-flex min-h-[44px] items-center gap-1.5 rounded-2xl px-4 py-2 text-sm font-semibold disabled:opacity-40 disabled:pointer-events-none"
+              >
+                <span>Next</span>
+                <ChevronRight className="h-4 w-4" />
+              </button>
+            </div>
           </div>
         </>
       )}

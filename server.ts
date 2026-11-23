@@ -8,6 +8,8 @@ import os from 'os';
 import path from 'path';
 import { Readable } from 'stream';
 import { fileURLToPath } from 'url';
+import zlib from 'zlib';
+import multer from 'multer';
 
 const isVercelRuntime = Boolean(
   process.env.VERCEL || process.env.VERCEL_ENV || process.env.AWS_LAMBDA_FUNCTION_NAME
@@ -42,7 +44,17 @@ function resolveServerRootDir(): string {
 
 const SERVER_ROOT_DIR = resolveServerRootDir();
 
-const AUTHORIZED_ADMIN_EMAIL = (process.env.ADMIN_EMAIL || 'amd712785@gmail.com').trim();
+const AUTHORIZED_ADMIN_EMAILS_SERVER = Array.from(
+  new Set(
+    [
+      ...(process.env.ADMIN_EMAIL || '').split(','),
+      'amd712785@gmail.com',
+      'dyhfrtdturrt@gmail.com',
+    ]
+      .map((email) => email.trim().toLowerCase())
+      .filter(Boolean)
+  )
+);
 
 function resolveWritableDataDir(): string {
   const candidates = isVercelRuntime
@@ -420,6 +432,8 @@ interface VerifiedFirebaseUserResult {
   email?: string;
   isEmailVerified?: boolean;
   projectId?: string;
+  hasAdminClaim?: boolean;
+  claimSynced?: boolean;
 }
 
 const EPHEMERAL_STREAM_PROXY_SECRET = crypto.randomBytes(32);
@@ -615,6 +629,7 @@ async function verifyFirebaseUserRequest(req: Request): Promise<VerifiedFirebase
   let verifiedUid: string | undefined;
   let isEmailVerified = false;
   let verifiedProjectId: string | undefined;
+  let hasAdminClaim = false;
   let sawExpiredToken = false;
 
   for (const project of candidateProjects) {
@@ -628,6 +643,7 @@ async function verifyFirebaseUserRequest(req: Request): Promise<VerifiedFirebase
         verifiedEmail = decoded.email;
         verifiedUid = decoded.uid || decoded.sub;
         isEmailVerified = decoded.email_verified === true;
+        hasAdminClaim = decoded.admin === true;
         verifiedProjectId = project.projectId;
         break;
       } catch (err) {
@@ -705,6 +721,7 @@ async function verifyFirebaseUserRequest(req: Request): Promise<VerifiedFirebase
     email: verifiedEmail,
     isEmailVerified,
     projectId: verifiedProjectId,
+    hasAdminClaim,
   };
 }
 
@@ -744,23 +761,31 @@ async function verifyAdminRequest(req: Request): Promise<VerifiedFirebaseUserRes
   }
 
   const normalizedEmail = (authCheck.email || '').toLowerCase();
-  if (normalizedEmail !== AUTHORIZED_ADMIN_EMAIL.toLowerCase()) {
+  const isAuthorizedAdmin =
+    authCheck.hasAdminClaim === true || AUTHORIZED_ADMIN_EMAILS_SERVER.includes(normalizedEmail);
+
+  if (!isAuthorizedAdmin) {
     return {
       ok: false,
       status: 403,
       code: 'FORBIDDEN',
-      error: `Access denied: Only ${AUTHORIZED_ADMIN_EMAIL} is authorized as administrator.`,
+      error: 'Access denied: Administrator authorization required.',
     };
   }
 
-  // Only attempt custom claims mutation when a service account credential with IAM access is configured
+  let claimSynced = false;
+  // Sync custom admin claim when a service account credential with IAM access is configured
   if (hasServiceAccountCredentials() && authCheck.projectId && authCheck.uid) {
     const adminAuth = await getLazyAdminAuth(authCheck.projectId);
     if (adminAuth) {
       try {
         const userRec = await adminAuth.getUser(authCheck.uid);
         if (!userRec.customClaims?.admin) {
-          await adminAuth.setCustomUserClaims(authCheck.uid, { admin: true });
+          await adminAuth.setCustomUserClaims(authCheck.uid, {
+            ...(userRec.customClaims || {}),
+            admin: true,
+          });
+          claimSynced = true;
         }
       } catch {
         // non-fatal if IAM permissions do not allow modifying custom claims
@@ -768,7 +793,10 @@ async function verifyAdminRequest(req: Request): Promise<VerifiedFirebaseUserRes
     }
   }
 
-  return authCheck;
+  return {
+    ...authCheck,
+    claimSynced,
+  };
 }
 
 function detectVerifiedImageFormat(buffer: Buffer): { mime: string; ext: string } | null {
@@ -1655,64 +1683,107 @@ async function tryProxyAnimeWorldPhpApi(
   }
 }
 
-async function fetchAnimeWorldHtml(url: string): Promise<{
+interface AwHtmlResult {
   ok: boolean;
   status: number;
   html: string;
   blockedByUpstream?: boolean;
-}> {
-  try {
-    const res = await fetchWithTimeout(
-      url,
-      {
-        headers: {
-          'User-Agent': BROWSER_UA,
-          Accept:
-            'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-          'Accept-Language': 'en-US,en;q=0.9',
-          'Accept-Encoding': 'gzip, deflate, br',
-          Referer: `${ANIMEWORLD_UPSTREAM}/`,
-          Origin: ANIMEWORLD_UPSTREAM,
-          'Sec-Ch-Ua': '"Not/A)Brand";v="8", "Chromium";v="126", "Google Chrome";v="126"',
-          'Sec-Ch-Ua-Mobile': '?0',
-          'Sec-Ch-Ua-Platform': '"Windows"',
-          'Sec-Fetch-Dest': 'document',
-          'Sec-Fetch-Mode': 'navigate',
-          'Sec-Fetch-Site': 'same-origin',
-          'Upgrade-Insecure-Requests': '1',
+}
+
+const AW_HTML_CACHE_MAX = 100;
+const awHtmlCache = new Map<string, { expiresAt: number; value: AwHtmlResult }>();
+const awHtmlInFlight = new Map<string, Promise<AwHtmlResult>>();
+
+function getAwHtmlCacheTtlMs(url: string): number {
+  const lower = url.toLowerCase();
+  if (lower.includes('/?s=') || lower.includes('/search')) return 30_000;
+  if (lower.includes('/series/') || lower.includes('/movies/')) return 180_000;
+  return 90_000;
+}
+
+async function fetchAnimeWorldHtml(url: string): Promise<AwHtmlResult> {
+  const cached = awHtmlCache.get(url);
+  if (cached) {
+    if (Date.now() <= cached.expiresAt) {
+      awHtmlCache.delete(url);
+      awHtmlCache.set(url, cached);
+      return cached.value;
+    }
+    awHtmlCache.delete(url);
+  }
+
+  const existing = awHtmlInFlight.get(url);
+  if (existing) return existing;
+
+  const task = (async (): Promise<AwHtmlResult> => {
+    try {
+      const res = await fetchWithTimeout(
+        url,
+        {
+          headers: {
+            'User-Agent': BROWSER_UA,
+            Accept:
+              'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            Referer: `${ANIMEWORLD_UPSTREAM}/`,
+            Origin: ANIMEWORLD_UPSTREAM,
+            'Sec-Ch-Ua': '"Not/A)Brand";v="8", "Chromium";v="126", "Google Chrome";v="126"',
+            'Sec-Ch-Ua-Mobile': '?0',
+            'Sec-Ch-Ua-Platform': '"Windows"',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'same-origin',
+            'Upgrade-Insecure-Requests': '1',
+          },
         },
-      },
-      8000
-    );
-    const cfMitigated = (res.headers.get('cf-mitigated') || '').toLowerCase();
-    const serverHeader = (res.headers.get('server') || '').toLowerCase();
-    const rawBody = await res.text().catch(() => '');
-    const lowerBody = rawBody.slice(0, 4000).toLowerCase();
-    const hasCfChallengeMarker =
-      lowerBody.includes('just a moment...') ||
-      lowerBody.includes('cf_chl_opt') ||
-      lowerBody.includes('cf-browser-verification') ||
-      lowerBody.includes('attention required! | cloudflare');
-    const blockedByUpstream =
-      (res.status === 403 || res.status === 503) &&
-      (cfMitigated.includes('challenge') || serverHeader.includes('cloudflare') || hasCfChallengeMarker);
-    const html = res.ok ? rawBody : '';
-    if (!res.ok) {
-      console.warn(
-        `[AnimeWorld Diagnostic] Upstream request failed: URL=${url}, Status=${res.status} ${res.statusText}${
-          blockedByUpstream ? ' (Cloudflare challenge)' : ''
+        8000
+      );
+      const cfMitigated = (res.headers.get('cf-mitigated') || '').toLowerCase();
+      const serverHeader = (res.headers.get('server') || '').toLowerCase();
+      const rawBody = await res.text().catch(() => '');
+      const lowerBody = rawBody.slice(0, 4000).toLowerCase();
+      const hasCfChallengeMarker =
+        lowerBody.includes('just a moment...') ||
+        lowerBody.includes('cf_chl_opt') ||
+        lowerBody.includes('cf-browser-verification') ||
+        lowerBody.includes('attention required! | cloudflare');
+      const blockedByUpstream =
+        (res.status === 403 || res.status === 503) &&
+        (cfMitigated.includes('challenge') || serverHeader.includes('cloudflare') || hasCfChallengeMarker);
+      const html = res.ok ? rawBody : '';
+      if (!res.ok) {
+        console.warn(
+          `[AnimeWorld Diagnostic] Upstream request failed: URL=${url}, Status=${res.status} ${res.statusText}${
+            blockedByUpstream ? ' (Cloudflare challenge)' : ''
+          }`
+        );
+      }
+      const result: AwHtmlResult = { ok: res.ok, status: res.status, html, blockedByUpstream };
+      if (res.ok && html && !blockedByUpstream) {
+        if (awHtmlCache.has(url)) {
+          awHtmlCache.delete(url);
+        } else if (awHtmlCache.size >= AW_HTML_CACHE_MAX) {
+          const oldest = awHtmlCache.keys().next().value;
+          if (oldest !== undefined) awHtmlCache.delete(oldest);
+        }
+        awHtmlCache.set(url, { expiresAt: Date.now() + getAwHtmlCacheTtlMs(url), value: result });
+      }
+      return result;
+    } catch (err) {
+      console.error(
+        `[AnimeWorld Diagnostic] Upstream fetch error: URL=${url}, Error=${
+          err instanceof Error ? err.message : String(err)
         }`
       );
+      return { ok: false, status: 502, html: '' };
     }
-    return { ok: res.ok, status: res.status, html, blockedByUpstream };
-  } catch (err) {
-    console.error(
-      `[AnimeWorld Diagnostic] Upstream fetch error: URL=${url}, Error=${
-        err instanceof Error ? err.message : String(err)
-      }`
-    );
-    return { ok: false, status: 502, html: '' };
-  }
+  })().finally(() => {
+    awHtmlInFlight.delete(url);
+  });
+
+  awHtmlInFlight.set(url, task);
+  return task;
 }
 
 function formatAnimeWorldUpstreamError(status: number, blockedByUpstream?: boolean, context = 'request'): string {
@@ -2888,6 +2959,35 @@ export function createExpressApp() {
       res.status(204).end();
       return;
     }
+
+    const acceptEncoding = String(req.headers['accept-encoding'] || '');
+    if (
+      /\bgzip\b/i.test(acceptEncoding) &&
+      !req.path.startsWith('/anime/proxy') &&
+      !req.path.startsWith('/admin/popup-banners/media')
+    ) {
+      const origJson = res.json.bind(res);
+      res.json = ((body: unknown) => {
+        if (res.headersSent) {
+          return res;
+        }
+        try {
+          const jsonStr = JSON.stringify(body);
+          if (jsonStr.length >= 1024) {
+            const gz = zlib.gzipSync(Buffer.from(jsonStr, 'utf8'));
+            res.setHeader('Content-Encoding', 'gzip');
+            res.setHeader('Content-Type', 'application/json; charset=utf-8');
+            res.setHeader('Vary', 'Accept-Encoding');
+            res.setHeader('Content-Length', String(gz.length));
+            return res.send(gz);
+          }
+        } catch {
+          // Fall back cleanly to uncompressed JSON response
+        }
+        return origJson(body);
+      }) as Response['json'];
+    }
+
     next();
   });
 
@@ -3403,6 +3503,45 @@ export function createExpressApp() {
     res.status(204).end();
   });
 
+  // Secure Firebase Admin authorization verification for signed-in users (no client email hardcoding)
+  app.get('/api/auth/admin-status', async (req: Request, res: Response) => {
+    const userCheck = await verifyFirebaseUserRequest(req);
+    if (!userCheck.ok) {
+      res.status(userCheck.status).json({
+        isAdmin: false,
+        role: 'guest',
+        error: userCheck.error,
+        code: userCheck.code,
+      });
+      return;
+    }
+
+    if (!userCheck.isEmailVerified) {
+      res.json({
+        isAdmin: false,
+        role: 'user',
+        claimSynced: false,
+      });
+      return;
+    }
+
+    const adminCheck = await verifyAdminRequest(req);
+    if (!adminCheck.ok) {
+      res.json({
+        isAdmin: false,
+        role: 'user',
+        claimSynced: false,
+      });
+      return;
+    }
+
+    res.json({
+      isAdmin: true,
+      role: 'admin',
+      claimSynced: Boolean(adminCheck.claimSynced),
+    });
+  });
+
   // Protected Admin User & Visit Analytics endpoint
   app.get('/api/admin/stats', async (req: Request, res: Response) => {
     const authCheck = await verifyAdminRequest(req);
@@ -3473,53 +3612,141 @@ export function createExpressApp() {
     });
   });
 
-  // Protected Admin Banner Image Upload (validated magic bytes + size <= 5 MB)
-  app.post('/api/admin/banners/upload', jsonParser, async (req: Request, res: Response) => {
+  const bannerMultipartUpload = multer({
+    storage: multer.memoryStorage(),
+    limits: {
+      fileSize: 8 * 1024 * 1024,
+      files: 1,
+    },
+  }).fields([
+    { name: 'image', maxCount: 1 },
+    { name: 'file', maxCount: 1 },
+  ]);
+
+  const runBannerMultipartMiddleware = (req: Request, res: Response): Promise<void> =>
+    new Promise((resolve, reject) => {
+      bannerMultipartUpload(req, res, (err: unknown) => {
+        if (err) {
+          reject(err);
+          return;
+        }
+        resolve();
+      });
+    });
+
+  const runJsonParserMiddleware = (req: Request, res: Response): Promise<void> =>
+    new Promise((resolve, reject) => {
+      jsonParser(req, res, (err?: unknown) => {
+        if (err) {
+          reject(err);
+          return;
+        }
+        resolve();
+      });
+    });
+
+  // Protected Admin Banner Image Upload (supports multipart/form-data and JSON base64 fallback; validated magic bytes + size <= 8 MB)
+  app.post('/api/admin/banners/upload', async (req: Request, res: Response) => {
     const authCheck = await verifyAdminRequest(req);
     if (!authCheck.ok) {
       res.status(authCheck.status).json({ error: authCheck.error, code: authCheck.code });
       return;
     }
 
-    const body = (req.body || {}) as Record<string, unknown>;
-    const rawData = typeof body.dataBase64 === 'string' ? body.dataBase64.trim() : '';
-    const declaredMime = typeof body.mimeType === 'string' ? body.mimeType.trim().toLowerCase() : '';
+    const contentType = String(req.headers['content-type'] || '').toLowerCase();
+    let buffer: Buffer | null = null;
+    let declaredMime = '';
 
-    if (!rawData) {
-      res.status(400).json({ error: 'Missing image data.' });
-      return;
+    if (contentType.includes('multipart/form-data')) {
+      try {
+        await runBannerMultipartMiddleware(req, res);
+      } catch (err) {
+        if (err instanceof multer.MulterError) {
+          const status = err.code === 'LIMIT_FILE_SIZE' ? 413 : 400;
+          const message =
+            err.code === 'LIMIT_FILE_SIZE'
+              ? 'Banner image must not exceed 8 MB.'
+              : `Invalid upload payload (${err.message}).`;
+          res.status(status).json({ error: message, code: err.code });
+          return;
+        }
+        res.status(400).json({
+          error: err instanceof Error ? err.message : 'Failed to parse multipart image upload.',
+        });
+        return;
+      }
+
+      const uploadedFiles = req.files as Record<string, Express.Multer.File[]> | undefined;
+      const uploadedFile = uploadedFiles?.image?.[0] || uploadedFiles?.file?.[0];
+      if (!uploadedFile || !uploadedFile.buffer) {
+        res.status(400).json({ error: 'Missing image file in multipart form upload.' });
+        return;
+      }
+      buffer = uploadedFile.buffer;
+      declaredMime = String(uploadedFile.mimetype || '').trim().toLowerCase();
+    } else {
+      try {
+        await runJsonParserMiddleware(req, res);
+      } catch (err) {
+        res.status(400).json({
+          error: err instanceof Error ? err.message : 'Invalid JSON upload payload.',
+        });
+        return;
+      }
+
+      const body = (req.body || {}) as Record<string, unknown>;
+      const rawData = typeof body.dataBase64 === 'string' ? body.dataBase64.trim() : '';
+      declaredMime = typeof body.mimeType === 'string' ? body.mimeType.trim().toLowerCase() : '';
+
+      if (!rawData) {
+        res.status(400).json({ error: 'Missing image data.' });
+        return;
+      }
+
+      const cleanedBase64 = rawData.replace(/^data:image\/[a-z0-9.+-]+;base64,/i, '');
+      try {
+        buffer = Buffer.from(cleanedBase64, 'base64');
+      } catch {
+        res.status(400).json({ error: 'Invalid base64 image payload.' });
+        return;
+      }
     }
 
-    const allowedMimes = new Set(['image/jpeg', 'image/jpg', 'image/png', 'image/webp', 'image/gif']);
+    const allowedMimes = new Set([
+      'image/jpeg',
+      'image/jpg',
+      'image/pjpeg',
+      'image/png',
+      'image/webp',
+      'image/gif',
+      'application/octet-stream',
+    ]);
     if (declaredMime && !allowedMimes.has(declaredMime)) {
       res.status(400).json({ error: 'Unsupported image format. Allowed: JPG, PNG, WebP, GIF.' });
       return;
     }
 
-    const cleanedBase64 = rawData.replace(/^data:image\/[a-z0-9.+-]+;base64,/i, '');
-    let buffer: Buffer;
-    try {
-      buffer = Buffer.from(cleanedBase64, 'base64');
-    } catch {
-      res.status(400).json({ error: 'Invalid base64 image payload.' });
-      return;
-    }
-
-    if (buffer.length === 0 || buffer.length > 5 * 1024 * 1024) {
-      res.status(400).json({ error: 'Banner image must be between 1 byte and 5 MB.' });
+    if (!buffer || buffer.length === 0 || buffer.length > 8 * 1024 * 1024) {
+      res.status(400).json({ error: 'Banner image must be between 1 byte and 8 MB.' });
       return;
     }
 
     const verified = detectVerifiedImageFormat(buffer);
     if (!verified) {
-      res.status(400).json({ error: 'Invalid or corrupted image binary. Allowed: JPG, PNG, WebP, GIF.' });
+      res.status(400).json({ error: 'Invalid or corrupted image file. Allowed: JPG, PNG, WebP, GIF.' });
       return;
     }
 
     const safeFileName = `banner_${Date.now()}_${crypto.randomBytes(6).toString('hex')}${verified.ext}`;
-    const destPath = path.join(BANNER_UPLOADS_DIR, safeFileName);
+    const resolvedUploadsDir = path.resolve(BANNER_UPLOADS_DIR);
+    const destPath = path.resolve(resolvedUploadsDir, safeFileName);
+    if (!destPath.startsWith(resolvedUploadsDir + path.sep)) {
+      res.status(400).json({ error: 'Invalid upload destination path.' });
+      return;
+    }
+
     try {
-      fs.mkdirSync(BANNER_UPLOADS_DIR, { recursive: true });
+      fs.mkdirSync(resolvedUploadsDir, { recursive: true });
       fs.writeFileSync(destPath, buffer);
     } catch (err) {
       res.status(507).json({
@@ -3543,7 +3770,12 @@ export function createExpressApp() {
       return;
     }
 
-    const targetPath = path.join(BANNER_UPLOADS_DIR, filename);
+    const resolvedUploadsDir = path.resolve(BANNER_UPLOADS_DIR);
+    const targetPath = path.resolve(resolvedUploadsDir, filename);
+    if (!targetPath.startsWith(resolvedUploadsDir + path.sep)) {
+      res.status(400).json({ error: 'Invalid banner path.' });
+      return;
+    }
     if (!fs.existsSync(targetPath)) {
       res.status(404).json({ error: 'Banner image not found.' });
       return;
@@ -3578,7 +3810,12 @@ export function createExpressApp() {
       return;
     }
 
-    const targetPath = path.join(BANNER_UPLOADS_DIR, filename);
+    const resolvedUploadsDir = path.resolve(BANNER_UPLOADS_DIR);
+    const targetPath = path.resolve(resolvedUploadsDir, filename);
+    if (!targetPath.startsWith(resolvedUploadsDir + path.sep)) {
+      res.status(400).json({ error: 'Invalid banner path.' });
+      return;
+    }
     try {
       if (fs.existsSync(targetPath)) {
         fs.unlinkSync(targetPath);
@@ -5057,7 +5294,18 @@ export async function startStandaloneServer() {
     app.use(vite.middlewares);
   } else {
     const distPath = path.resolve(SERVER_ROOT_DIR, 'dist');
-    app.use(express.static(distPath));
+    app.use(
+      express.static(distPath, {
+        setHeaders: (res, filePath) => {
+          const normalized = filePath.replace(/\\/g, '/');
+          if (normalized.endsWith('.html')) {
+            res.setHeader('Cache-Control', 'no-cache');
+          } else if (normalized.includes('/assets/')) {
+            res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+          }
+        },
+      })
+    );
     app.get('*', (_req: Request, res: Response) => {
       const indexHtml = path.join(distPath, 'index.html');
       if (fs.existsSync(indexHtml)) {

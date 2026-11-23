@@ -92,6 +92,8 @@ public class MainActivity extends BridgeActivity implements ModifiedMainActivity
             settings.setSupportMultipleWindows(true);
             settings.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
             settings.setAllowFileAccess(true);
+            settings.setCacheMode(WebSettings.LOAD_DEFAULT);
+            webView.setOverScrollMode(View.OVER_SCROLL_NEVER);
 
             webView.setWebChromeClient(new BridgeWebChromeClient(getBridge()) {
                 @Override

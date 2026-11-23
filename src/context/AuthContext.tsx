@@ -1,4 +1,4 @@
-import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { Capacitor } from '@capacitor/core';
 import { SocialLogin } from '@capgo/capacitor-social-login';
 import {
@@ -30,7 +30,7 @@ import {
   where,
   writeBatch,
 } from 'firebase/firestore';
-import { ASSETS } from '@/src/config/env';
+import { ASSETS, resolveApiUrl } from '@/src/config/env';
 import {
   auth,
   db,
@@ -46,14 +46,23 @@ import {
 import { getDisplayTitle } from '@/src/services/anilistApi';
 import { SESSION_EXPIRED_EVENT } from '@/src/services/authorizedFetch';
 import {
+  ACHIEVEMENT_BADGES,
   DEFAULT_WATCH_STATS,
+  getBadgeProgress,
   getStoredWatchStats,
-  recordEpisodeCompletionLocally,
+  getTodayDateKey,
+  MAX_EQUIPPED_BADGES,
+  normalizeAchievementList,
+  normalizeEquippedBadges,
+  recordWatchPlaybackLocally,
   saveStoredWatchStats,
+  type PlaybackRecordInput,
 } from '@/src/services/achievementService';
 import { applyTheme, getStoredTheme } from '@/src/services/themeService';
 import type {
+  AchievementId,
   AnimeSummary,
+  EquipBadgeResult,
   LibraryAnimeItem,
   ThemeId,
   UserPreferences,
@@ -78,11 +87,10 @@ function toMillis(val: unknown): number {
   return Date.now();
 }
 
-const AUTHORIZED_ADMIN_EMAILS = ['amd712785@gmail.com', 'dyhfrtdturrt@gmail.com'];
 const ACTIVE_PING_STORAGE_KEY = 'kurostream_user_active_ping_v1';
 
 function getTodayUtcKey(): string {
-  return new Date().toISOString().slice(0, 10);
+  return getTodayDateKey();
 }
 
 let socialLoginInitPromise: Promise<void> | null = null;
@@ -185,6 +193,8 @@ interface AuthContextValue {
   getIdToken: (forceRefresh?: boolean) => Promise<string | null>;
   preferences: UserPreferences;
   watchStats: UserWatchStats;
+  equippedBadges: AchievementId[];
+  equippingBadgeId: AchievementId | null;
   watchlist: LibraryAnimeItem[];
   favorites: LibraryAnimeItem[];
   history: WatchHistoryItem[];
@@ -208,10 +218,14 @@ interface AuthContextValue {
   toggleWatchlist: (anime: AnimeSummary) => Promise<void>;
   toggleFavorite: (anime: AnimeSummary) => Promise<void>;
   saveWatchProgress: (item: Omit<WatchHistoryItem, 'updatedAt'>) => Promise<void>;
+  recordWatchPlayback: (input: PlaybackRecordInput) => Promise<void>;
   recordWatchCompletion: (animeId: number, episodeNumber: number) => Promise<void>;
   removeHistoryItem: (animeId: number) => Promise<void>;
   clearHistory: () => Promise<void>;
   updatePreferences: (patch: Partial<UserPreferences>) => Promise<void>;
+  equipBadge: (badgeId: AchievementId) => Promise<EquipBadgeResult>;
+  unequipBadge: (badgeId: AchievementId) => Promise<EquipBadgeResult>;
+  toggleEquipBadge: (badgeId: AchievementId) => Promise<EquipBadgeResult>;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -224,19 +238,50 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const [cloudPrefs, setCloudPrefs] = useState<UserPreferences>(DEFAULT_SIGNED_OUT_PREFERENCES);
   const [cloudWatchStats, setCloudWatchStats] = useState<UserWatchStats>(() => getStoredWatchStats());
+  const [cloudEquippedBadges, setCloudEquippedBadges] = useState<AchievementId[]>([]);
+  const [equippingBadgeId, setEquippingBadgeId] = useState<AchievementId | null>(null);
+  const [cloudDailyActivity, setCloudDailyActivity] = useState<Record<string, number>>({});
   const [cloudWatchlist, setCloudWatchlist] = useState<LibraryAnimeItem[]>([]);
   const [cloudFavorites, setCloudFavorites] = useState<LibraryAnimeItem[]>([]);
   const [cloudHistory, setCloudHistory] = useState<WatchHistoryItem[]>([]);
+
+  const cloudWatchStatsRef = useRef<UserWatchStats>(cloudWatchStats);
+  cloudWatchStatsRef.current = cloudWatchStats;
+  const cloudEquippedBadgesRef = useRef<AchievementId[]>(cloudEquippedBadges);
+  cloudEquippedBadgesRef.current = cloudEquippedBadges;
+  const cloudDailyActivityRef = useRef<Record<string, number>>(cloudDailyActivity);
+  cloudDailyActivityRef.current = cloudDailyActivity;
 
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
   const [authNotice, setAuthNotice] = useState<string | null>(null);
   const [authLoading, setAuthLoading] = useState(false);
 
+  const lastSavedProgressRef = useRef<
+    Map<
+      number,
+      {
+        episodeId: string;
+        episodeNumber: number;
+        audioMode: string;
+        progressSeconds: number;
+        writtenAt: number;
+      }
+    >
+  >(new Map());
+  const lastSyncedArraysRef = useRef<{
+    uid: string;
+    streakDaysLen: number;
+    watchedAnimeLen: number;
+    achievementsLen: number;
+  } | null>(null);
+
   useEffect(() => {
-    if (isFirebaseConfigured) {
+    if (!isFirebaseConfigured) return;
+    const timer = window.setTimeout(() => {
       testFirestoreConnection();
-    }
+    }, 2500);
+    return () => window.clearTimeout(timer);
   }, []);
 
   useEffect(() => {
@@ -290,36 +335,45 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
       if (!firebaseUser) {
         setIsAdmin(false);
+        setCloudEquippedBadges([]);
         return;
       }
 
-      // Check verified admin status: STRICTLY authorized emails with emailVerified == true
-      if (firebaseUser.emailVerified && firebaseUser.email) {
-        const userEmailLower = firebaseUser.email.toLowerCase();
-        const isAuthorizedEmail = AUTHORIZED_ADMIN_EMAILS.some(
-          (adminEmail) => adminEmail.toLowerCase() === userEmailLower
-        );
-
-        // Also inspect custom claims if provisioned by server
-        let hasAdminClaim = false;
+      // Verify Admin privileges strictly via Firebase Admin authorization (custom claims + backend verification)
+      if (firebaseUser.emailVerified) {
         try {
           const tokenResult = await firebaseUser.getIdTokenResult();
-          hasAdminClaim = Boolean(tokenResult?.claims?.admin);
+          if (auth?.currentUser?.uid !== firebaseUser.uid) return;
+
+          if (tokenResult?.claims?.admin === true) {
+            setIsAdmin(true);
+          } else {
+            const adminRes = await fetch(resolveApiUrl('/api/auth/admin-status'), {
+              method: 'GET',
+              headers: {
+                Authorization: `Bearer ${tokenResult.token}`,
+              },
+            });
+            if (auth?.currentUser?.uid !== firebaseUser.uid) return;
+
+            if (adminRes.ok) {
+              const adminJson = (await adminRes.json()) as {
+                isAdmin?: boolean;
+                claimSynced?: boolean;
+              };
+              const authorized = adminJson.isAdmin === true;
+              setIsAdmin(authorized);
+              if (authorized && adminJson.claimSynced) {
+                await firebaseUser.getIdTokenResult(true).catch(() => {});
+              }
+            } else {
+              setIsAdmin(false);
+            }
+          }
         } catch {
-          // ignore token result lookup errors
-        }
-
-        console.info('[KuroStream Auth] Admin check', {
-          projectId: auth?.app?.options?.projectId || firebaseDiagnostics.projectId,
-          isAuthorizedEmail,
-          hasAdminClaim,
-        });
-
-        if (isAuthorizedEmail) {
-          setIsAdmin(true);
-        } else {
-          // Other registered users must NEVER receive admin permissions
-          setIsAdmin(false);
+          if (auth?.currentUser?.uid === firebaseUser.uid) {
+            setIsAdmin(false);
+          }
         }
       } else {
         setIsAdmin(false);
@@ -337,6 +391,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
               displayName: safeName,
               preferredAudio: 'sub',
               autoNext: true,
+              equippedBadges: [],
               lastActiveDay: todayKey,
               lastActiveAt: serverTimestamp(),
               createdAt: serverTimestamp(),
@@ -425,23 +480,85 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             theme: userTheme,
           });
 
+          const { unlockedAchievements, achievementUnlockDates } = normalizeAchievementList(
+            d.unlockedAchievements,
+            d.achievementUnlockDates
+          );
+          const todayKey = getTodayDateKey();
+          const mergedDaily = {
+            ...(cloudDailyActivityRef.current || {}),
+          };
           const loadedStats: UserWatchStats = {
             theme: userTheme,
             streakCurrent: typeof d.streakCurrent === 'number' ? d.streakCurrent : 0,
             streakLongest: typeof d.streakLongest === 'number' ? d.streakLongest : 0,
-            streakLastWatchedDate: typeof d.streakLastWatchedDate === 'string' ? d.streakLastWatchedDate : undefined,
+            streakLastWatchedDate:
+              typeof d.streakLastWatchedDate === 'string' ? d.streakLastWatchedDate : undefined,
             streakWatchedDays: Array.isArray(d.streakWatchedDays) ? d.streakWatchedDays : [],
-            totalEpisodesCompleted: typeof d.totalEpisodesCompleted === 'number' ? d.totalEpisodesCompleted : 0,
-            todayEpisodesCompleted: typeof d.todayEpisodesCompleted === 'number' ? d.todayEpisodesCompleted : 0,
-            todayCompletedDate: typeof d.todayCompletedDate === 'string' ? d.todayCompletedDate : undefined,
-            unlockedAchievements: Array.isArray(d.unlockedAchievements) ? d.unlockedAchievements : [],
+            totalEpisodesCompleted:
+              typeof d.totalEpisodesCompleted === 'number' ? d.totalEpisodesCompleted : 0,
+            todayEpisodesCompleted:
+              d.todayCompletedDate === todayKey && typeof d.todayEpisodesCompleted === 'number'
+                ? d.todayEpisodesCompleted
+                : 0,
+            todayCompletedDate:
+              typeof d.todayCompletedDate === 'string' ? d.todayCompletedDate : todayKey,
+            totalWatchSeconds:
+              typeof d.totalWatchSeconds === 'number' && d.totalWatchSeconds >= 0
+                ? d.totalWatchSeconds
+                : 0,
+            todayWatchSeconds:
+              d.todayWatchDate === todayKey && typeof d.todayWatchSeconds === 'number'
+                ? d.todayWatchSeconds
+                : 0,
+            todayWatchDate: typeof d.todayWatchDate === 'string' ? d.todayWatchDate : todayKey,
+            watchedAnimeIds: Array.isArray(d.watchedAnimeIds)
+              ? d.watchedAnimeIds.filter((id): id is string => typeof id === 'string')
+              : [],
+            dailyWatchSeconds: mergedDaily,
+            unlockedAchievements,
+            achievementUnlockDates,
           };
+          cloudWatchStatsRef.current = loadedStats;
           setCloudWatchStats(loadedStats);
           saveStoredWatchStats(loadedStats);
+
+          const syncedEquipped = normalizeEquippedBadges(d.equippedBadges);
+          cloudEquippedBadgesRef.current = syncedEquipped;
+          setCloudEquippedBadges(syncedEquipped);
         }
       },
       (error) => {
         logFirestoreError(error, OperationType.GET, userPath);
+      }
+    );
+
+    const activityPath = `users/${uid}/watchActivity`;
+    const unsubActivity = onSnapshot(
+      query(collection(db, activityPath), where('ownerId', '==', uid)),
+      (snap) => {
+        const nextDaily: Record<string, number> = {};
+        snap.docs.forEach((docSnap) => {
+          const data = docSnap.data();
+          const daysMap = data?.days;
+          if (daysMap && typeof daysMap === 'object' && !Array.isArray(daysMap)) {
+            for (const [dateKey, secs] of Object.entries(daysMap as Record<string, unknown>)) {
+              if (
+                /^\d{4}-\d{2}-\d{2}$/.test(dateKey) &&
+                typeof secs === 'number' &&
+                Number.isFinite(secs) &&
+                secs >= 0
+              ) {
+                nextDaily[dateKey] = Math.round(secs);
+              }
+            }
+          }
+        });
+        cloudDailyActivityRef.current = nextDaily;
+        setCloudDailyActivity(nextDaily);
+      },
+      (error) => {
+        logFirestoreError(error, OperationType.LIST, activityPath);
       }
     );
 
@@ -512,6 +629,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
                 episodeId: String(d.episodeId),
                 episodeNumber: Number(d.episodeNumber),
                 episodeTitle: typeof d.episodeTitle === 'string' ? d.episodeTitle : undefined,
+                serverName: typeof d.serverName === 'string' ? d.serverName : undefined,
                 progressSeconds: Number(d.progressSeconds || 0),
                 durationSeconds: Number(d.durationSeconds || 0),
                 audioMode:
@@ -533,6 +651,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     return () => {
       unsubUser();
+      unsubActivity();
       unsubWl();
       unsubFav();
       unsubHist();
@@ -804,7 +923,20 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const favorites = hasVerifiedCloudSession ? cloudFavorites : [];
   const history = hasVerifiedCloudSession ? cloudHistory : [];
   const preferences = hasVerifiedCloudSession ? cloudPrefs : sessionPrefs;
-  const watchStats = hasVerifiedCloudSession ? cloudWatchStats : DEFAULT_WATCH_STATS;
+  const watchStats = useMemo<UserWatchStats>(() => {
+    if (!hasVerifiedCloudSession) return DEFAULT_WATCH_STATS;
+    return {
+      ...cloudWatchStats,
+      dailyWatchSeconds: {
+        ...(cloudWatchStats.dailyWatchSeconds || {}),
+        ...cloudDailyActivity,
+      },
+    };
+  }, [hasVerifiedCloudSession, cloudWatchStats, cloudDailyActivity]);
+  const equippedBadges = useMemo<AchievementId[]>(() => {
+    if (!hasVerifiedCloudSession) return [];
+    return normalizeEquippedBadges(cloudEquippedBadges, watchStats, isAdmin);
+  }, [hasVerifiedCloudSession, cloudEquippedBadges, watchStats, isAdmin]);
 
   const isInWatchlist = useCallback(
     (animeId: number) => watchlist.some((item) => item.animeId === animeId),
@@ -929,9 +1061,43 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const safeCover = (item.coverImage || '').slice(0, 500);
       const safeEpId = (item.episodeId?.trim() || 'ep-1').slice(0, 200);
       const safeEpTitle = item.episodeTitle ? item.episodeTitle.slice(0, 240) : undefined;
+      const safeServerName = item.serverName ? item.serverName.slice(0, 80) : undefined;
       const safeEpNumber = Math.max(0, Number(item.episodeNumber) || 0);
       const safeProgress = Math.max(0, Math.floor(item.progressSeconds || 0));
       const safeDuration = Math.max(0, Math.floor(item.durationSeconds || 0));
+
+      const safeAudio =
+        item.audioMode === 'dub'
+          ? 'dub'
+          : item.audioMode === 'hindi'
+            ? 'hindi'
+            : 'sub';
+      const now = Date.now();
+      const prevWrite = lastSavedProgressRef.current.get(item.animeId);
+      const isSameTrack =
+        prevWrite &&
+        prevWrite.episodeId === safeEpId &&
+        prevWrite.episodeNumber === safeEpNumber &&
+        prevWrite.audioMode === safeAudio;
+      const isCompletion = safeDuration > 0 && safeProgress >= safeDuration - 3;
+      const deltaSeconds = prevWrite ? Math.abs(safeProgress - prevWrite.progressSeconds) : 999;
+
+      if (
+        isSameTrack &&
+        !isCompletion &&
+        deltaSeconds < 14 &&
+        now - prevWrite.writtenAt < 14500
+      ) {
+        return;
+      }
+
+      lastSavedProgressRef.current.set(item.animeId, {
+        episodeId: safeEpId,
+        episodeNumber: safeEpNumber,
+        audioMode: safeAudio,
+        progressSeconds: safeProgress,
+        writtenAt: now,
+      });
 
       const path = `users/${user.uid}/history/${item.animeId}`;
       try {
@@ -944,15 +1110,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           episodeNumber: safeEpNumber,
           progressSeconds: safeProgress,
           durationSeconds: safeDuration,
-          audioMode:
-            item.audioMode === 'dub'
-              ? 'dub'
-              : item.audioMode === 'hindi'
-                ? 'hindi'
-                : 'sub',
+          audioMode: safeAudio,
           updatedAt: serverTimestamp(),
         };
         if (safeEpTitle) payload.episodeTitle = safeEpTitle;
+        if (safeServerName) payload.serverName = safeServerName;
         await setDoc(doc(db, path), payload);
       } catch (err) {
         logFirestoreError(err, OperationType.WRITE, path);
@@ -1034,74 +1196,419 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     [user]
   );
 
-  const recordWatchCompletion = useCallback(
-    async (animeId: number, episodeNumber: number) => {
+  const recordWatchPlayback = useCallback(
+    async (input: PlaybackRecordInput) => {
       if (!user || !user.emailVerified || !db) return;
 
-      const res = recordEpisodeCompletionLocally(animeId, episodeNumber, cloudWatchStats);
+      const currentBase: UserWatchStats = {
+        ...cloudWatchStatsRef.current,
+        dailyWatchSeconds: {
+          ...(cloudWatchStatsRef.current.dailyWatchSeconds || {}),
+          ...cloudDailyActivityRef.current,
+        },
+      };
+      const res = recordWatchPlaybackLocally(input, currentBase);
+      if (!res.changed) return;
+
+      cloudWatchStatsRef.current = res.stats;
+      cloudDailyActivityRef.current = {
+        ...cloudDailyActivityRef.current,
+        [res.todayKey]: res.todayDaySeconds,
+      };
       setCloudWatchStats(res.stats);
-      const path = `users/${user.uid}`;
+      setCloudDailyActivity(cloudDailyActivityRef.current);
+
+      const userPath = `users/${user.uid}`;
+      const monthPath = `users/${user.uid}/watchActivity/${res.monthKey}`;
+
+      const prevSynced = lastSyncedArraysRef.current;
+      const isSameUid = prevSynced?.uid === user.uid;
+      const streakDaysChanged =
+        !isSameUid || prevSynced.streakDaysLen !== res.stats.streakWatchedDays.length;
+      const watchedAnimeChanged =
+        !isSameUid || prevSynced.watchedAnimeLen !== res.stats.watchedAnimeIds.length;
+      const achievementsChanged =
+        !isSameUid || prevSynced.achievementsLen !== res.stats.unlockedAchievements.length;
+
       try {
         const updatePayload: Record<string, unknown> = {
           streakCurrent: res.stats.streakCurrent,
           streakLongest: res.stats.streakLongest,
-          streakWatchedDays: res.stats.streakWatchedDays,
           totalEpisodesCompleted: res.stats.totalEpisodesCompleted,
           todayEpisodesCompleted: res.stats.todayEpisodesCompleted,
-          todayCompletedDate: res.stats.todayCompletedDate,
-          unlockedAchievements: res.stats.unlockedAchievements,
+          todayCompletedDate: res.stats.todayCompletedDate || res.todayKey,
+          totalWatchSeconds: res.stats.totalWatchSeconds,
+          todayWatchSeconds: res.stats.todayWatchSeconds,
+          todayWatchDate: res.stats.todayWatchDate || res.todayKey,
           updatedAt: serverTimestamp(),
         };
+        if (streakDaysChanged) {
+          updatePayload.streakWatchedDays = res.stats.streakWatchedDays;
+        }
+        if (watchedAnimeChanged) {
+          updatePayload.watchedAnimeIds = res.stats.watchedAnimeIds;
+        }
+        if (achievementsChanged) {
+          updatePayload.unlockedAchievements = res.stats.unlockedAchievements;
+          updatePayload.achievementUnlockDates = res.stats.achievementUnlockDates;
+        }
         if (res.stats.streakLastWatchedDate) {
           updatePayload.streakLastWatchedDate = res.stats.streakLastWatchedDate;
         }
-        await updateDoc(doc(db, path), updatePayload);
+
+        lastSyncedArraysRef.current = {
+          uid: user.uid,
+          streakDaysLen: res.stats.streakWatchedDays.length,
+          watchedAnimeLen: res.stats.watchedAnimeIds.length,
+          achievementsLen: res.stats.unlockedAchievements.length,
+        };
+
+        const monthDays: Record<string, number> = {};
+        for (const [dateKey, secs] of Object.entries(res.stats.dailyWatchSeconds || {})) {
+          if (
+            dateKey.startsWith(`${res.monthKey}-`) &&
+            typeof secs === 'number' &&
+            Number.isFinite(secs) &&
+            secs >= 0
+          ) {
+            monthDays[dateKey] = Math.round(secs);
+          }
+        }
+        monthDays[res.todayKey] = Math.round(res.todayDaySeconds);
+
+        await Promise.all([
+          updateDoc(doc(db, userPath), updatePayload),
+          setDoc(
+            doc(db, monthPath),
+            {
+              ownerId: user.uid,
+              monthKey: res.monthKey,
+              days: monthDays,
+              updatedAt: serverTimestamp(),
+            },
+            { merge: true }
+          ),
+        ]);
       } catch (err) {
-        logFirestoreError(err, OperationType.UPDATE, path);
+        logFirestoreError(err, OperationType.UPDATE, userPath);
       }
     },
-    [user, cloudWatchStats]
+    [user]
+  );
+
+  const recordWatchCompletion = useCallback(
+    async (animeId: number, episodeNumber: number) => {
+      await recordWatchPlayback({
+        animeKey: `anilist:${animeId}`,
+        animeId,
+        episodeNumber,
+        secondsWatched: 0,
+        completed: true,
+      });
+    },
+    [recordWatchPlayback]
+  );
+
+  const equipBadge = useCallback(
+    async (badgeId: AchievementId): Promise<EquipBadgeResult> => {
+      if (!user || !user.emailVerified || !db) {
+        setAuthError(null);
+        setAuthNotice(
+          user && !user.emailVerified
+            ? 'Verify your email address to equip badges on your profile.'
+            : 'Sign in with Google or Email to equip badges on your profile.'
+        );
+        setIsAuthModalOpen(true);
+        return {
+          ok: false,
+          equipped: false,
+          reason: 'auth_required',
+          message: 'Please sign in to equip badges on your profile.',
+        };
+      }
+
+      const targetBadge = ACHIEVEMENT_BADGES.find((b) => b.id === badgeId);
+      if (!targetBadge) {
+        return {
+          ok: false,
+          equipped: false,
+          reason: 'error',
+          message: 'Unknown badge selected.',
+        };
+      }
+
+      const currentStats: UserWatchStats = {
+        ...cloudWatchStatsRef.current,
+        dailyWatchSeconds: {
+          ...(cloudWatchStatsRef.current.dailyWatchSeconds || {}),
+          ...cloudDailyActivityRef.current,
+        },
+      };
+      const progress = getBadgeProgress(targetBadge, currentStats, isAdmin);
+      if (!isAdmin && !progress.unlocked) {
+        return {
+          ok: false,
+          equipped: false,
+          reason: 'locked',
+          message: 'Unlock this badge before adding it to your profile.',
+        };
+      }
+
+      const currentEquipped = normalizeEquippedBadges(
+        cloudEquippedBadgesRef.current,
+        currentStats,
+        isAdmin
+      );
+
+      if (currentEquipped.includes(badgeId)) {
+        return {
+          ok: true,
+          equipped: true,
+          message: `${targetBadge.title} is already displayed on your profile.`,
+        };
+      }
+
+      if (currentEquipped.length >= MAX_EQUIPPED_BADGES) {
+        return {
+          ok: false,
+          equipped: false,
+          reason: 'max_limit',
+          message: `You can display up to ${MAX_EQUIPPED_BADGES} badges on your profile. Remove one first to add ${targetBadge.title}.`,
+        };
+      }
+
+      const prevRaw = [...cloudEquippedBadgesRef.current];
+      const nextEquipped = [...currentEquipped, badgeId];
+      cloudEquippedBadgesRef.current = nextEquipped;
+      setCloudEquippedBadges(nextEquipped);
+      setEquippingBadgeId(badgeId);
+
+      const userPath = `users/${user.uid}`;
+      try {
+        const updatePayload: Record<string, unknown> = {
+          equippedBadges: nextEquipped,
+          updatedAt: serverTimestamp(),
+        };
+
+        // Ensure stat-earned badges for non-admins are also reflected in unlockedAchievements
+        if (!isAdmin && !currentStats.unlockedAchievements.includes(badgeId)) {
+          const nextUnlocked = Array.from(
+            new Set([...currentStats.unlockedAchievements, badgeId])
+          );
+          const nextDates = {
+            ...currentStats.achievementUnlockDates,
+            [badgeId]:
+              currentStats.achievementUnlockDates[badgeId] || new Date().toISOString(),
+          };
+          updatePayload.unlockedAchievements = nextUnlocked;
+          updatePayload.achievementUnlockDates = nextDates;
+        }
+
+        await updateDoc(doc(db, userPath), updatePayload);
+        return {
+          ok: true,
+          equipped: true,
+          message: `${targetBadge.title} added to My Badges.`,
+        };
+      } catch (err) {
+        cloudEquippedBadgesRef.current = prevRaw;
+        setCloudEquippedBadges(prevRaw);
+        logFirestoreError(err, OperationType.UPDATE, userPath);
+        return {
+          ok: false,
+          equipped: false,
+          reason: 'error',
+          message: 'Failed to save badge selection to Firebase. Please try again.',
+        };
+      } finally {
+        setEquippingBadgeId((cur) => (cur === badgeId ? null : cur));
+      }
+    },
+    [user, isAdmin]
+  );
+
+  const unequipBadge = useCallback(
+    async (badgeId: AchievementId): Promise<EquipBadgeResult> => {
+      if (!user || !user.emailVerified || !db) {
+        setIsAuthModalOpen(true);
+        return {
+          ok: false,
+          equipped: false,
+          reason: 'auth_required',
+          message: 'Please sign in to manage your profile badges.',
+        };
+      }
+
+      const targetBadge = ACHIEVEMENT_BADGES.find((b) => b.id === badgeId);
+      const currentStats: UserWatchStats = {
+        ...cloudWatchStatsRef.current,
+        dailyWatchSeconds: {
+          ...(cloudWatchStatsRef.current.dailyWatchSeconds || {}),
+          ...cloudDailyActivityRef.current,
+        },
+      };
+      const currentEquipped = normalizeEquippedBadges(
+        cloudEquippedBadgesRef.current,
+        currentStats,
+        isAdmin
+      );
+
+      if (!currentEquipped.includes(badgeId)) {
+        return {
+          ok: true,
+          equipped: false,
+        };
+      }
+
+      const prevRaw = [...cloudEquippedBadgesRef.current];
+      const nextEquipped = currentEquipped.filter((id) => id !== badgeId);
+      cloudEquippedBadgesRef.current = nextEquipped;
+      setCloudEquippedBadges(nextEquipped);
+      setEquippingBadgeId(badgeId);
+
+      const userPath = `users/${user.uid}`;
+      try {
+        await updateDoc(doc(db, userPath), {
+          equippedBadges: nextEquipped,
+          updatedAt: serverTimestamp(),
+        });
+        return {
+          ok: true,
+          equipped: false,
+          message: targetBadge
+            ? `${targetBadge.title} removed from My Badges.`
+            : 'Badge removed from My Badges.',
+        };
+      } catch (err) {
+        cloudEquippedBadgesRef.current = prevRaw;
+        setCloudEquippedBadges(prevRaw);
+        logFirestoreError(err, OperationType.UPDATE, userPath);
+        return {
+          ok: false,
+          equipped: true,
+          reason: 'error',
+          message: 'Failed to remove badge from profile. Please try again.',
+        };
+      } finally {
+        setEquippingBadgeId((cur) => (cur === badgeId ? null : cur));
+      }
+    },
+    [user, isAdmin]
+  );
+
+  const toggleEquipBadge = useCallback(
+    async (badgeId: AchievementId): Promise<EquipBadgeResult> => {
+      const currentStats: UserWatchStats = {
+        ...cloudWatchStatsRef.current,
+        dailyWatchSeconds: {
+          ...(cloudWatchStatsRef.current.dailyWatchSeconds || {}),
+          ...cloudDailyActivityRef.current,
+        },
+      };
+      const currentEquipped = normalizeEquippedBadges(
+        cloudEquippedBadgesRef.current,
+        currentStats,
+        isAdmin
+      );
+      if (currentEquipped.includes(badgeId)) {
+        return unequipBadge(badgeId);
+      }
+      return equipBadge(badgeId);
+    },
+    [equipBadge, unequipBadge, isAdmin]
+  );
+
+  const openAuthModal = useCallback(() => setIsAuthModalOpen(true), []);
+  const closeAuthModal = useCallback(() => setIsAuthModalOpen(false), []);
+
+  const contextValue = useMemo<AuthContextValue>(
+    () => ({
+      user,
+      authReady,
+      isAdmin,
+      firebaseEnabled: isFirebaseConfigured,
+      getIdToken,
+      preferences,
+      watchStats,
+      equippedBadges,
+      equippingBadgeId,
+      watchlist,
+      favorites,
+      history,
+      isAuthModalOpen,
+      authError,
+      authNotice,
+      authLoading,
+      clearAuthMessages,
+      openAuthModal,
+      closeAuthModal,
+      signInWithGoogle,
+      signInWithEmail,
+      registerWithEmail,
+      resendVerificationEmail,
+      refreshEmailVerification,
+      sendPasswordReset,
+      signOut,
+      isInWatchlist,
+      isFavorite,
+      getHistoryForAnime,
+      toggleWatchlist,
+      toggleFavorite,
+      saveWatchProgress,
+      recordWatchPlayback,
+      recordWatchCompletion,
+      removeHistoryItem,
+      clearHistory,
+      updatePreferences,
+      equipBadge,
+      unequipBadge,
+      toggleEquipBadge,
+    }),
+    [
+      user,
+      authReady,
+      isAdmin,
+      getIdToken,
+      preferences,
+      watchStats,
+      equippedBadges,
+      equippingBadgeId,
+      watchlist,
+      favorites,
+      history,
+      isAuthModalOpen,
+      authError,
+      authNotice,
+      authLoading,
+      clearAuthMessages,
+      openAuthModal,
+      closeAuthModal,
+      signInWithGoogle,
+      signInWithEmail,
+      registerWithEmail,
+      resendVerificationEmail,
+      refreshEmailVerification,
+      sendPasswordReset,
+      signOut,
+      isInWatchlist,
+      isFavorite,
+      getHistoryForAnime,
+      toggleWatchlist,
+      toggleFavorite,
+      saveWatchProgress,
+      recordWatchPlayback,
+      recordWatchCompletion,
+      removeHistoryItem,
+      clearHistory,
+      updatePreferences,
+      equipBadge,
+      unequipBadge,
+      toggleEquipBadge,
+    ]
   );
 
   return (
-    <AuthContext.Provider
-      value={{
-        user,
-        authReady,
-        isAdmin,
-        firebaseEnabled: isFirebaseConfigured,
-        getIdToken,
-        preferences,
-        watchStats,
-        watchlist,
-        favorites,
-        history,
-        isAuthModalOpen,
-        authError,
-        authNotice,
-        authLoading,
-        clearAuthMessages,
-        openAuthModal: () => setIsAuthModalOpen(true),
-        closeAuthModal: () => setIsAuthModalOpen(false),
-        signInWithGoogle,
-        signInWithEmail,
-        registerWithEmail,
-        resendVerificationEmail,
-        refreshEmailVerification,
-        sendPasswordReset,
-        signOut,
-        isInWatchlist,
-        isFavorite,
-        getHistoryForAnime,
-        toggleWatchlist,
-        toggleFavorite,
-        saveWatchProgress,
-        recordWatchCompletion,
-        removeHistoryItem,
-        clearHistory,
-        updatePreferences,
-      }}
-    >
+    <AuthContext.Provider value={contextValue}>
       {children}
     </AuthContext.Provider>
   );

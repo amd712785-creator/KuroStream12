@@ -13,7 +13,7 @@ interface AnimeSectionProps {
   badgeResolver?: (anime: AnimeSummary, index: number) => string | undefined;
 }
 
-export const AnimeSection: React.FC<AnimeSectionProps> = ({
+export const AnimeSection: React.FC<AnimeSectionProps> = React.memo(({
   title,
   subtitle,
   items,
@@ -112,4 +112,4 @@ export const AnimeSection: React.FC<AnimeSectionProps> = ({
       )}
     </section>
   );
-};
+});

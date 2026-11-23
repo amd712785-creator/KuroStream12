@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {
   AlertTriangle,
@@ -19,10 +19,24 @@ import {
   Server,
   X,
 } from 'lucide-react';
-import { DownloadManagerModal } from '@/src/components/DownloadManagerModal';
-import { ExtensionManager } from '@/src/components/ExtensionManager';
-import { OfflinePlayerModal } from '@/src/components/OfflinePlayerModal';
 import { VideoPlayer } from '@/src/components/VideoPlayer';
+import { useWatchSessionHeartbeat } from '@/src/hooks/useWatchSessionHeartbeat';
+
+const DownloadManagerModal = lazy(() =>
+  import('@/src/components/DownloadManagerModal').then((m) => ({
+    default: m.DownloadManagerModal,
+  }))
+);
+const ExtensionManager = lazy(() =>
+  import('@/src/components/ExtensionManager').then((m) => ({
+    default: m.ExtensionManager,
+  }))
+);
+const OfflinePlayerModal = lazy(() =>
+  import('@/src/components/OfflinePlayerModal').then((m) => ({
+    default: m.OfflinePlayerModal,
+  }))
+);
 import { isNativeCapacitorRuntime, resolveApiUrl } from '@/src/config/env';
 import { useAuth } from '@/src/context/AuthContext';
 import {
@@ -101,6 +115,7 @@ export const WatchPage: React.FC = () => {
     toggleWatchlist,
     getHistoryForAnime,
     saveWatchProgress,
+    recordWatchPlayback,
   } = useAuth();
 
   const [anime, setAnime] = useState<AnimeDetail | null>(null);
@@ -290,8 +305,10 @@ export const WatchPage: React.FC = () => {
     const epIdToUse = effectiveEpisodeId || decodedEpisodeId;
     if (!epIdToUse || epIdToUse === 'EPISODE_ID') return;
 
-    // Wait for initial anime metadata/episodes so malId and dubId are populated cleanly
-    if (!hasAnimeMeta && loadingEpisodes && !animeLoadError) {
+    // Allow SUB playback to start immediately using URL episodeId while anime metadata/episodes load in parallel;
+    // wait for metadata only for DUB (needs dubId) or Hindi (needs anime titles for AnimeWorld search).
+    const requiresMetadataBeforeStream = audioMode !== 'sub';
+    if (requiresMetadataBeforeStream && !hasAnimeMeta && loadingEpisodes && !animeLoadError) {
       setLoadingStream(true);
       return;
     }
@@ -506,6 +523,14 @@ export const WatchPage: React.FC = () => {
     historyForAnime && historyForAnime.episodeNumber === epNumber
       ? historyForAnime.progressSeconds
       : 0;
+
+  const { handleHeartbeat } = useWatchSessionHeartbeat({
+    animeId: anime?.id || animeId,
+    animeTitle: displayTitle,
+    episodeNumber: epNumber,
+    episodeTitle: epTitle,
+    serverName: selectedServer || 'KuroStream Global',
+  });
 
   const detectedLangsLower = useMemo(
     () => (streamData?.audioLanguages || []).map((l) => l.toLowerCase()),
@@ -722,6 +747,7 @@ export const WatchPage: React.FC = () => {
             streamError={streamError}
             loading={loadingStream}
             episodeKey={episodeKey}
+            logicalEpisodeKey={`${animeId}:${resolvedEpNumber}:${audioMode}`}
             episodeTitle={`${displayTitle} — Episode ${epNumber}`}
             initialTime={initialTime}
             autoNext={autoNext}
@@ -748,8 +774,21 @@ export const WatchPage: React.FC = () => {
                 progressSeconds,
                 durationSeconds,
                 audioMode,
+                serverName: selectedServer || 'KuroStream Global',
               });
             }}
+            onPlaybackTime={(watchedSecondsDelta, _cur, _dur, completedEpisode) => {
+              if (!anime) return;
+              void recordWatchPlayback({
+                animeKey: `anilist:${anime.id}`,
+                animeId: anime.id,
+                episodeNumber: epNumber,
+                episodeKey: effectiveEpisodeId,
+                secondsWatched: watchedSecondsDelta,
+                completed: completedEpisode,
+              });
+            }}
+            onPlaybackHeartbeat={handleHeartbeat}
             onRefreshStream={refreshStream}
             onRetry={loadStream}
             onDownload={handleDownloadCurrentEpisode}
@@ -1229,22 +1268,32 @@ export const WatchPage: React.FC = () => {
               </button>
             </div>
             <div className="overflow-y-auto p-5">
-              <ExtensionManager compact />
+              <Suspense fallback={<div className="h-40 animate-pulse rounded-2xl bg-[#10121c]" />}>
+                <ExtensionManager compact />
+              </Suspense>
             </div>
           </div>
         </div>
       )}
 
-      <DownloadManagerModal
-        isOpen={showDownloadManager}
-        onClose={() => setShowDownloadManager(false)}
-        onPlayOffline={(item) => setOfflinePlayerItem(item)}
-      />
+      {showDownloadManager && (
+        <Suspense fallback={null}>
+          <DownloadManagerModal
+            isOpen={showDownloadManager}
+            onClose={() => setShowDownloadManager(false)}
+            onPlayOffline={(item) => setOfflinePlayerItem(item)}
+          />
+        </Suspense>
+      )}
 
-      <OfflinePlayerModal
-        item={offlinePlayerItem}
-        onClose={() => setOfflinePlayerItem(null)}
-      />
+      {offlinePlayerItem && (
+        <Suspense fallback={null}>
+          <OfflinePlayerModal
+            item={offlinePlayerItem}
+            onClose={() => setOfflinePlayerItem(null)}
+          />
+        </Suspense>
+      )}
     </div>
   );
 };

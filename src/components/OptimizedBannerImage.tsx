@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Image as ImageIcon } from 'lucide-react';
 import { getOptimizedUrls, isImageCached, markImageCached } from '@/src/services/imageCacheService';
 
@@ -22,63 +22,46 @@ export const OptimizedBannerImage: React.FC<OptimizedBannerImageProps> = ({
   onError,
 }) => {
   const { highRes, thumbnail } = getOptimizedUrls(src, thumbnailUrl);
+  const showDistinctThumb = Boolean(thumbnail && thumbnail !== highRes);
 
   const alreadyCached = isImageCached(highRes);
   const [isHighResLoaded, setIsHighResLoaded] = useState<boolean>(alreadyCached);
   const [isThumbLoaded, setIsThumbLoaded] = useState<boolean>(false);
-  const [hasError, setHasError] = useState<boolean>(false);
+  const [hasError, setHasError] = useState<boolean>(!highRes);
+
+  const onLoadRef = useRef(onLoad);
+  const onErrorRef = useRef(onError);
+  onLoadRef.current = onLoad;
+  onErrorRef.current = onError;
+
+  const imgRef = useRef<HTMLImageElement>(null);
 
   useEffect(() => {
     if (!highRes) {
       setHasError(true);
-      return;
-    }
-
-    if (isImageCached(highRes)) {
-      setIsHighResLoaded(true);
-      if (onLoad) onLoad();
+      setIsHighResLoaded(false);
       return;
     }
 
     setHasError(false);
-    setIsHighResLoaded(false);
+    setIsThumbLoaded(false);
 
-    let isSubscribed = true;
-    const img = new Image();
-    img.decoding = 'async';
-    img.crossOrigin = 'anonymous';
+    if (isImageCached(highRes)) {
+      setIsHighResLoaded(true);
+      onLoadRef.current?.();
+      return;
+    }
 
-    img.onload = () => {
-      if (!isSubscribed) return;
+    const el = imgRef.current;
+    if (el && el.complete && el.naturalWidth > 0 && el.getAttribute('src') === highRes) {
       markImageCached(highRes);
       setIsHighResLoaded(true);
-      if (onLoad) onLoad();
-    };
+      onLoadRef.current?.();
+      return;
+    }
 
-    img.onerror = () => {
-      if (!isSubscribed) return;
-      // Retry once without crossOrigin if CORS was the issue
-      const fallbackImg = new Image();
-      fallbackImg.onload = () => {
-        if (!isSubscribed) return;
-        markImageCached(highRes);
-        setIsHighResLoaded(true);
-        if (onLoad) onLoad();
-      };
-      fallbackImg.onerror = () => {
-        if (!isSubscribed) return;
-        setHasError(true);
-        if (onError) onError();
-      };
-      fallbackImg.src = highRes;
-    };
-
-    img.src = highRes;
-
-    return () => {
-      isSubscribed = false;
-    };
-  }, [highRes, onLoad, onError]);
+    setIsHighResLoaded(false);
+  }, [highRes]);
 
   if (hasError) {
     return (
@@ -94,36 +77,43 @@ export const OptimizedBannerImage: React.FC<OptimizedBannerImageProps> = ({
 
   return (
     <div className={`relative overflow-hidden bg-[#0c0e18] ${className}`}>
-      {/* 1. Shimmer Skeleton Placeholder while loading */}
       {!isHighResLoaded && (
-        <div className="absolute inset-0 z-0 bg-gradient-to-r from-white/[0.02] via-white/[0.07] to-white/[0.02] animate-pulse">
-          <div className="h-full w-full bg-violet-900/10" />
-        </div>
+        <div className="absolute inset-0 z-0 bg-gradient-to-br from-violet-950/20 via-[#111322] to-[#0b0d17]" />
       )}
 
-      {/* 2. Low-Resolution WebP Thumbnail (Blur-up technique) */}
-      {!isHighResLoaded && thumbnail && (
+      {!isHighResLoaded && showDistinctThumb && (
         <img
           src={thumbnail}
-          alt={alt}
+          alt=""
+          aria-hidden="true"
           loading={priority ? 'eager' : 'lazy'}
           decoding="async"
           referrerPolicy="no-referrer"
           onLoad={() => setIsThumbLoaded(true)}
-          className={`absolute inset-0 h-full w-full object-cover filter blur-xs scale-105 transition-opacity duration-300 ${
+          className={`absolute inset-0 h-full w-full object-cover blur-xs scale-105 transition-opacity duration-200 ${
             isThumbLoaded ? 'opacity-80' : 'opacity-0'
           }`}
         />
       )}
 
-      {/* 3. Full-Resolution Landscape Banner */}
       <img
+        ref={imgRef}
         src={highRes}
         alt={alt}
         loading={priority ? 'eager' : 'lazy'}
         decoding="async"
+        fetchPriority={priority ? 'high' : undefined}
         referrerPolicy="no-referrer"
-        className={`h-full w-full object-cover transform-gpu transition-opacity duration-300 ${
+        onLoad={() => {
+          markImageCached(highRes);
+          setIsHighResLoaded(true);
+          onLoadRef.current?.();
+        }}
+        onError={() => {
+          setHasError(true);
+          onErrorRef.current?.();
+        }}
+        className={`h-full w-full object-cover transform-gpu transition-opacity duration-200 ${
           isHighResLoaded ? 'opacity-100' : 'opacity-0'
         }`}
       />

@@ -1,8 +1,9 @@
-import React, { useEffect, useState } from 'react';
+import React, { Suspense, lazy, useEffect, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import {
   AlertCircle,
   ArrowRight,
+  Award,
   Bookmark,
   Camera,
   Check,
@@ -11,32 +12,74 @@ import {
   Flame,
   HardDrive,
   Heart,
+  Loader2,
   Package,
   Pause,
   Play,
   RefreshCw,
+  Send,
   Server,
   Settings2,
   ShieldCheck,
+  Sparkles,
   Trash2,
   Trophy,
   User,
   WifiOff,
+  X,
 } from 'lucide-react';
+import { BADGE_ARTWORK_MAP } from '@/src/assets/badgeArtwork';
 import { AchievementsSection } from '@/src/components/AchievementsSection';
-import { AdminDashboardSection } from '@/src/components/AdminDashboardSection';
 import { AnimeImage } from '@/src/components/AnimeImage';
 import { OptimizedBannerImage } from '@/src/components/OptimizedBannerImage';
-import { AvatarGalleryModal } from '@/src/components/AvatarGalleryModal';
-import {
-  DownloadManagerModal,
-  formatDownloadBytes,
-  formatDownloadSpeed,
-} from '@/src/components/DownloadManagerModal';
-import { ExtensionManager } from '@/src/components/ExtensionManager';
-import { OfflinePlayerModal } from '@/src/components/OfflinePlayerModal';
 import { StreakCalendarSection } from '@/src/components/StreakCalendarSection';
+import { handleTelegramSupportClick } from '@/src/components/TelegramSupportButton';
 import { useAuth } from '@/src/context/AuthContext';
+
+const AdminDashboardSection = lazy(() =>
+  import('@/src/components/AdminDashboardSection').then((m) => ({
+    default: m.AdminDashboardSection,
+  }))
+);
+const AvatarGalleryModal = lazy(() =>
+  import('@/src/components/AvatarGalleryModal').then((m) => ({
+    default: m.AvatarGalleryModal,
+  }))
+);
+const DownloadManagerModal = lazy(() =>
+  import('@/src/components/DownloadManagerModal').then((m) => ({
+    default: m.DownloadManagerModal,
+  }))
+);
+const ExtensionManager = lazy(() =>
+  import('@/src/components/ExtensionManager').then((m) => ({
+    default: m.ExtensionManager,
+  }))
+);
+const OfflinePlayerModal = lazy(() =>
+  import('@/src/components/OfflinePlayerModal').then((m) => ({
+    default: m.OfflinePlayerModal,
+  }))
+);
+
+function formatDownloadBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+  if (bytes < 1024) return `${bytes} B`;
+  const kb = bytes / 1024;
+  if (kb < 1024) return `${kb.toFixed(1)} KB`;
+  const mb = kb / 1024;
+  if (mb < 1024) return `${mb.toFixed(1)} MB`;
+  return `${(mb / 1024).toFixed(2)} GB`;
+}
+import {
+  ACHIEVEMENT_BADGES,
+  formatWatchDuration,
+  getEffectiveCurrentStreak,
+  getTotalWatchedDaysCount,
+  MAX_EQUIPPED_BADGES,
+  resolveEffectiveBadges,
+  resolveEquippedBadgeObjects,
+} from '@/src/services/achievementService';
 import {
   cancelOrDeleteDownload,
   getStoredDownloads,
@@ -69,9 +112,13 @@ export const ProfilePage: React.FC = () => {
     favorites,
     history,
     watchStats,
+    equippedBadges,
+    equippingBadgeId,
     openAuthModal,
     signOut,
     updatePreferences,
+    toggleEquipBadge,
+    unequipBadge,
     removeHistoryItem,
     clearHistory,
   } = useAuth();
@@ -141,16 +188,23 @@ export const ProfilePage: React.FC = () => {
     0
   );
 
-  const uniqueAnimeWatched = new Set(history.map((h) => h.animeId)).size;
-  const totalEpisodesCount = watchStats.totalEpisodesCompleted || history.length;
-  const totalMinutes = totalEpisodesCount * 24;
-  const watchTimeFormatted =
-    totalMinutes >= 60
-      ? `${Math.floor(totalMinutes / 60)} hrs ${totalMinutes % 60} mins`
-      : `${totalMinutes} mins`;
+  const totalEpisodesCount = watchStats.totalEpisodesCompleted || 0;
+  const watchTimeFormatted = formatWatchDuration(watchStats.totalWatchSeconds || 0, 'long');
+  const currentStreak = getEffectiveCurrentStreak(watchStats);
+  const totalWatchDaysCount = getTotalWatchedDaysCount(watchStats);
+  const effectiveBadges = resolveEffectiveBadges(watchStats, isAdmin);
+  const unlockedBadgesCount = effectiveBadges.filter((b) => b.progress.unlocked).length;
+  const totalBadgesCount = ACHIEVEMENT_BADGES.length;
+  const equippedBadgeEntries = resolveEquippedBadgeObjects(equippedBadges, watchStats, isAdmin);
 
-  const currentStreak = watchStats.streakCurrent || 0;
-  const unlockedBadgesCount = (watchStats.unlockedAchievements || []).length;
+  const scrollToBadgeCollection = () => {
+    const el = document.getElementById('badge-collection');
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    } else {
+      selectTab('achievements');
+    }
+  };
 
   return (
     <div className="mx-auto max-w-5xl space-y-8 px-4 py-6 sm:px-6 sm:py-10">
@@ -288,6 +342,122 @@ export const ProfilePage: React.FC = () => {
       {/* Overview Dashboard */}
       {activeTab === 'overview' && (
         <div className="space-y-8">
+          {/* MY BADGES SHOWCASE */}
+          <section className="kuro-glass relative overflow-hidden rounded-3xl border border-violet-500/30 p-5 sm:p-6 shadow-[0_0_40px_-14px_rgba(139,92,246,0.35)]">
+            <div
+              aria-hidden="true"
+              className="pointer-events-none absolute -right-14 -top-14 h-44 w-44 rounded-full bg-fuchsia-600/15 blur-3xl"
+            />
+            <div className="relative z-10 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex items-center gap-3">
+                <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border border-violet-400/45 bg-violet-500/20 text-violet-200 shadow-[0_0_18px_rgba(168,85,247,0.4)]">
+                  <Award className="h-5 w-5" />
+                </span>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h2 className="text-base sm:text-lg font-extrabold text-white">
+                      My Badges
+                    </h2>
+                    <span className="rounded-lg border border-violet-400/40 bg-violet-500/20 px-2 py-0.5 text-[11px] font-bold text-violet-200 tabular-nums">
+                      {equippedBadgeEntries.length} / {MAX_EQUIPPED_BADGES}
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-400">
+                    Showcase up to {MAX_EQUIPPED_BADGES} unlocked achievement badges on your profile
+                  </p>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={scrollToBadgeCollection}
+                className="kuro-btn-glass inline-flex min-h-[40px] shrink-0 items-center justify-center gap-1.5 rounded-2xl border border-violet-400/35 px-4 py-2 text-xs font-semibold text-violet-200 hover:border-violet-300 hover:text-white"
+              >
+                <Sparkles className="h-3.5 w-3.5 text-violet-300" />
+                <span>{equippedBadgeEntries.length > 0 ? 'Customize Badges' : 'Add Badges'}</span>
+              </button>
+            </div>
+
+            {equippedBadgeEntries.length === 0 ? (
+              <div className="relative z-10 mt-4 flex flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-white/15 bg-[#090b14]/70 px-4 py-6 text-center">
+                <p className="text-xs sm:text-sm font-semibold text-slate-200">
+                  No badges added to your profile yet
+                </p>
+                <p className="max-w-md text-[11px] sm:text-xs text-slate-400">
+                  {user
+                    ? 'Tap "Add to Profile" on any unlocked badge in your Achievement Badge Collection below to display it here.'
+                    : 'Sign in and unlock achievement badges to showcase them on your profile.'}
+                </p>
+              </div>
+            ) : (
+              <div className="relative z-10 mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-5">
+                {equippedBadgeEntries.map(({ badge }) => {
+                  const artworkSrc = BADGE_ARTWORK_MAP[badge.id];
+                  const isBusy = equippingBadgeId === badge.id;
+                  return (
+                    <div
+                      key={badge.id}
+                      className="group relative flex flex-col items-center rounded-2xl border p-3 text-center transition-all duration-300 hover:-translate-y-0.5"
+                      style={{
+                        borderColor: `${badge.accentHex}88`,
+                        background: `linear-gradient(165deg, ${badge.accentHex}24 0%, rgba(10,12,22,0.96) 72%)`,
+                        boxShadow: `0 0 26px -8px ${badge.accentHex}99, inset 0 1px 0 0 ${badge.secondaryHex}55`,
+                      }}
+                    >
+                      <button
+                        type="button"
+                        disabled={isBusy}
+                        onClick={() => void unequipBadge(badge.id)}
+                        aria-label={`Remove ${badge.title} from My Badges`}
+                        title="Remove from Profile"
+                        className="absolute right-2 top-2 z-10 flex h-7 w-7 items-center justify-center rounded-full border border-white/15 bg-black/65 text-slate-300 transition-colors hover:border-rose-400/60 hover:bg-rose-500/25 hover:text-rose-200 disabled:opacity-60"
+                      >
+                        {isBusy ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <X className="h-3.5 w-3.5" />
+                        )}
+                      </button>
+
+                      <div
+                        className="relative h-16 w-16 sm:h-20 sm:w-20 overflow-hidden rounded-2xl border shadow-lg"
+                        style={{
+                          borderColor: `${badge.secondaryHex}aa`,
+                          boxShadow: `0 0 22px -4px ${badge.accentHex}aa`,
+                        }}
+                      >
+                        {artworkSrc ? (
+                          <img
+                            src={artworkSrc}
+                            alt={badge.title}
+                            loading="eager"
+                            decoding="async"
+                            referrerPolicy="no-referrer"
+                            className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-110"
+                          />
+                        ) : (
+                          <div className="flex h-full w-full items-center justify-center bg-[#0d1020] text-2xl">
+                            {badge.emoji}
+                          </div>
+                        )}
+                      </div>
+
+                      <h3 className="mt-2.5 line-clamp-1 text-xs font-extrabold text-white">
+                        {badge.title}
+                      </h3>
+                      <span
+                        className="mt-0.5 text-[10px] font-semibold uppercase tracking-wide"
+                        style={{ color: badge.secondaryHex }}
+                      >
+                        {badge.badgeLabel}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </section>
+
           {/* MY ACTIVITY */}
           <section className="space-y-4">
             <h2 className="text-xs font-bold uppercase tracking-wider text-violet-400 px-1">
@@ -297,16 +467,20 @@ export const ProfilePage: React.FC = () => {
               <ProfileCard
                 icon={Flame}
                 title="Watch Streak"
-                count={`${currentStreak} Days 🔥`}
-                description={`Total watched: ${totalEpisodesCount} eps · ${watchTimeFormatted}`}
+                count={`${currentStreak} Days`}
+                description={`${totalWatchDaysCount} watch days · ${watchTimeFormatted} · ${totalEpisodesCount} eps`}
                 onClick={() => selectTab('streak')}
                 isAmber
               />
               <ProfileCard
                 icon={Trophy}
                 title="Achievements"
-                count={`${unlockedBadgesCount} / 6 Unlocked`}
-                description="Collector badges & streaming milestones"
+                count={`${unlockedBadgesCount} / ${totalBadgesCount} Unlocked`}
+                description={
+                  isAdmin
+                    ? 'Admin Privilege: All badges permanently unlocked'
+                    : 'Collector badges & streaming milestones'
+                }
                 onClick={() => selectTab('achievements')}
               />
               <ProfileCard
@@ -350,7 +524,7 @@ export const ProfilePage: React.FC = () => {
           {/* APP & STREAMING SETTINGS */}
           <section className="space-y-4">
             <h2 className="text-xs font-bold uppercase tracking-wider text-violet-400 px-1">
-              App &amp; Streaming Settings
+              App &amp; Streaming Settings &amp; Support
             </h2>
             <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2">
               <ProfileLinkCard
@@ -365,6 +539,14 @@ export const ProfilePage: React.FC = () => {
                 count="Aniyomi"
                 description="Manage streaming extension repos & servers"
                 onClick={() => selectTab('sources')}
+              />
+              <ProfileCard
+                icon={Send}
+                title="Telegram Support"
+                count="@rifat_hossain125"
+                description="Need Help? Contact Support instantly on Telegram"
+                onClick={handleTelegramSupportClick}
+                isAmber
               />
             </div>
           </section>
@@ -387,12 +569,52 @@ export const ProfilePage: React.FC = () => {
               </div>
             </section>
           )}
+
+          {/* EMBEDDED MONTHLY WATCH CALENDAR & ACHIEVEMENT BADGES INSIDE MY PROFILE */}
+          <section className="space-y-4 pt-2">
+            <div className="flex items-center justify-between px-1">
+              <h2 className="text-xs font-bold uppercase tracking-wider text-violet-400">
+                Daily Watch Activity &amp; Streak Calendar
+              </h2>
+              <button
+                type="button"
+                onClick={() => selectTab('streak')}
+                className="text-xs font-semibold text-violet-300 hover:text-white transition-colors"
+              >
+                Full View →
+              </button>
+            </div>
+            <StreakCalendarSection stats={watchStats} isAdmin={isAdmin} />
+          </section>
+
+          <section id="badge-collection" className="space-y-4 pt-2">
+            <AchievementsSection
+              stats={watchStats}
+              isAdmin={isAdmin}
+              variant="compact"
+              onViewAll={() => selectTab('achievements')}
+              equippedBadgeIds={equippedBadges}
+              maxEquipped={MAX_EQUIPPED_BADGES}
+              onToggleEquipBadge={toggleEquipBadge}
+              equippingBadgeId={equippingBadgeId}
+            />
+          </section>
         </div>
       )}
 
       {/* SUB-SECTION VIEWS */}
-      {activeTab === 'streak' && <StreakCalendarSection stats={watchStats} />}
-      {activeTab === 'achievements' && <AchievementsSection stats={watchStats} />}
+      {activeTab === 'streak' && <StreakCalendarSection stats={watchStats} isAdmin={isAdmin} />}
+      {activeTab === 'achievements' && (
+        <AchievementsSection
+          stats={watchStats}
+          isAdmin={isAdmin}
+          variant="full"
+          equippedBadgeIds={equippedBadges}
+          maxEquipped={MAX_EQUIPPED_BADGES}
+          onToggleEquipBadge={toggleEquipBadge}
+          equippingBadgeId={equippingBadgeId}
+        />
+      )}
 
       {activeTab === 'continue' && (
         <div className="space-y-4">
@@ -711,36 +933,52 @@ export const ProfilePage: React.FC = () => {
       {activeTab === 'sources' && (
         <div className="space-y-6">
           <h2 className="text-lg font-bold text-white">Streaming Sources &amp; Extensions</h2>
-          <ExtensionManager />
+          <Suspense fallback={<div className="h-40 animate-pulse rounded-3xl bg-[#10121c]" />}>
+            <ExtensionManager />
+          </Suspense>
         </div>
       )}
 
       {activeTab === 'admin' && isAdmin && (
         <div className="space-y-6">
           <h2 className="text-lg font-bold text-white">Admin Dashboard</h2>
-          <AdminDashboardSection />
+          <Suspense fallback={<div className="h-64 animate-pulse rounded-3xl bg-[#10121c]" />}>
+            <AdminDashboardSection />
+          </Suspense>
         </div>
       )}
 
       {/* Modals */}
-      <AvatarGalleryModal
-        isOpen={showAvatarGallery}
-        currentAvatarUrl={preferences.photoURL}
-        displayName={preferences.displayName}
-        onClose={() => setShowAvatarGallery(false)}
-        onSave={handleSaveAvatar}
-      />
+      {showAvatarGallery && (
+        <Suspense fallback={null}>
+          <AvatarGalleryModal
+            isOpen={showAvatarGallery}
+            currentAvatarUrl={preferences.photoURL}
+            displayName={preferences.displayName}
+            onClose={() => setShowAvatarGallery(false)}
+            onSave={handleSaveAvatar}
+          />
+        </Suspense>
+      )}
 
-      <DownloadManagerModal
-        isOpen={showDownloadManager}
-        onClose={() => setShowDownloadManager(false)}
-        onPlayOffline={(item) => setOfflinePlayerItem(item)}
-      />
+      {showDownloadManager && (
+        <Suspense fallback={null}>
+          <DownloadManagerModal
+            isOpen={showDownloadManager}
+            onClose={() => setShowDownloadManager(false)}
+            onPlayOffline={(item) => setOfflinePlayerItem(item)}
+          />
+        </Suspense>
+      )}
 
-      <OfflinePlayerModal
-        item={offlinePlayerItem}
-        onClose={() => setOfflinePlayerItem(null)}
-      />
+      {offlinePlayerItem && (
+        <Suspense fallback={null}>
+          <OfflinePlayerModal
+            item={offlinePlayerItem}
+            onClose={() => setOfflinePlayerItem(null)}
+          />
+        </Suspense>
+      )}
     </div>
   );
 };

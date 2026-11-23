@@ -2,109 +2,167 @@ import { getAnilistApiUrl, logApiDiagnostic, resolveApiUrl } from '@/src/config/
 import type { AiringScheduleItem, AnimeDetail, AnimeSummary } from '@/src/types/anime';
 
 const cache = new Map<string, { expiresAt: number; data: unknown }>();
+const inFlight = new Map<string, Promise<unknown>>();
 const CACHE_TTL_MS = 5 * 60 * 1000;
+const MAX_CACHE_ENTRIES = 120;
+
+function setBoundedCache(key: string, data: unknown, ttlMs = CACHE_TTL_MS): void {
+  if (cache.has(key)) {
+    cache.delete(key);
+  }
+  cache.set(key, { expiresAt: Date.now() + ttlMs, data });
+  while (cache.size > MAX_CACHE_ENTRIES) {
+    const oldestKey = cache.keys().next().value;
+    if (oldestKey === undefined) break;
+    cache.delete(oldestKey);
+  }
+}
 
 async function fetchWithTimeout(
   url: string,
   init: RequestInit,
-  timeoutMs = 12000
+  timeoutMs = 12000,
+  externalSignal?: AbortSignal
 ): Promise<Response> {
+  if (externalSignal?.aborted) {
+    throw new DOMException('Aborted', 'AbortError');
+  }
   const controller = new AbortController();
+  const onExternalAbort = () => controller.abort();
+  externalSignal?.addEventListener('abort', onExternalAbort, { once: true });
   const timer = window.setTimeout(() => controller.abort(), timeoutMs);
   try {
     return await fetch(url, { ...init, signal: controller.signal });
   } finally {
     window.clearTimeout(timer);
+    externalSignal?.removeEventListener('abort', onExternalAbort);
   }
 }
 
-async function gqlFetch<T>(query: string, variables: Record<string, unknown> = {}): Promise<T> {
+async function gqlFetch<T>(
+  query: string,
+  variables: Record<string, unknown> = {},
+  signal?: AbortSignal
+): Promise<T> {
   const key = JSON.stringify({ query, variables });
   const now = Date.now();
   const cached = cache.get(key);
   if (cached && cached.expiresAt > now) {
+    // Refresh LRU order
+    cache.delete(key);
+    cache.set(key, cached);
     return cached.data as T;
   }
 
-  const directUrl = getAnilistApiUrl();
-  const proxyUrl = resolveApiUrl('/api/anilist');
-  const endpoints = proxyUrl !== directUrl ? [directUrl, proxyUrl] : [directUrl];
-  const body = JSON.stringify({ query, variables });
+  if (signal?.aborted) {
+    throw new DOMException('Aborted', 'AbortError');
+  }
 
-  let lastError: Error | null = null;
-
-  for (const endpoint of endpoints) {
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      try {
-        const response = await fetchWithTimeout(
-          endpoint,
-          {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Accept: 'application/json',
-            },
-            body,
-          },
-          12000
-        );
-
-        if (response.status === 429 || response.status >= 500) {
-          logApiDiagnostic('AniList', endpoint, {
-            status: response.status,
-            message: `HTTP ${response.status} on attempt ${attempt + 1}`,
-          });
-          lastError = new Error(`AniList metadata request failed with HTTP ${response.status}`);
-          if (attempt === 0) {
-            await new Promise((r) => setTimeout(r, 450));
-            continue;
-          }
-          break;
-        }
-
-        if (!response.ok) {
-          logApiDiagnostic('AniList', endpoint, {
-            status: response.status,
-            message: `Unexpected HTTP ${response.status}`,
-          });
-          throw new Error(`AniList metadata request failed with HTTP ${response.status}`);
-        }
-
-        const payload = await response.json();
-        if (payload?.errors?.length) {
-          logApiDiagnostic('AniList', endpoint, {
-            status: response.status,
-            message: payload.errors[0]?.message || 'AniList GraphQL error',
-          });
-          throw new Error(payload.errors[0]?.message || 'AniList GraphQL error');
-        }
-        if (!payload?.data) {
-          throw new Error('AniList returned an empty data payload.');
-        }
-
-        cache.set(key, { expiresAt: Date.now() + CACHE_TTL_MS, data: payload.data });
-        return payload.data as T;
-      } catch (err) {
-        const msg =
-          err instanceof Error
-            ? err.name === 'AbortError'
-              ? 'AniList metadata request timed out. Please check your connection.'
-              : err.message
-            : 'Unable to reach AniList catalog.';
-        logApiDiagnostic('AniList', endpoint, {
-          message: msg,
-          extra: { attempt: attempt + 1 },
-        });
-        lastError = new Error(msg);
-      }
+  if (!signal) {
+    const existingFlight = inFlight.get(key);
+    if (existingFlight) {
+      return existingFlight as Promise<T>;
     }
   }
 
-  if (cached?.data) {
-    return cached.data as T;
+  const execute = async (): Promise<T> => {
+    const directUrl = getAnilistApiUrl();
+    const proxyUrl = resolveApiUrl('/api/anilist');
+    const endpoints = proxyUrl !== directUrl ? [directUrl, proxyUrl] : [directUrl];
+    const body = JSON.stringify({ query, variables });
+
+    let lastError: Error | null = null;
+
+    for (const endpoint of endpoints) {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        if (signal?.aborted) {
+          throw new DOMException('Aborted', 'AbortError');
+        }
+        try {
+          const response = await fetchWithTimeout(
+            endpoint,
+            {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                Accept: 'application/json',
+              },
+              body,
+            },
+            12000,
+            signal
+          );
+
+          if (response.status === 429 || response.status >= 500) {
+            logApiDiagnostic('AniList', endpoint, {
+              status: response.status,
+              message: `HTTP ${response.status} on attempt ${attempt + 1}`,
+            });
+            lastError = new Error(`AniList metadata request failed with HTTP ${response.status}`);
+            if (attempt === 0) {
+              await new Promise((r) => setTimeout(r, 450));
+              continue;
+            }
+            break;
+          }
+
+          if (!response.ok) {
+            logApiDiagnostic('AniList', endpoint, {
+              status: response.status,
+              message: `Unexpected HTTP ${response.status}`,
+            });
+            throw new Error(`AniList metadata request failed with HTTP ${response.status}`);
+          }
+
+          const payload = await response.json();
+          if (payload?.errors?.length) {
+            logApiDiagnostic('AniList', endpoint, {
+              status: response.status,
+              message: payload.errors[0]?.message || 'AniList GraphQL error',
+            });
+            throw new Error(payload.errors[0]?.message || 'AniList GraphQL error');
+          }
+          if (!payload?.data) {
+            throw new Error('AniList returned an empty data payload.');
+          }
+
+          setBoundedCache(key, payload.data, CACHE_TTL_MS);
+          return payload.data as T;
+        } catch (err) {
+          if (err instanceof Error && err.name === 'AbortError' && signal?.aborted) {
+            throw err;
+          }
+          const msg =
+            err instanceof Error
+              ? err.name === 'AbortError'
+                ? 'AniList metadata request timed out. Please check your connection.'
+                : err.message
+              : 'Unable to reach AniList catalog.';
+          logApiDiagnostic('AniList', endpoint, {
+            message: msg,
+            extra: { attempt: attempt + 1 },
+          });
+          lastError = new Error(msg);
+        }
+      }
+    }
+
+    if (cached?.data) {
+      return cached.data as T;
+    }
+
+    throw lastError || new Error('Unable to load AniList catalog.');
+  };
+
+  if (signal) {
+    return execute();
   }
 
-  throw lastError || new Error('Unable to load AniList catalog.');
+  const flightPromise = execute().finally(() => {
+    inFlight.delete(key);
+  });
+  inFlight.set(key, flightPromise);
+  return flightPromise;
 }
 
 const SUMMARY_FIELDS = `
@@ -148,6 +206,15 @@ export interface HomeSectionsData {
   latestEpisodes: AnimeSummary[];
   recentlyUpdated: AnimeSummary[];
   upcoming: AnimeSummary[];
+}
+
+let lastHomeSectionsSnapshot: { expiresAt: number; data: HomeSectionsData } | null = null;
+
+export function peekHomeSectionsCache(): HomeSectionsData | null {
+  if (lastHomeSectionsSnapshot && lastHomeSectionsSnapshot.expiresAt > Date.now()) {
+    return lastHomeSectionsSnapshot.data;
+  }
+  return null;
 }
 
 export async function getHomeSections(): Promise<HomeSectionsData> {
@@ -200,7 +267,7 @@ export async function getHomeSections(): Promise<HomeSectionsData> {
     (item): item is AnimeSummary => Boolean(item)
   );
 
-  return {
+  const result: HomeSectionsData = {
     featuredPriority: orderedFeatured,
     trending: data.trending?.media || [],
     popular: data.popular?.media || [],
@@ -208,6 +275,8 @@ export async function getHomeSections(): Promise<HomeSectionsData> {
     recentlyUpdated: data.recentlyUpdated?.media || [],
     upcoming: data.upcoming?.media || [],
   };
+  lastHomeSectionsSnapshot = { expiresAt: Date.now() + CACHE_TTL_MS, data: result };
+  return result;
 }
 
 export async function getAnimeDetails(id: number): Promise<AnimeDetail> {
@@ -261,6 +330,7 @@ export interface SearchFilters {
   idIn?: number[];
   page?: number;
   perPage?: number;
+  signal?: AbortSignal;
 }
 
 export interface SearchPageResult {
@@ -321,7 +391,7 @@ export async function searchAnime(filters: SearchFilters): Promise<SearchPageRes
       pageInfo?: { total?: number; currentPage?: number; hasNextPage?: boolean };
       media?: AnimeSummary[];
     };
-  }>(query, variables);
+  }>(query, variables, filters.signal);
 
   return {
     items: (data.Page?.media || []).filter((item): item is AnimeSummary => Boolean(item && item.id)),

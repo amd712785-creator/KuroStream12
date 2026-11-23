@@ -41,6 +41,7 @@ interface VideoPlayerProps {
   streamError?: StreamFetchError | null;
   loading: boolean;
   episodeKey?: string;
+  logicalEpisodeKey?: string;
   episodeTitle: string;
   initialTime?: number;
   autoNext: boolean;
@@ -56,6 +57,17 @@ interface VideoPlayerProps {
   onNextEpisode?: () => void;
   onPreviousEpisode?: () => void;
   onProgress?: (currentTime: number, duration: number) => void;
+  onPlaybackTime?: (
+    watchedSecondsDelta: number,
+    currentTime: number,
+    duration: number,
+    completedEpisode: boolean
+  ) => void;
+  onPlaybackHeartbeat?: (
+    currentTime: number,
+    duration: number,
+    isPlaying: boolean
+  ) => void;
   onRefreshStream?: () => Promise<boolean>;
   onRetry: () => void;
   onDownload?: () => void;
@@ -96,6 +108,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   streamError,
   loading,
   episodeKey,
+  logicalEpisodeKey,
   episodeTitle,
   initialTime = 0,
   autoNext,
@@ -111,6 +124,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   onNextEpisode,
   onPreviousEpisode,
   onProgress,
+  onPlaybackTime,
+  onPlaybackHeartbeat,
   onRefreshStream,
   onRetry,
   onDownload,
@@ -133,8 +148,21 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const directAttemptedRef = useRef(false);
   const lastSavedVideoTimeRef = useRef(-10);
   const lastSavedWallMsRef = useRef(0);
+  const lastUiTimeUpdateRef = useRef(-1);
+  const accumulatedWatchSecRef = useRef(0);
+  const episodeCompletedRef = useRef(false);
+  const episodeActiveSecsRef = useRef(0);
+  const effectiveLogicalKey = logicalEpisodeKey || episodeKey || '';
+  const prevLogicalKeyRef = useRef<string>(effectiveLogicalKey);
+  const liveSnapshotRef = useRef<{ key: string; time: number; shouldPlay: boolean } | null>(null);
+  const audioModeRef = useRef(audioMode);
+  audioModeRef.current = audioMode;
   const onProgressRef = useRef(onProgress);
   onProgressRef.current = onProgress;
+  const onPlaybackTimeRef = useRef(onPlaybackTime);
+  onPlaybackTimeRef.current = onPlaybackTime;
+  const onPlaybackHeartbeatRef = useRef(onPlaybackHeartbeat);
+  onPlaybackHeartbeatRef.current = onPlaybackHeartbeat;
   const onRefreshStreamRef = useRef(onRefreshStream);
   onRefreshStreamRef.current = onRefreshStream;
 
@@ -177,7 +205,30 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const activeOutro = skipOutro || streamData?.outro;
   const activeRecap = skipRecap || streamData?.recap;
 
+  const flushPlaybackTime = useCallback((markComplete = false) => {
+    const delta = accumulatedWatchSecRef.current;
+    const shouldComplete = markComplete && !episodeCompletedRef.current;
+    if (delta <= 0 && !shouldComplete) return;
+
+    accumulatedWatchSecRef.current = 0;
+    if (shouldComplete) {
+      episodeCompletedRef.current = true;
+    }
+
+    const v = videoRef.current;
+    onPlaybackTimeRef.current?.(delta, v?.currentTime || 0, v?.duration || 0, shouldComplete);
+  }, []);
+
   useEffect(() => {
+    const prevLogicalKey = prevLogicalKeyRef.current;
+    const isSameLogicalEpisode = Boolean(
+      effectiveLogicalKey && prevLogicalKey && prevLogicalKey === effectiveLogicalKey
+    );
+    const liveSnap = liveSnapshotRef.current;
+    const v = videoRef.current;
+    const liveTime = v && v.currentTime > 1 ? v.currentTime : liveSnap?.key === effectiveLogicalKey ? liveSnap.time : 0;
+    const liveShouldPlay = v ? !v.paused : Boolean(liveSnap?.shouldPlay);
+
     setSelectedSourceIndex(0);
     setSelectedSubtitleIndex(0);
     setMediaError(null);
@@ -187,15 +238,32 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     setHindiAudioWarning(null);
     setAudioTracks([]);
     setSelectedAudioTrackIndex(-1);
-    hasAppliedInitialSeekRef.current = false;
-    resumeStateRef.current = null;
     networkRetryCountRef.current = 0;
     mediaRetryCountRef.current = 0;
     refreshAttemptCountRef.current = 0;
     directAttemptedRef.current = false;
-    lastSavedVideoTimeRef.current = -10;
-    lastSavedWallMsRef.current = 0;
-  }, [episodeKey]);
+    lastUiTimeUpdateRef.current = -1;
+
+    if (isSameLogicalEpisode && liveTime > 1) {
+      hasAppliedInitialSeekRef.current = true;
+      resumeStateRef.current = { time: liveTime, shouldPlay: liveShouldPlay };
+    } else {
+      hasAppliedInitialSeekRef.current = false;
+      resumeStateRef.current = null;
+      lastSavedVideoTimeRef.current = -10;
+      lastSavedWallMsRef.current = 0;
+      accumulatedWatchSecRef.current = 0;
+      episodeCompletedRef.current = false;
+      episodeActiveSecsRef.current = 0;
+      liveSnapshotRef.current = null;
+    }
+
+    prevLogicalKeyRef.current = effectiveLogicalKey;
+
+    return () => {
+      flushPlaybackTime(false);
+    };
+  }, [episodeKey, effectiveLogicalKey, flushPlaybackTime]);
 
   useEffect(() => {
     setMediaError(null);
@@ -230,6 +298,77 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       videoRef.current.playbackRate = playbackRate;
     }
   }, [playbackRate]);
+
+  // Measure real active playback time (immune to refreshes, paused videos, or hidden background tabs)
+  useEffect(() => {
+    if (loading || streamError || mediaError || !activeSourceUrl) return;
+
+    const tick = () => {
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
+        return;
+      }
+
+      if (activeSourceType === 'embed') {
+        if (iframeLoading) return;
+        accumulatedWatchSecRef.current += 1;
+        episodeActiveSecsRef.current += 1;
+        // For external embed players without video DOM access, count completion after 12 real watched mins
+        const shouldCompleteEmbed =
+          !episodeCompletedRef.current && episodeActiveSecsRef.current >= 12 * 60;
+        if (shouldCompleteEmbed || accumulatedWatchSecRef.current >= 30) {
+          flushPlaybackTime(shouldCompleteEmbed);
+        }
+        return;
+      }
+
+      const v = videoRef.current;
+      if (!v || v.paused || v.ended || v.readyState < 2) {
+        return;
+      }
+
+      accumulatedWatchSecRef.current += 1;
+      episodeActiveSecsRef.current += 1;
+
+      const dur = v.duration || 0;
+      const reachedEndThreshold =
+        !episodeCompletedRef.current &&
+        dur > 60 &&
+        v.currentTime / dur >= 0.85 &&
+        episodeActiveSecsRef.current >= 20;
+
+      if (reachedEndThreshold || accumulatedWatchSecRef.current >= 30) {
+        flushPlaybackTime(reachedEndThreshold);
+      }
+
+      if (episodeActiveSecsRef.current % 15 === 0 && !v.paused && !v.ended) {
+        onPlaybackHeartbeatRef.current?.(v.currentTime, dur, true);
+      }
+    };
+
+    const intervalId = window.setInterval(tick, 1000);
+    const handleVisibility = () => {
+      if (document.visibilityState === 'hidden') {
+        flushPlaybackTime(false);
+        const v = videoRef.current;
+        onPlaybackHeartbeatRef.current?.(v?.currentTime || 0, v?.duration || 0, false);
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+
+    return () => {
+      window.clearInterval(intervalId);
+      document.removeEventListener('visibilitychange', handleVisibility);
+      onPlaybackHeartbeatRef.current?.(0, 0, false);
+    };
+  }, [
+    loading,
+    streamError,
+    mediaError,
+    activeSourceUrl,
+    activeSourceType,
+    iframeLoading,
+    flushPlaybackTime,
+  ]);
 
   const triggerSignedRefresh = useCallback(async (): Promise<boolean> => {
     if (!onRefreshStreamRef.current || refreshAttemptCountRef.current >= 1) {
@@ -318,8 +457,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
             enableWorker: !isNativeWebView,
             lowLatencyMode: false,
             startFragPrefetch: true,
-            maxBufferLength: 30,
-            maxMaxBufferLength: 60,
+            backBufferLength: isNativeWebView ? 15 : 25,
+            maxBufferLength: isNativeWebView ? 20 : 30,
+            maxMaxBufferLength: isNativeWebView ? 40 : 60,
             maxBufferHole: 0.5,
             nudgeMaxRetry: 5,
             manifestLoadingTimeOut: 15000,
@@ -342,7 +482,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               }))
             );
 
-            if (audioMode === 'hindi' && tracks.length > 0) {
+            if (audioModeRef.current === 'hindi' && tracks.length > 0) {
               const hindiIdx = tracks.findIndex(
                 (t) =>
                   (t.lang && t.lang.toLowerCase().startsWith('hi')) ||
@@ -450,8 +590,40 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         hlsRef.current.destroy();
         hlsRef.current = null;
       }
+      if (video) {
+        try {
+          video.pause();
+          video.removeAttribute('src');
+          video.load();
+        } catch {
+          // ignore media cleanup errors
+        }
+      }
     };
-  }, [activeSourceUrl, activeSourceType, refererHeader, useDirectFallback, triggerSignedRefresh, audioMode, isMunchyrollSelected]);
+  }, [activeSourceUrl, activeSourceType, refererHeader, useDirectFallback, triggerSignedRefresh, isMunchyrollSelected]);
+
+  // Switch embedded HLS audio tracks without tearing down and reloading the HLS instance
+  useEffect(() => {
+    const hls = hlsRef.current;
+    if (!hls || audioTracks.length === 0) return;
+    if (audioMode === 'hindi') {
+      const hindiIdx = audioTracks.findIndex(
+        (t) =>
+          (t.lang && t.lang.toLowerCase().startsWith('hi')) ||
+          (t.name &&
+            (t.name.toLowerCase().includes('hindi') || t.name.toLowerCase().includes('hin')))
+      );
+      if (hindiIdx >= 0) {
+        hls.audioTrack = hindiIdx;
+        setSelectedAudioTrackIndex(hindiIdx);
+        setHindiAudioWarning(null);
+      } else {
+        setHindiAudioWarning('Hindi audio track not found in stream. Playing default audio.');
+      }
+    } else {
+      setHindiAudioWarning(null);
+    }
+  }, [audioMode, audioTracks]);
 
   useEffect(() => {
     if (autoNextCountdown === null) return;
@@ -635,8 +807,24 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     if (!video) return;
     const nowTime = video.currentTime;
     const totalDur = video.duration || 0;
-    setCurrentTime(nowTime);
-    setDuration(totalDur);
+
+    if (effectiveLogicalKey && nowTime > 1) {
+      liveSnapshotRef.current = {
+        key: effectiveLogicalKey,
+        time: nowTime,
+        shouldPlay: !video.paused,
+      };
+    }
+
+    if (
+      lastUiTimeUpdateRef.current < 0 ||
+      Math.abs(nowTime - lastUiTimeUpdateRef.current) >= 0.45 ||
+      (totalDur > 0 && nowTime >= totalDur - 0.5)
+    ) {
+      lastUiTimeUpdateRef.current = nowTime;
+      setCurrentTime(nowTime);
+      setDuration(totalDur);
+    }
 
     const nowMs = Date.now();
     if (
@@ -844,18 +1032,31 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               playsInline
               preload="auto"
               onClick={togglePlay}
-              onPlay={() => setIsPlaying(true)}
+              onPlay={() => {
+                setIsPlaying(true);
+                if (videoRef.current) {
+                  onPlaybackHeartbeatRef.current?.(videoRef.current.currentTime, videoRef.current.duration || 0, true);
+                }
+              }}
               onPlaying={() => {
                 setIsPlaying(true);
                 setIsBuffering(false);
+                if (videoRef.current) {
+                  onPlaybackHeartbeatRef.current?.(videoRef.current.currentTime, videoRef.current.duration || 0, true);
+                }
               }}
               onPause={() => {
                 setIsPlaying(false);
                 if (videoRef.current && videoRef.current.currentTime > 0) {
                   flushProgress(videoRef.current.currentTime, videoRef.current.duration || 0);
                 }
+                flushPlaybackTime(false);
+                onPlaybackHeartbeatRef.current?.(videoRef.current?.currentTime || 0, videoRef.current?.duration || 0, false);
               }}
-              onWaiting={() => setIsBuffering(true)}
+              onWaiting={() => {
+                setIsBuffering(true);
+                onPlaybackHeartbeatRef.current?.(videoRef.current?.currentTime || 0, videoRef.current?.duration || 0, false);
+              }}
               onStalled={() => setIsBuffering(true)}
               onSeeking={() => setIsBuffering(true)}
               onSeeked={() => setIsBuffering(false)}
@@ -868,6 +1069,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                 if (videoRef.current) {
                   flushProgress(videoRef.current.duration || 0, videoRef.current.duration || 0);
                 }
+                flushPlaybackTime(episodeActiveSecsRef.current >= 15);
+                onPlaybackHeartbeatRef.current?.(videoRef.current?.duration || 0, videoRef.current?.duration || 0, false);
                 if (autoNext && hasNextEpisode) {
                   setAutoNextCountdown(5);
                 }

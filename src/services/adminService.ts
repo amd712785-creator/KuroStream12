@@ -208,60 +208,122 @@ export async function fetchAdminRegisteredUsersStats(): Promise<RegisteredUsersS
 
 export async function uploadBannerImage(
   idToken: string,
-  file: File
+  file: File,
+  onProgress?: (percent: number) => void
 ): Promise<{ imageUrl: string; mimeType: string; size: number }> {
-  const allowedTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
-  if (!allowedTypes.includes(file.type)) {
-    throw new Error('Only JPG, PNG, WebP, or GIF images are allowed.');
+  const allowedTypes = new Set([
+    'image/jpeg',
+    'image/jpg',
+    'image/pjpeg',
+    'image/png',
+    'image/webp',
+    'image/gif',
+  ]);
+  const mime = (file.type || '').trim().toLowerCase();
+  const hasSupportedExt = /\.(jpe?g|png|webp|gif)$/i.test(file.name || '');
+
+  if (mime && mime !== 'application/octet-stream' && !allowedTypes.has(mime)) {
+    throw new AdminApiError('Only JPG, PNG, WebP, or GIF images are allowed.', 400, 'INVALID_IMAGE_TYPE');
   }
-  if (file.size > 5 * 1024 * 1024) {
-    throw new Error('Image size must not exceed 5 MB.');
-  }
-
-  const dataUrl = await new Promise<string>((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result || ''));
-    reader.onerror = () => reject(new Error('Failed to read selected image file.'));
-    reader.readAsDataURL(file);
-  });
-
-  const token = assertValidBearerToken(idToken);
-  const res = await fetch(resolveApiUrl('/api/admin/banners/upload'), {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${token}`,
-    },
-    body: JSON.stringify({
-      filename: file.name,
-      mimeType: file.type,
-      dataBase64: dataUrl,
-    }),
-  });
-
-  const parsed = await parseSafeJsonResponse<{
-    imageUrl?: string;
-    mimeType?: string;
-    size?: number;
-    error?: unknown;
-    code?: string;
-  }>(res);
-  const data = parsed.data;
-  if (!parsed.ok || !data?.imageUrl) {
+  if ((!mime || mime === 'application/octet-stream') && !hasSupportedExt) {
     throw new AdminApiError(
-      extractErrorMessage(
-        data || parsed.rawText,
-        `Failed to upload image (HTTP ${parsed.status})`
-      ),
-      parsed.status,
-      data?.code
+      'Unsupported file format. Please choose a JPG, PNG, WebP, or GIF image.',
+      400,
+      'INVALID_IMAGE_TYPE'
     );
   }
-  return {
-    imageUrl: data.imageUrl,
-    mimeType: data.mimeType || file.type,
-    size: data.size || file.size,
-  };
+  if (file.size <= 0) {
+    throw new AdminApiError('Selected image file is empty.', 400, 'EMPTY_FILE');
+  }
+  if (file.size > 8 * 1024 * 1024) {
+    throw new AdminApiError('Image size must not exceed 8 MB.', 413, 'FILE_TOO_LARGE');
+  }
+
+  const token = assertValidBearerToken(idToken);
+  const uploadUrl = resolveApiUrl('/api/admin/banners/upload');
+  const formData = new FormData();
+  formData.append('image', file, file.name || 'banner.jpg');
+
+  onProgress?.(5);
+
+  return new Promise<{ imageUrl: string; mimeType: string; size: number }>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', uploadUrl, true);
+    xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+    xhr.setRequestHeader('Accept', 'application/json');
+    xhr.timeout = 60000;
+
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable && event.total > 0) {
+        const pct = Math.max(5, Math.min(95, Math.round((event.loaded / event.total) * 100)));
+        onProgress?.(pct);
+      }
+    };
+
+    xhr.onload = () => {
+      interface UploadBannerResponse {
+        imageUrl?: string;
+        mimeType?: string;
+        size?: number;
+        error?: unknown;
+        code?: string;
+      }
+      let parsedData: UploadBannerResponse | null = null;
+      const rawText = xhr.responseText || '';
+      try {
+        parsedData = rawText ? (JSON.parse(rawText) as UploadBannerResponse) : null;
+      } catch {
+        parsedData = null;
+      }
+
+      if (xhr.status >= 200 && xhr.status < 300 && parsedData?.imageUrl) {
+        onProgress?.(100);
+        resolve({
+          imageUrl: parsedData.imageUrl,
+          mimeType: parsedData.mimeType || mime || 'image/jpeg',
+          size: parsedData.size || file.size,
+        });
+        return;
+      }
+
+      reject(
+        new AdminApiError(
+          extractErrorMessage(
+            parsedData || rawText,
+            `Failed to upload image (HTTP ${xhr.status || 500})`
+          ),
+          xhr.status || 500,
+          parsedData?.code
+        )
+      );
+    };
+
+    xhr.onerror = () => {
+      reject(
+        new AdminApiError(
+          'Network error while uploading image. Please check your connection and try again.',
+          0,
+          'NETWORK_ERROR'
+        )
+      );
+    };
+
+    xhr.ontimeout = () => {
+      reject(
+        new AdminApiError(
+          'Image upload timed out. Please try a smaller image or check your network.',
+          408,
+          'UPLOAD_TIMEOUT'
+        )
+      );
+    };
+
+    xhr.onabort = () => {
+      reject(new AdminApiError('Image upload was cancelled.', 499, 'UPLOAD_ABORTED'));
+    };
+
+    xhr.send(formData);
+  });
 }
 
 function mapBannerDoc(id: string, data: Record<string, unknown>): PopupBanner {

@@ -116,12 +116,115 @@ export interface AnimeWorldEpisodesResponse {
   error?: string;
 }
 
-async function fetchAwWithTimeout(endpointUrl: string, timeoutMs = 15000): Promise<{
+interface AwCacheEntry<T> {
+  data: T;
+  expiresAt: number;
+}
+
+const AW_CACHE_MAX = 80;
+const awMemoryCache = new Map<string, AwCacheEntry<unknown>>();
+const awInFlight = new Map<string, Promise<unknown>>();
+const AW_HOME_SNAPSHOT_KEY = 'kuro_aw_home_v1';
+const AW_SERIES1_SNAPSHOT_KEY = 'kuro_aw_series1_v1';
+
+function readAwCache<T>(key: string): T | null {
+  const entry = awMemoryCache.get(key);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) {
+    awMemoryCache.delete(key);
+    return null;
+  }
+  awMemoryCache.delete(key);
+  awMemoryCache.set(key, entry);
+  return entry.data as T;
+}
+
+function writeAwCache<T>(key: string, data: T, ttlMs: number): void {
+  if (awMemoryCache.has(key)) {
+    awMemoryCache.delete(key);
+  } else if (awMemoryCache.size >= AW_CACHE_MAX) {
+    const oldest = awMemoryCache.keys().next().value;
+    if (oldest !== undefined) awMemoryCache.delete(oldest);
+  }
+  awMemoryCache.set(key, { data, expiresAt: Date.now() + ttlMs });
+}
+
+function readSessionSnapshot<T>(key: string): T | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = window.sessionStorage.getItem(key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as AwCacheEntry<T>;
+    if (!parsed || typeof parsed.expiresAt !== 'number' || Date.now() > parsed.expiresAt) {
+      window.sessionStorage.removeItem(key);
+      return null;
+    }
+    return parsed.data;
+  } catch {
+    return null;
+  }
+}
+
+function writeSessionSnapshot<T>(key: string, data: T, ttlMs: number): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.sessionStorage.setItem(key, JSON.stringify({ data, expiresAt: Date.now() + ttlMs }));
+  } catch {
+    // Ignore storage quota errors
+  }
+}
+
+export function peekAnimeWorldHomeSnapshot(): {
+  home: AnimeWorldHomeResponse | null;
+  seriesPage1: AnimeWorldSeriesListResponse | null;
+} {
+  const memHome = readAwCache<AnimeWorldHomeResponse>('aw:home');
+  const memSeries1 = readAwCache<AnimeWorldSeriesListResponse>('aw:series:1');
+  const home = memHome || readSessionSnapshot<AnimeWorldHomeResponse>(AW_HOME_SNAPSHOT_KEY);
+  const seriesPage1 =
+    memSeries1 || readSessionSnapshot<AnimeWorldSeriesListResponse>(AW_SERIES1_SNAPSHOT_KEY);
+  if (home && !memHome) writeAwCache('aw:home', home, 120_000);
+  if (seriesPage1 && !memSeries1) writeAwCache('aw:series:1', seriesPage1, 120_000);
+  return { home, seriesPage1 };
+}
+
+async function withAwCachedDedup<T>(
+  cacheKey: string,
+  ttlMs: number,
+  fetcher: () => Promise<T>,
+  shouldCache: (val: T) => boolean = () => true
+): Promise<T> {
+  const cached = readAwCache<T>(cacheKey);
+  if (cached !== null) return cached;
+
+  const existing = awInFlight.get(cacheKey);
+  if (existing) return existing as Promise<T>;
+
+  const task = fetcher()
+    .then((res) => {
+      if (shouldCache(res)) {
+        writeAwCache(cacheKey, res, ttlMs);
+      }
+      return res;
+    })
+    .finally(() => {
+      awInFlight.delete(cacheKey);
+    });
+
+  awInFlight.set(cacheKey, task);
+  return task;
+}
+
+async function fetchAwWithTimeout(
+  endpointUrl: string,
+  timeoutMs = 15000,
+  signal?: AbortSignal
+): Promise<{
   resolvedUrl: string;
   res: Response;
 }> {
   const resolvedUrl = resolveApiUrl(endpointUrl);
-  const res = await authorizedApiFetch(resolvedUrl, { timeoutMs });
+  const res = await authorizedApiFetch(resolvedUrl, { timeoutMs, signal });
   return { resolvedUrl, res };
 }
 
@@ -149,118 +252,166 @@ export function isGenuineMediaDownloadUrl(rawUrl?: string | null): rawUrl is str
 }
 
 export async function fetchAnimeWorldHome(): Promise<AnimeWorldHomeResponse> {
-  const endpoint = `${AW_BASE}/home.php`;
-  const { resolvedUrl, res } = await fetchAwWithTimeout(endpoint);
-  const parsed = await parseSafeJsonResponse<AnimeWorldHomeResponse>(res);
-  if (!parsed.ok || !parsed.data || parsed.data.success === false) {
-    const msg = extractErrorMessage(
-      parsed.data || parsed.rawText,
-      `AnimeWorld India homepage returned HTTP ${parsed.status}`
-    );
-    logApiDiagnostic('AnimeWorldHome', resolvedUrl, { status: parsed.status, message: msg });
-    throw new Error(msg);
-  }
-  return parsed.data;
+  return withAwCachedDedup('aw:home', 120_000, async () => {
+    const endpoint = `${AW_BASE}/home.php`;
+    const { resolvedUrl, res } = await fetchAwWithTimeout(endpoint);
+    const parsed = await parseSafeJsonResponse<AnimeWorldHomeResponse>(res);
+    if (!parsed.ok || !parsed.data || parsed.data.success === false) {
+      const msg = extractErrorMessage(
+        parsed.data || parsed.rawText,
+        `AnimeWorld India homepage returned HTTP ${parsed.status}`
+      );
+      logApiDiagnostic('AnimeWorldHome', resolvedUrl, { status: parsed.status, message: msg });
+      throw new Error(msg);
+    }
+    writeSessionSnapshot(AW_HOME_SNAPSHOT_KEY, parsed.data, 120_000);
+    return parsed.data;
+  });
 }
 
 export async function fetchAnimeWorldSeries(page = 1): Promise<AnimeWorldSeriesListResponse> {
-  const endpoint = `${AW_BASE}/series.php?p=${encodeURIComponent(String(page))}`;
-  const { resolvedUrl, res } = await fetchAwWithTimeout(endpoint);
-  const parsed = await parseSafeJsonResponse<AnimeWorldSeriesListResponse>(res);
-  if (!parsed.ok || !parsed.data || parsed.data.success === false) {
-    const msg = extractErrorMessage(
-      parsed.data || parsed.rawText,
-      `AnimeWorld India series list returned HTTP ${parsed.status}`
-    );
-    logApiDiagnostic('AnimeWorldSeries', resolvedUrl, { status: parsed.status, message: msg });
-    throw new Error(msg);
-  }
-  return parsed.data;
+  return withAwCachedDedup(`aw:series:${page}`, 120_000, async () => {
+    const endpoint = `${AW_BASE}/series.php?p=${encodeURIComponent(String(page))}`;
+    const { resolvedUrl, res } = await fetchAwWithTimeout(endpoint);
+    const parsed = await parseSafeJsonResponse<AnimeWorldSeriesListResponse>(res);
+    if (!parsed.ok || !parsed.data || parsed.data.success === false) {
+      const msg = extractErrorMessage(
+        parsed.data || parsed.rawText,
+        `AnimeWorld India series list returned HTTP ${parsed.status}`
+      );
+      logApiDiagnostic('AnimeWorldSeries', resolvedUrl, { status: parsed.status, message: msg });
+      throw new Error(msg);
+    }
+    if (page === 1) {
+      writeSessionSnapshot(AW_SERIES1_SNAPSHOT_KEY, parsed.data, 120_000);
+    }
+    return parsed.data;
+  });
 }
 
 export async function fetchAnimeWorldMovies(page = 1): Promise<AnimeWorldMoviesListResponse> {
-  const endpoint = `${AW_BASE}/movie.php?p=${encodeURIComponent(String(page))}`;
-  const { resolvedUrl, res } = await fetchAwWithTimeout(endpoint);
-  const parsed = await parseSafeJsonResponse<AnimeWorldMoviesListResponse>(res);
-  if (!parsed.ok || !parsed.data || parsed.data.success === false) {
-    const msg = extractErrorMessage(
-      parsed.data || parsed.rawText,
-      `AnimeWorld India movies list returned HTTP ${parsed.status}`
-    );
-    logApiDiagnostic('AnimeWorldMovies', resolvedUrl, { status: parsed.status, message: msg });
-    throw new Error(msg);
-  }
-  return parsed.data;
+  return withAwCachedDedup(`aw:movies:${page}`, 120_000, async () => {
+    const endpoint = `${AW_BASE}/movie.php?p=${encodeURIComponent(String(page))}`;
+    const { resolvedUrl, res } = await fetchAwWithTimeout(endpoint);
+    const parsed = await parseSafeJsonResponse<AnimeWorldMoviesListResponse>(res);
+    if (!parsed.ok || !parsed.data || parsed.data.success === false) {
+      const msg = extractErrorMessage(
+        parsed.data || parsed.rawText,
+        `AnimeWorld India movies list returned HTTP ${parsed.status}`
+      );
+      logApiDiagnostic('AnimeWorldMovies', resolvedUrl, { status: parsed.status, message: msg });
+      throw new Error(msg);
+    }
+    return parsed.data;
+  });
 }
 
 export async function fetchAnimeWorldA2Z(
   letter = 'A',
   page = 1
 ): Promise<AnimeWorldA2ZResponse> {
-  const endpoint = `${AW_BASE}/a2z.php?letter=${encodeURIComponent(letter)}&p=${encodeURIComponent(String(page))}`;
-  const { resolvedUrl, res } = await fetchAwWithTimeout(endpoint);
-  const parsed = await parseSafeJsonResponse<AnimeWorldA2ZResponse>(res);
-  if (!parsed.ok || !parsed.data || parsed.data.success === false) {
-    const msg = extractErrorMessage(
-      parsed.data || parsed.rawText,
-      `AnimeWorld India A-Z catalog returned HTTP ${parsed.status}`
-    );
-    logApiDiagnostic('AnimeWorldA2Z', resolvedUrl, { status: parsed.status, message: msg });
-    throw new Error(msg);
-  }
-  return parsed.data;
+  return withAwCachedDedup(`aw:a2z:${letter.toUpperCase()}:${page}`, 180_000, async () => {
+    const endpoint = `${AW_BASE}/a2z.php?letter=${encodeURIComponent(letter)}&p=${encodeURIComponent(String(page))}`;
+    const { resolvedUrl, res } = await fetchAwWithTimeout(endpoint);
+    const parsed = await parseSafeJsonResponse<AnimeWorldA2ZResponse>(res);
+    if (!parsed.ok || !parsed.data || parsed.data.success === false) {
+      const msg = extractErrorMessage(
+        parsed.data || parsed.rawText,
+        `AnimeWorld India A-Z catalog returned HTTP ${parsed.status}`
+      );
+      logApiDiagnostic('AnimeWorldA2Z', resolvedUrl, { status: parsed.status, message: msg });
+      throw new Error(msg);
+    }
+    return parsed.data;
+  });
 }
 
-export async function searchAnimeWorld(query: string, page = 1): Promise<AnimeWorldSearchResponse> {
+export async function searchAnimeWorld(
+  query: string,
+  page = 1,
+  options?: { signal?: AbortSignal }
+): Promise<AnimeWorldSearchResponse> {
+  const cacheKey = `aw:search:${query.trim().toLowerCase()}:${page}`;
+  const cached = readAwCache<AnimeWorldSearchResponse>(cacheKey);
+  if (cached !== null) return cached;
+
   const endpoint = `${AW_BASE}/search.php?query=${encodeURIComponent(query)}&p=${encodeURIComponent(String(page))}`;
-  const { resolvedUrl, res } = await fetchAwWithTimeout(endpoint);
-  const parsed = await parseSafeJsonResponse<AnimeWorldSearchResponse>(res);
-  if (!parsed.ok || !parsed.data || parsed.data.success === false) {
-    const details = extractErrorDetails(
-      parsed.data || parsed.rawText,
-      resolvedUrl,
-      parsed.status,
-      `AnimeWorld India search returned HTTP ${parsed.status}`
-    );
-    logApiDiagnostic('AnimeWorldSearch', resolvedUrl, {
-      status: parsed.status,
-      message: details.message,
-    });
-    const err = new Error(details.message) as Error & {
-      statusCode?: number;
-      detail?: string;
-      response?: { status: number; data: unknown };
-    };
-    err.statusCode = details.statusCode || parsed.status || 502;
-    err.detail = details.detail;
-    err.response = { status: parsed.status, data: parsed.data || parsed.rawText };
-    throw err;
+  const runSearch = async () => {
+    const { resolvedUrl, res } = await fetchAwWithTimeout(endpoint, 15000, options?.signal);
+    const parsed = await parseSafeJsonResponse<AnimeWorldSearchResponse>(res);
+    if (!parsed.ok || !parsed.data || parsed.data.success === false) {
+      const details = extractErrorDetails(
+        parsed.data || parsed.rawText,
+        resolvedUrl,
+        parsed.status,
+        `AnimeWorld India search returned HTTP ${parsed.status}`
+      );
+      logApiDiagnostic('AnimeWorldSearch', resolvedUrl, {
+        status: parsed.status,
+        message: details.message,
+      });
+      const err = new Error(details.message) as Error & {
+        statusCode?: number;
+        detail?: string;
+        response?: { status: number; data: unknown };
+      };
+      err.statusCode = details.statusCode || parsed.status || 502;
+      err.detail = details.detail;
+      err.response = { status: parsed.status, data: parsed.data || parsed.rawText };
+      throw err;
+    }
+    writeAwCache(cacheKey, parsed.data, 90_000);
+    return parsed.data;
+  };
+
+  if (options?.signal) {
+    return runSearch();
   }
-  return parsed.data;
+  const existing = awInFlight.get(cacheKey);
+  if (existing) return existing as Promise<AnimeWorldSearchResponse>;
+  const task = runSearch().finally(() => {
+    awInFlight.delete(cacheKey);
+  });
+  awInFlight.set(cacheKey, task);
+  return task;
 }
 
 export async function fetchAnimeWorldSeasons(
   seriesID: string
 ): Promise<{ status: number; data: AnimeWorldSeasonsResponse | null; rawText?: string; endpointUrl: string }> {
-  const endpointUrl = `${AW_BASE}/seasons.php?seriesID=${encodeURIComponent(seriesID)}`;
-  const { resolvedUrl, res } = await fetchAwWithTimeout(endpointUrl);
-  const parsed = await parseSafeJsonResponse<AnimeWorldSeasonsResponse>(res);
-  if (!parsed.ok) {
-    logApiDiagnostic('AnimeWorldSeasons', resolvedUrl, { status: parsed.status });
-  }
-  return { status: parsed.status, data: parsed.data, rawText: parsed.rawText, endpointUrl: resolvedUrl };
+  return withAwCachedDedup(
+    `aw:seasons:${seriesID}`,
+    180_000,
+    async () => {
+      const endpointUrl = `${AW_BASE}/seasons.php?seriesID=${encodeURIComponent(seriesID)}`;
+      const { resolvedUrl, res } = await fetchAwWithTimeout(endpointUrl);
+      const parsed = await parseSafeJsonResponse<AnimeWorldSeasonsResponse>(res);
+      if (!parsed.ok) {
+        logApiDiagnostic('AnimeWorldSeasons', resolvedUrl, { status: parsed.status });
+      }
+      return { status: parsed.status, data: parsed.data, rawText: parsed.rawText, endpointUrl: resolvedUrl };
+    },
+    (res) => res.status >= 200 && res.status < 300 && res.data?.success !== false
+  );
 }
 
 export async function fetchAnimeWorldEpisodes(
   seasonId: string
 ): Promise<{ status: number; data: AnimeWorldEpisodesResponse | null; rawText?: string; endpointUrl: string }> {
-  const endpointUrl = `${AW_BASE}/episodes.php?seasonId=${encodeURIComponent(seasonId)}`;
-  const { resolvedUrl, res } = await fetchAwWithTimeout(endpointUrl);
-  const parsed = await parseSafeJsonResponse<AnimeWorldEpisodesResponse>(res);
-  if (!parsed.ok) {
-    logApiDiagnostic('AnimeWorldEpisodes', resolvedUrl, { status: parsed.status });
-  }
-  return { status: parsed.status, data: parsed.data, rawText: parsed.rawText, endpointUrl: resolvedUrl };
+  return withAwCachedDedup(
+    `aw:episodes:${seasonId}`,
+    180_000,
+    async () => {
+      const endpointUrl = `${AW_BASE}/episodes.php?seasonId=${encodeURIComponent(seasonId)}`;
+      const { resolvedUrl, res } = await fetchAwWithTimeout(endpointUrl);
+      const parsed = await parseSafeJsonResponse<AnimeWorldEpisodesResponse>(res);
+      if (!parsed.ok) {
+        logApiDiagnostic('AnimeWorldEpisodes', resolvedUrl, { status: parsed.status });
+      }
+      return { status: parsed.status, data: parsed.data, rawText: parsed.rawText, endpointUrl: resolvedUrl };
+    },
+    (res) => res.status >= 200 && res.status < 300 && res.data?.success !== false
+  );
 }
 
 export async function fetchAnimeWorldStream(params: {
@@ -873,3 +1024,74 @@ export async function resolveAnimeWorldStreamForAnime(options: {
     },
   };
 }
+
+export interface AnimeWorldFeaturedEpisode {
+  seriesId: string;
+  seriesTitle: string;
+  seriesPoster: string | null;
+  seasonId: string;
+  seasonName: string;
+  episode: AnimeWorldEpisode;
+  epNum: number;
+}
+
+function extractEpisodeNumber(ep: AnimeWorldEpisode, fallbackIdx: number): number {
+  const m =
+    ep.episodeNumber?.match(/(\d+)/) ||
+    ep.episodeId?.match(/\d+x(\d+)/i) ||
+    ep.episodeId?.match(/episode[-_]?(\d+)/i);
+  return m ? Number(m[1]) : fallbackIdx + 1;
+}
+
+export async function fetchAnimeWorldLatestEpisodes(
+  seriesList: AnimeWorldItem[],
+  maxSeries = 3,
+  maxEpisodesTotal = 12
+): Promise<AnimeWorldFeaturedEpisode[]> {
+  const candidates = seriesList.filter((item) => Boolean(item.seriesId)).slice(0, maxSeries);
+  if (candidates.length === 0) return [];
+
+  const settled = await Promise.allSettled(
+    candidates.map(async (item) => {
+      const seriesId = item.seriesId as string;
+      const seasonsRes = await fetchAnimeWorldSeasons(seriesId);
+      const seasons = seasonsRes.data?.seasons || [];
+      if (seasons.length === 0) return [] as AnimeWorldFeaturedEpisode[];
+
+      // Prefer the newest dubbed season or last listed season, fallback to first
+      const preferredSeason =
+        [...seasons].reverse().find((s) => !s.isSubOnly) ||
+        seasons[seasons.length - 1] ||
+        seasons[0];
+
+      const epsRes = await fetchAnimeWorldEpisodes(preferredSeason.seasonId);
+      const eps = epsRes.data?.episodes || [];
+      if (eps.length === 0) return [] as AnimeWorldFeaturedEpisode[];
+
+      // Take the newest episodes from that season
+      const perSeriesLimit = Math.max(3, Math.ceil(maxEpisodesTotal / candidates.length));
+      const slice = eps.slice(-perSeriesLimit).reverse();
+      return slice.map((ep, idx) => {
+        const originalIdx = Math.max(0, eps.length - 1 - idx);
+        return {
+          seriesId,
+          seriesTitle: seasonsRes.data?.series.title || item.title,
+          seriesPoster: seasonsRes.data?.series.poster || item.image || null,
+          seasonId: preferredSeason.seasonId,
+          seasonName: preferredSeason.seasonName,
+          episode: ep,
+          epNum: extractEpisodeNumber(ep, originalIdx),
+        };
+      });
+    })
+  );
+
+  const combined: AnimeWorldFeaturedEpisode[] = [];
+  for (const res of settled) {
+    if (res.status === 'fulfilled' && res.value.length > 0) {
+      combined.push(...res.value);
+    }
+  }
+  return combined.slice(0, maxEpisodesTotal);
+}
+

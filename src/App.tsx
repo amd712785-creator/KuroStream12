@@ -1,29 +1,65 @@
-import { useEffect, useRef } from 'react';
+import { lazy, Suspense, useEffect, useRef } from 'react';
 import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
+import { AppUpdateModal } from '@/src/components/AppUpdateModal';
 import { AuthModal } from '@/src/components/AuthModal';
 import { ErrorBoundary } from '@/src/components/ErrorBoundary';
 import { Footer } from '@/src/components/Footer';
 import { MobileBottomNav } from '@/src/components/MobileBottomNav';
 import { Navbar } from '@/src/components/Navbar';
-import { PopupBannerModal } from '@/src/components/PopupBannerModal';
 import { StartupSplashIntro } from '@/src/components/StartupSplashIntro';
 import { AuthProvider, useAuth } from '@/src/context/AuthContext';
-import { AnimeDetailPage } from '@/src/pages/AnimeDetailPage';
-import { AnimeWorldBrowsePage } from '@/src/pages/AnimeWorldBrowsePage';
-import { AnimeWorldSeriesPage } from '@/src/pages/AnimeWorldSeriesPage';
-import { AnimeWorldWatchPage } from '@/src/pages/AnimeWorldWatchPage';
-import { CatalogPage } from '@/src/pages/CatalogPage';
+import { ServerProvider } from '@/src/context/ServerContext';
 import { HomePage } from '@/src/pages/HomePage';
-import { ProfilePage } from '@/src/pages/ProfilePage';
-import { ProfileEditPage } from '@/src/pages/ProfileEditPage';
-import { SchedulePage } from '@/src/pages/SchedulePage';
-import { SettingsPage } from '@/src/pages/SettingsPage';
-import { WatchPage } from '@/src/pages/WatchPage';
 import {
   recordSiteVisit,
   sendPresenceHeartbeat,
   sendPresenceOfflineBeacon,
 } from '@/src/services/adminService';
+
+const PopupBannerModal = lazy(() =>
+  import('@/src/components/PopupBannerModal').then((m) => ({ default: m.PopupBannerModal }))
+);
+const AnimeDetailPage = lazy(() =>
+  import('@/src/pages/AnimeDetailPage').then((m) => ({ default: m.AnimeDetailPage }))
+);
+const AnimeWorldBrowsePage = lazy(() =>
+  import('@/src/pages/AnimeWorldBrowsePage').then((m) => ({ default: m.AnimeWorldBrowsePage }))
+);
+const AnimeWorldSeriesPage = lazy(() =>
+  import('@/src/pages/AnimeWorldSeriesPage').then((m) => ({ default: m.AnimeWorldSeriesPage }))
+);
+const AnimeWorldWatchPage = lazy(() =>
+  import('@/src/pages/AnimeWorldWatchPage').then((m) => ({ default: m.AnimeWorldWatchPage }))
+);
+const ProfilePage = lazy(() =>
+  import('@/src/pages/ProfilePage').then((m) => ({ default: m.ProfilePage }))
+);
+const ProfileEditPage = lazy(() =>
+  import('@/src/pages/ProfileEditPage').then((m) => ({ default: m.ProfileEditPage }))
+);
+const SchedulePage = lazy(() =>
+  import('@/src/pages/SchedulePage').then((m) => ({ default: m.SchedulePage }))
+);
+const ServerCatalogPage = lazy(() =>
+  import('@/src/pages/ServerCatalogPage').then((m) => ({ default: m.ServerCatalogPage }))
+);
+const SettingsPage = lazy(() =>
+  import('@/src/pages/SettingsPage').then((m) => ({ default: m.SettingsPage }))
+);
+const WatchPage = lazy(() =>
+  import('@/src/pages/WatchPage').then((m) => ({ default: m.WatchPage }))
+);
+
+function RouteLoadingFallback() {
+  return (
+    <div className="mx-auto flex min-h-[55vh] max-w-7xl items-center justify-center px-4 py-12">
+      <div className="flex flex-col items-center gap-3 text-slate-400">
+        <div className="h-8 w-8 animate-spin rounded-full border-2 border-violet-500/30 border-t-violet-400" />
+        <span className="text-xs font-medium tracking-wide text-slate-400">Loading...</span>
+      </div>
+    </div>
+  );
+}
 
 function PresenceTracker() {
   const { user, authReady } = useAuth();
@@ -31,7 +67,9 @@ function PresenceTracker() {
   useEffect(() => {
     if (!authReady) return;
     const uid = user?.uid || null;
-    recordSiteVisit(uid);
+    const visitTimer = window.setTimeout(() => {
+      recordSiteVisit(uid);
+    }, 1500);
 
     const heartbeatTimer = window.setInterval(() => {
       if (document.visibilityState === 'visible') {
@@ -54,6 +92,7 @@ function PresenceTracker() {
     window.addEventListener('beforeunload', handlePageHide);
 
     return () => {
+      window.clearTimeout(visitTimer);
       window.clearInterval(heartbeatTimer);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('pagehide', handlePageHide);
@@ -75,61 +114,67 @@ function AnimatedRoutes() {
       fallbackTitle="Unable to display this page"
     >
       <div className="kuro-page-enter">
-        <Routes>
-          <Route path="/" element={<HomePage />} />
-          <Route
-            path="/anime"
-            element={
-              <CatalogPage
-                key="catalog-anime"
-                heading="Anime Catalog"
-                subheading="Explore trending series, films, and verified Hindi dubbed anime"
-              />
-            }
-          />
-          <Route
-            path="/movies"
-            element={
-              <CatalogPage
-                key="catalog-movies"
-                presetFormat="MOVIE"
-                heading="Anime Movies"
-                subheading="Feature-length theatrical anime films and cinema specials"
-              />
-            }
-          />
-          <Route
-            path="/tv-series"
-            element={
-              <CatalogPage
-                key="catalog-tv"
-                presetFormat="TV"
-                heading="Anime TV Series"
-                subheading="Episodic anime series from classic arcs to current simulcasts"
-              />
-            }
-          />
-          <Route path="/schedule" element={<SchedulePage />} />
-          <Route
-            path="/search"
-            element={
-              <CatalogPage
-                key="catalog-search"
-                heading="Browse & Search"
-                subheading="Filter the anime catalog by title, genre, language, format, and release status"
-              />
-            }
-          />
-          <Route path="/anime/:id" element={<AnimeDetailPage />} />
-          <Route path="/watch/:id/:episodeId" element={<WatchPage />} />
-          <Route path="/animeworld-india" element={<AnimeWorldBrowsePage />} />
-          <Route path="/animeworld-india/series/:seriesId" element={<AnimeWorldSeriesPage />} />
-          <Route path="/animeworld-india/watch/:kind/:contentId" element={<AnimeWorldWatchPage />} />
-          <Route path="/profile" element={<ProfilePage />} />
-          <Route path="/profile/edit" element={<ProfileEditPage />} />
-          <Route path="/settings" element={<SettingsPage />} />
-          <Route path="*" element={<Navigate to="/" replace />} />
-        </Routes>
+        <Suspense fallback={<RouteLoadingFallback />}>
+          <Routes>
+            <Route path="/" element={<HomePage />} />
+            <Route
+              path="/anime"
+              element={
+                <ServerCatalogPage
+                  key="catalog-anime"
+                  animeWorldDefaultTab="home"
+                  heading="Anime Catalog"
+                  subheading="Explore trending series, films, and verified Hindi dubbed anime"
+                />
+              }
+            />
+            <Route
+              path="/movies"
+              element={
+                <ServerCatalogPage
+                  key="catalog-movies"
+                  animeWorldDefaultTab="movies"
+                  presetFormat="MOVIE"
+                  heading="Anime Movies"
+                  subheading="Feature-length theatrical anime films and cinema specials"
+                />
+              }
+            />
+            <Route
+              path="/tv-series"
+              element={
+                <ServerCatalogPage
+                  key="catalog-tv"
+                  animeWorldDefaultTab="series"
+                  presetFormat="TV"
+                  heading="Anime TV Series"
+                  subheading="Episodic anime series from classic arcs to current simulcasts"
+                />
+              }
+            />
+            <Route path="/schedule" element={<SchedulePage />} />
+            <Route
+              path="/search"
+              element={
+                <ServerCatalogPage
+                  key="catalog-search"
+                  animeWorldDefaultTab="search"
+                  heading="Browse & Search"
+                  subheading="Filter the anime catalog by title, genre, language, format, and release status"
+                />
+              }
+            />
+            <Route path="/anime/:id" element={<AnimeDetailPage />} />
+            <Route path="/watch/:id/:episodeId" element={<WatchPage />} />
+            <Route path="/animeworld-india" element={<AnimeWorldBrowsePage />} />
+            <Route path="/animeworld-india/series/:seriesId" element={<AnimeWorldSeriesPage />} />
+            <Route path="/animeworld-india/watch/:kind/:contentId" element={<AnimeWorldWatchPage />} />
+            <Route path="/profile" element={<ProfilePage />} />
+            <Route path="/profile/edit" element={<ProfileEditPage />} />
+            <Route path="/settings" element={<SettingsPage />} />
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </Suspense>
       </div>
     </ErrorBoundary>
   );
@@ -183,7 +228,10 @@ function AppShell() {
       <Footer />
       <MobileBottomNav />
       <AuthModal />
-      <PopupBannerModal />
+      <AppUpdateModal />
+      <Suspense fallback={null}>
+        <PopupBannerModal />
+      </Suspense>
       <StartupSplashIntro />
     </div>
   );
@@ -194,8 +242,10 @@ export default function App() {
     <ErrorBoundary fallbackTitle="KuroStream encountered an unexpected error">
       <BrowserRouter>
         <AuthProvider>
-          <PresenceTracker />
-          <AppShell />
+          <ServerProvider>
+            <PresenceTracker />
+            <AppShell />
+          </ServerProvider>
         </AuthProvider>
       </BrowserRouter>
     </ErrorBoundary>

@@ -4,8 +4,22 @@
  * and smart CDN query optimization (WebP/AVIF auto-formatting).
  */
 
+import { resolveApiUrl } from '@/src/config/env';
+
 const MEMORY_CACHE = new Set<string>();
-const CACHE_NAME = 'kurostream-banner-cache-v1';
+const MAX_MEMORY_CACHE = 250;
+
+/**
+ * Resolves server-hosted /api/... image URLs across Web and Android APK runtimes
+ * while leaving external http(s), blob:, and data: URLs intact.
+ */
+export function resolveBannerDisplayUrl(rawUrl: string): string {
+  const url = (rawUrl || '').trim();
+  if (!url) return '';
+  if (/^(https?:|data:|blob:)/i.test(url)) return url;
+  if (url.startsWith('/api/')) return resolveApiUrl(url);
+  return url;
+}
 
 /**
  * Checks if an image URL is already loaded and decoded in memory
@@ -16,21 +30,17 @@ export function isImageCached(url: string): boolean {
 }
 
 /**
- * Marks an image URL as cached
+ * Marks an image URL as cached inside a bounded in-memory set
  */
 export function markImageCached(url: string): void {
   if (!url) return;
-  MEMORY_CACHE.add(url);
-
-  // If browser Cache API is available, cache response asynchronously for persistent disk cache
-  if (typeof window !== 'undefined' && 'caches' in window && url.startsWith('http')) {
-    caches
-      .open(CACHE_NAME)
-      .then((cache) => cache.add(url))
-      .catch(() => {
-        // Ignore CORS or quota warnings silently
-      });
+  if (MEMORY_CACHE.has(url)) {
+    MEMORY_CACHE.delete(url);
+  } else if (MEMORY_CACHE.size >= MAX_MEMORY_CACHE) {
+    const oldest = MEMORY_CACHE.values().next().value;
+    if (oldest !== undefined) MEMORY_CACHE.delete(oldest);
   }
+  MEMORY_CACHE.add(url);
 }
 
 /**
@@ -42,11 +52,12 @@ export function getOptimizedUrls(
 ): { highRes: string; thumbnail: string } {
   if (!rawUrl) return { highRes: '', thumbnail: '' };
 
-  const url = rawUrl.trim();
+  const url = resolveBannerDisplayUrl(rawUrl);
+  const resolvedThumb = providedThumbnail ? resolveBannerDisplayUrl(providedThumbnail) : '';
 
   // If already provided a custom thumbnail, use it
-  if (providedThumbnail && providedThumbnail.trim()) {
-    return { highRes: url, thumbnail: providedThumbnail.trim() };
+  if (resolvedThumb) {
+    return { highRes: url, thumbnail: resolvedThumb };
   }
 
   // Handle Unsplash images with URL query manipulation for WebP & progressive size
@@ -62,8 +73,8 @@ export function getOptimizedUrls(
     return { highRes: url, thumbnail: url };
   }
 
-  // Handle local Data URLs (already in memory)
-  if (url.startsWith('data:')) {
+  // Handle local Data / Blob URLs (already in memory)
+  if (url.startsWith('data:') || url.startsWith('blob:')) {
     return { highRes: url, thumbnail: url };
   }
 

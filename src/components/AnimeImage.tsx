@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { ASSETS, isNativeCapacitorRuntime } from '@/src/config/env';
+import { ASSETS } from '@/src/config/env';
 
 interface AnimeImageProps {
   src?: string | null;
@@ -55,7 +55,7 @@ export const AnimeImage: React.FC<AnimeImageProps> = ({
 
   const objectFitClass = className.includes('object-contain') ? 'object-contain' : 'object-cover';
   const objectPosClass = className.includes('object-top') ? 'object-top' : 'object-center';
-  const eager = priority || isNativeCapacitorRuntime();
+  const eager = Boolean(priority);
 
   return (
     <div
@@ -64,7 +64,7 @@ export const AnimeImage: React.FC<AnimeImageProps> = ({
       {!loaded && (
         <div
           aria-hidden="true"
-          className="pointer-events-none absolute inset-0 z-0 animate-pulse bg-gradient-to-br from-violet-950/25 via-[#161829] to-[#0d0f1a]"
+          className="pointer-events-none absolute inset-0 z-0 bg-gradient-to-br from-violet-950/20 via-[#141626] to-[#0d0f1a]"
         />
       )}
       <img
@@ -74,6 +74,7 @@ export const AnimeImage: React.FC<AnimeImageProps> = ({
         referrerPolicy="no-referrer"
         loading={eager ? 'eager' : 'lazy'}
         decoding="async"
+        fetchPriority={priority ? 'high' : undefined}
         onLoad={() => setLoaded(true)}
         onError={() => {
           if (imgSrc !== fallback) {

@@ -11,6 +11,7 @@ import {
   Package,
   Play,
   Search,
+  Send,
   Server,
   Tv,
   User,
@@ -19,17 +20,22 @@ import {
   LogOut,
 } from 'lucide-react';
 import { AnimeImage } from '@/src/components/AnimeImage';
+import { handleTelegramSupportClick } from '@/src/components/TelegramSupportButton';
 import { ASSETS } from '@/src/config/env';
 import { useAuth } from '@/src/context/AuthContext';
+import { useServer } from '@/src/context/ServerContext';
 import { getDisplayTitle, searchAnime } from '@/src/services/anilistApi';
-import type { AnimeSummary } from '@/src/types/anime';
+import { searchAnimeWorld } from '@/src/services/animeWorldApi';
+import type { AnimeSummary, AnimeWorldItem } from '@/src/types/anime';
 
 export const Navbar: React.FC = () => {
   const { user, preferences, openAuthModal, signOut } = useAuth();
+  const { isAnimeWorld } = useServer();
   const navigate = useNavigate();
 
   const [query, setQuery] = useState('');
-  const [suggestions, setSuggestions] = useState<AnimeSummary[]>([]);
+  const [globalSuggestions, setGlobalSuggestions] = useState<AnimeSummary[]>([]);
+  const [awSuggestions, setAwSuggestions] = useState<AnimeWorldItem[]>([]);
   const [searching, setSearching] = useState(false);
   const [showDropdown, setShowDropdown] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -52,31 +58,59 @@ export const Navbar: React.FC = () => {
   useEffect(() => {
     const trimmed = query.trim();
     if (trimmed.length < 2) {
-      setSuggestions([]);
+      setGlobalSuggestions([]);
+      setAwSuggestions([]);
       setSearching(false);
       return;
     }
 
+    let active = true;
+    const controller = new AbortController();
     setSearching(true);
     const timer = window.setTimeout(async () => {
       try {
-        const res = await searchAnime({ query: trimmed, perPage: 6 });
-        setSuggestions(res.items);
-      } catch {
-        setSuggestions([]);
+        if (isAnimeWorld) {
+          const res = await searchAnimeWorld(trimmed, 1, { signal: controller.signal });
+          if (!active || controller.signal.aborted) return;
+          setAwSuggestions((res.results || []).slice(0, 6));
+          setGlobalSuggestions([]);
+        } else {
+          const res = await searchAnime({ query: trimmed, perPage: 6, signal: controller.signal });
+          if (!active || controller.signal.aborted) return;
+          setGlobalSuggestions(res.items);
+          setAwSuggestions([]);
+        }
+      } catch (err) {
+        if (!active || controller.signal.aborted || (err instanceof Error && err.name === 'AbortError')) {
+          return;
+        }
+        setGlobalSuggestions([]);
+        setAwSuggestions([]);
       } finally {
-        setSearching(false);
+        if (active && !controller.signal.aborted) setSearching(false);
       }
     }, 320);
 
-    return () => window.clearTimeout(timer);
-  }, [query]);
+    return () => {
+      active = false;
+      controller.abort();
+      window.clearTimeout(timer);
+    };
+  }, [query, isAnimeWorld]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     const trimmed = query.trim();
     setShowDropdown(false);
     setMobileMenuOpen(false);
+    if (isAnimeWorld) {
+      navigate(
+        trimmed
+          ? `/search?tab=search&q=${encodeURIComponent(trimmed)}`
+          : '/search?tab=search'
+      );
+      return;
+    }
     navigate(trimmed ? `/search?q=${encodeURIComponent(trimmed)}` : '/search');
   };
 
@@ -108,7 +142,6 @@ export const Navbar: React.FC = () => {
               alt="KuroStream Logo"
               className="h-full w-full object-cover"
             />
-            <div className="pointer-events-none absolute inset-0 bg-gradient-to-tr from-transparent via-white/20 to-transparent opacity-50 animate-pulse" />
           </div>
           <span className="font-display text-lg max-[359px]:text-base sm:text-2xl font-black tracking-[-0.02em] leading-none kuro-brand-text">
             KuroStream
@@ -159,14 +192,70 @@ export const Navbar: React.FC = () => {
             {showDropdown && query.trim().length >= 2 && (
               <div className="absolute left-0 right-0 top-12 z-50 overflow-hidden rounded-2xl border border-white/[0.12] bg-[#0e101a]/95 shadow-2xl backdrop-blur-2xl">
                 {searching ? (
-                  <div className="px-4 py-3 text-xs text-slate-400">Searching catalog...</div>
-                ) : suggestions.length === 0 ? (
+                  <div className="px-4 py-3 text-xs text-slate-400">
+                    {isAnimeWorld ? 'Searching AnimeWorld India...' : 'Searching KuroStream Global...'}
+                  </div>
+                ) : isAnimeWorld ? (
+                  awSuggestions.length === 0 ? (
+                    <div className="px-4 py-3 text-xs text-slate-400">
+                      No matching anime found on AnimeWorld India. Press Enter for full search.
+                    </div>
+                  ) : (
+                    <ul className="divide-y divide-white/[0.06]">
+                      {awSuggestions.map((item) => {
+                        const target = item.seriesId
+                          ? `/animeworld-india/series/${encodeURIComponent(item.seriesId)}`
+                          : item.movieId
+                            ? `/animeworld-india/watch/movie/${encodeURIComponent(item.movieId)}`
+                            : '/anime';
+                        return (
+                          <li key={`${item.seriesId || item.movieId || item.title}`}>
+                            <Link
+                              to={target}
+                              onClick={() => setShowDropdown(false)}
+                              className="flex items-center gap-3 px-3.5 py-2.5 hover:bg-white/[0.06] transition-colors"
+                            >
+                              <AnimeImage
+                                src={item.image}
+                                alt={item.title}
+                                className="h-12 w-9 shrink-0 rounded-lg object-cover"
+                              />
+                              <div className="min-w-0 flex-1">
+                                <p className="truncate text-sm font-medium text-slate-100">
+                                  {item.title}
+                                </p>
+                                <p className="truncate text-xs text-slate-400 tabular-nums">
+                                  {[
+                                    item.seriesId ? 'Series' : 'Movie',
+                                    item.year,
+                                    item.rating ? `★ ${item.rating}` : null,
+                                  ]
+                                    .filter(Boolean)
+                                    .join(' · ')}
+                                </p>
+                              </div>
+                            </Link>
+                          </li>
+                        );
+                      })}
+                      <li>
+                        <button
+                          type="button"
+                          onClick={handleSubmit}
+                          className="w-full px-4 py-2.5 text-left text-xs font-medium text-violet-400 hover:bg-white/[0.04] transition-colors"
+                        >
+                          View all results for &ldquo;{query.trim()}&rdquo;
+                        </button>
+                      </li>
+                    </ul>
+                  )
+                ) : globalSuggestions.length === 0 ? (
                   <div className="px-4 py-3 text-xs text-slate-400">
                     No matching anime found. Press Enter for full search.
                   </div>
                 ) : (
                   <ul className="divide-y divide-white/[0.06]">
-                    {suggestions.map((anime) => {
+                    {globalSuggestions.map((anime) => {
                       const title = getDisplayTitle(anime.title);
                       return (
                         <li key={anime.id}>
@@ -316,6 +405,20 @@ export const Navbar: React.FC = () => {
               <User className="h-4 w-4 text-violet-300" />
               <span>User Profile &amp; Library</span>
             </Link>
+            <button
+              type="button"
+              onClick={(e) => {
+                setMobileMenuOpen(false);
+                handleTelegramSupportClick(e);
+              }}
+              className="kuro-btn-glass flex min-h-[46px] items-center gap-3 rounded-2xl px-4 py-2.5 text-sm font-medium text-cyan-300 hover:text-cyan-200 border-cyan-500/30 bg-cyan-500/10"
+            >
+              <Send className="h-4 w-4 shrink-0 text-cyan-400" />
+              <div className="flex-1 text-left">
+                <span className="block font-semibold">Contact Support</span>
+                <span className="block text-[11px] text-slate-400">Telegram: @rifat_hossain125</span>
+              </div>
+            </button>
             {user ? (
               <button
                 type="button"

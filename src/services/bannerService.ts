@@ -26,7 +26,7 @@ export interface ProfileBanner {
 }
 
 export interface ProfileBannerInput {
-  title: string;
+  title?: string;
   category: string;
   imageUrl: string;
   thumbnailUrl?: string;
@@ -688,17 +688,39 @@ export function subscribeProfileBanners(
   );
 }
 
+function validatePersistedBannerImageUrl(rawUrl: string): string {
+  const imageUrl = rawUrl.trim();
+  if (!imageUrl) {
+    throw new Error('Banner image is required.');
+  }
+  if (/^(blob:|data:|file:|content:)/i.test(imageUrl)) {
+    throw new Error('Banner image must be uploaded to the server or use a valid web URL before publishing.');
+  }
+  if (!imageUrl.startsWith('/api/banners/image/')) {
+    let parsed: URL;
+    try {
+      parsed = new URL(imageUrl);
+    } catch {
+      throw new Error('Please enter a valid image URL starting with https:// or http://.');
+    }
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+      throw new Error('Image URL must use https:// or http://.');
+    }
+  }
+  if (imageUrl.length > 500) {
+    throw new Error('Image URL must not exceed 500 characters.');
+  }
+  return imageUrl;
+}
+
 export async function addCustomProfileBanner(
   adminUid: string,
   input: ProfileBannerInput
 ): Promise<string> {
   if (!db) throw new Error('Firestore is not configured.');
-  const title = input.title.trim().slice(0, 120);
   const category = normalizeBannerCategory(input.category);
-  const imageUrl = input.imageUrl.trim().slice(0, 500);
-  const thumbnailUrl = (input.thumbnailUrl || '').trim().slice(0, 500);
-  if (!title) throw new Error('Banner title is required.');
-  if (!imageUrl) throw new Error('Banner image URL is required.');
+  const title = (input.title || '').trim().slice(0, 120) || `${category} Banner`;
+  const imageUrl = validatePersistedBannerImageUrl(input.imageUrl);
 
   const bannerId = generateSafeBannerId();
   const path = `profile_banners/${bannerId}`;
@@ -713,10 +735,6 @@ export async function addCustomProfileBanner(
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   };
-
-  if (thumbnailUrl) {
-    payload.thumbnailUrl = thumbnailUrl;
-  }
 
   try {
     await setDoc(doc(db, 'profile_banners', bannerId), payload);
@@ -736,17 +754,18 @@ export async function updateProfileBanner(
   const payload: Record<string, unknown> = {
     updatedAt: serverTimestamp(),
   };
+  if (typeof patch.category === 'string' && patch.category.trim()) {
+    const normalizedCat = normalizeBannerCategory(patch.category);
+    payload.category = normalizedCat;
+    if (typeof patch.title !== 'string' || !patch.title.trim()) {
+      payload.title = `${normalizedCat} Banner`;
+    }
+  }
   if (typeof patch.title === 'string' && patch.title.trim()) {
     payload.title = patch.title.trim().slice(0, 120);
   }
-  if (typeof patch.category === 'string' && patch.category.trim()) {
-    payload.category = normalizeBannerCategory(patch.category);
-  }
   if (typeof patch.imageUrl === 'string' && patch.imageUrl.trim()) {
-    payload.imageUrl = patch.imageUrl.trim().slice(0, 500);
-  }
-  if (typeof patch.thumbnailUrl === 'string') {
-    payload.thumbnailUrl = patch.thumbnailUrl.trim().slice(0, 500);
+    payload.imageUrl = validatePersistedBannerImageUrl(patch.imageUrl);
   }
   if (typeof patch.enabled === 'boolean') {
     payload.enabled = patch.enabled;

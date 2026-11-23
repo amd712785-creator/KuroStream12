@@ -35,6 +35,35 @@ export default defineConfig(() => {
     },
     build: {
       sourcemap: false,
+      target: 'es2020',
+      cssCodeSplit: true,
+      rolldownOptions: {
+        output: {
+          manualChunks(id: string) {
+            if (!id.includes('node_modules')) return undefined;
+            if (
+              id.includes('react-dom') ||
+              id.includes('react-router') ||
+              id.includes('/node_modules/react/')
+            ) {
+              return 'vendor-react';
+            }
+            if (id.includes('firebase') || id.includes('@firebase')) {
+              return 'vendor-firebase';
+            }
+            if (id.includes('hls.js')) {
+              return 'vendor-hls';
+            }
+            if (id.includes('framer-motion') || id.includes('/node_modules/motion')) {
+              return 'vendor-motion';
+            }
+            if (id.includes('lucide-react')) {
+              return 'vendor-icons';
+            }
+            return undefined;
+          },
+        },
+      },
     },
     server: {
       // HMR is disabled in AI Studio via DISABLE_HMR env var.

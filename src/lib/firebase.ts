@@ -8,7 +8,15 @@ import {
   initializeAuth,
   type Auth,
 } from 'firebase/auth';
-import { doc, getDocFromServer, getFirestore, type Firestore } from 'firebase/firestore';
+import {
+  doc,
+  getDocFromServer,
+  getFirestore,
+  initializeFirestore,
+  persistentLocalCache,
+  persistentMultipleTabManager,
+  type Firestore,
+} from 'firebase/firestore';
 import { isNativeCapacitorRuntime } from '@/src/config/env';
 import webFirebaseConfig from '../../firebase-applet-config.json';
 
@@ -191,9 +199,31 @@ if (isFirebaseConfigured) {
   }
 
   app = initializeApp(sdkOptions);
-  db = resolvedFirebaseConfig.firestoreDatabaseId
-    ? getFirestore(app, resolvedFirebaseConfig.firestoreDatabaseId)
-    : getFirestore(app);
+  try {
+    db = initializeFirestore(
+      app,
+      {
+        localCache: persistentLocalCache({
+          tabManager: persistentMultipleTabManager(),
+        }),
+      },
+      resolvedFirebaseConfig.firestoreDatabaseId || undefined
+    );
+  } catch {
+    try {
+      db = initializeFirestore(
+        app,
+        {
+          localCache: persistentLocalCache(),
+        },
+        resolvedFirebaseConfig.firestoreDatabaseId || undefined
+      );
+    } catch {
+      db = resolvedFirebaseConfig.firestoreDatabaseId
+        ? getFirestore(app, resolvedFirebaseConfig.firestoreDatabaseId)
+        : getFirestore(app);
+    }
+  }
 
   try {
     auth = initializeAuth(app, {

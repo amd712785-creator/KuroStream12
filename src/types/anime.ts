@@ -324,6 +324,7 @@ export interface WatchHistoryItem {
   episodeId: string;
   episodeNumber: number;
   episodeTitle?: string;
+  serverName?: string;
   progressSeconds: number;
   durationSeconds: number;
   audioMode: 'sub' | 'dub' | 'hindi';
@@ -354,22 +355,38 @@ export interface ThemeConfig {
 }
 
 export type AchievementId =
-  | 'first_episode'
-  | 'beginner'
-  | 'lover'
-  | 'master'
+  | 'first_watch'
+  | 'streak_3'
+  | 'streak_7'
+  | 'streak_30'
+  | 'streak_100'
+  | 'anime_explorer'
+  | 'anime_master'
+  | 'anime_legend'
   | 'binge_watcher'
-  | 'legendary';
+  | 'marathon_legend';
 
 export type BadgeTier = 'bronze' | 'silver' | 'gold' | 'diamond' | 'purple';
 
+export type AchievementMetricType =
+  | 'first_watch'
+  | 'streak'
+  | 'unique_anime'
+  | 'episodes'
+  | 'daily_binge'
+  | 'watch_hours';
+
 export interface AchievementBadge {
   id: AchievementId;
+  emoji: string;
   title: string;
   description: string;
   targetCount: number;
+  unitLabel: string;
+  metricType: AchievementMetricType;
   tier: BadgeTier;
-  iconName: string;
+  accentHex: string;
+  secondaryHex: string;
   badgeLabel: string;
 }
 
@@ -389,7 +406,21 @@ export interface UserWatchStats {
   totalEpisodesCompleted: number;
   todayEpisodesCompleted: number;
   todayCompletedDate?: string;
+  totalWatchSeconds: number;
+  todayWatchSeconds: number;
+  todayWatchDate?: string;
+  watchedAnimeIds: string[];
+  dailyWatchSeconds: Record<string, number>;
   unlockedAchievements: string[];
+  achievementUnlockDates: Record<string, string>;
+  equippedBadges?: AchievementId[];
+}
+
+export interface EquipBadgeResult {
+  ok: boolean;
+  equipped: boolean;
+  message?: string;
+  reason?: 'auth_required' | 'locked' | 'max_limit' | 'error';
 }
 
 export interface UserPreferences {

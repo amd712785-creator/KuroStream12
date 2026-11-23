@@ -1,11 +1,13 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity,
+  AlertCircle,
   BarChart3,
   CalendarClock,
   Check,
   Edit3,
   Eye,
+  Film,
   Filter,
   Globe,
   Image as ImageIcon,
@@ -20,6 +22,7 @@ import {
   RefreshCw,
   Search,
   ShieldCheck,
+  Smartphone,
   Sparkles,
   Trash2,
   Unlock,
@@ -27,9 +30,18 @@ import {
   User,
   UserCheck,
   Users,
+  X,
 } from 'lucide-react';
 import { PopupBannerCard } from '@/src/components/PopupBannerModal';
+import { AppUpdateModal } from '@/src/components/AppUpdateModal';
+import { AdminWatchAnalyticsSection } from '@/src/components/AdminWatchAnalyticsSection';
 import { useAuth } from '@/src/context/AuthContext';
+import {
+  fetchAppUpdateConfig,
+  saveAppUpdateConfig,
+  DEFAULT_APP_UPDATE_CONFIG,
+  type AppUpdateConfig,
+} from '@/src/services/updateService';
 import {
   AdminApiError,
   createPopupBanner,
@@ -63,7 +75,6 @@ import {
   type ProfileBannerInput,
 } from '@/src/services/bannerService';
 import { OptimizedBannerImage } from '@/src/components/OptimizedBannerImage';
-import { generateClientThumbnail, getOptimizedUrls } from '@/src/services/imageCacheService';
 import type {
   AdminServerStats,
   BannerFrequency,
@@ -112,35 +123,75 @@ function formatDateShort(isoDate: string): string {
 export const AdminDashboardSection: React.FC = () => {
   const { user, authReady, isAdmin, getIdToken, openAuthModal } = useAuth();
 
-  // Top Admin Tab: 'customization' (Profile Banners & Avatars) | 'analytics' | 'popups'
-  const [adminActiveTab, setAdminActiveTab] = useState<'customization' | 'analytics' | 'popups'>(
-    'customization'
-  );
+  const [adminActiveTab, setAdminActiveTab] = useState<
+    'watch-analytics' | 'customization' | 'analytics' | 'popups' | 'updates'
+  >('watch-analytics');
+
+  // App Update Manager State
+  const [updateForm, setUpdateForm] = useState<AppUpdateConfig>(DEFAULT_APP_UPDATE_CONFIG);
+  const [savingUpdate, setSavingUpdate] = useState(false);
+  const [updateNotice, setUpdateNotice] = useState<string | null>(null);
+  const [updateError, setUpdateError] = useState<string | null>(null);
+  const [showUpdatePreview, setShowUpdatePreview] = useState(false);
+
+  useEffect(() => {
+    if (!authReady || !isAdmin) return;
+    fetchAppUpdateConfig()
+      .then((cfg) => setUpdateForm(cfg))
+      .catch(() => {});
+  }, [authReady, isAdmin]);
+
+  const handleSaveAppUpdate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!isAdmin) return;
+    setSavingUpdate(true);
+    setUpdateNotice(null);
+    setUpdateError(null);
+    try {
+      await saveAppUpdateConfig(updateForm, user?.uid);
+      setUpdateNotice('App update notification configuration published successfully to Firebase.');
+      window.setTimeout(() => setUpdateNotice(null), 3500);
+    } catch (err) {
+      setUpdateError(err instanceof Error ? err.message : 'Failed to save app update configuration.');
+    } finally {
+      setSavingUpdate(false);
+    }
+  };
 
   // ==========================================
   // 1. PROFILE BANNERS & AVATARS MANAGEMENT
   // ==========================================
   const [profileBanners, setProfileBanners] = useState<ProfileBanner[]>(CURATED_PROFILE_BANNERS);
   const [customizationSettings, setCustomizationSettings] = useState<CustomizationSettings | null>(null);
-  const [pbForm, setPbForm] = useState<ProfileBannerInput>({
-    title: '',
+  const [pbForm, setPbForm] = useState<{
+    category: string;
+    enabled: boolean;
+    isLocked: boolean;
+  }>({
     category: 'Naruto',
-    imageUrl: '',
-    thumbnailUrl: '',
     enabled: true,
     isLocked: false,
   });
   const [customCategoryInput, setCustomCategoryInput] = useState('');
   const [editingPbId, setEditingPbId] = useState<string | null>(null);
-  const [pbSaving, setPbSaving] = useState(false);
+  const [editingPbTitle, setEditingPbTitle] = useState<string>('');
+  const [pbUploadMethod, setPbUploadMethod] = useState<'mobile' | 'url'>('mobile');
+  const [pbSelectedFile, setPbSelectedFile] = useState<File | null>(null);
+  const [pbLocalPreviewUrl, setPbLocalPreviewUrl] = useState<string>('');
+  const [pbUploadedImageUrl, setPbUploadedImageUrl] = useState<string>('');
+  const [pbUrlInput, setPbUrlInput] = useState<string>('');
+  const [pbUploadProgress, setPbUploadProgress] = useState<number>(0);
   const [pbUploading, setPbUploading] = useState(false);
-  const [showPbPreview, setShowPbPreview] = useState(true);
+  const [pbUploadError, setPbUploadError] = useState<string | null>(null);
+  const [pbPreviewError, setPbPreviewError] = useState(false);
+  const [pbSaving, setPbSaving] = useState(false);
   const [pbNotice, setPbNotice] = useState<string | null>(null);
   const [pbError, setPbError] = useState<string | null>(null);
   const [adminCategoryFilter, setAdminCategoryFilter] = useState<string>('All');
   const [adminBannerSearch, setAdminBannerSearch] = useState<string>('');
   const [confirmDeletePbId, setConfirmDeletePbId] = useState<string | null>(null);
   const pbFileInputRef = useRef<HTMLInputElement>(null);
+  const pbPreviewObjectUrlRef = useRef<string>('');
 
   // ==========================================
   // 2. ANALYTICS & STATS STATE
@@ -258,11 +309,28 @@ export const AdminDashboardSection: React.FC = () => {
   }, [authReady, isAdmin, user, runWithFreshAdminToken]);
 
   useEffect(() => {
-    if (!authReady || !isAdmin || !user) return;
-    loadAnalytics();
-    const timer = window.setInterval(loadAnalytics, 20000);
-    return () => window.clearInterval(timer);
-  }, [authReady, isAdmin, user, loadAnalytics]);
+    if (!authReady || !isAdmin || !user || adminActiveTab !== 'analytics') return;
+
+    const runIfVisible = () => {
+      if (typeof document === 'undefined' || document.visibilityState === 'visible') {
+        void loadAnalytics();
+      }
+    };
+
+    runIfVisible();
+    const timer = window.setInterval(runIfVisible, 20000);
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        void loadAnalytics();
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, [authReady, isAdmin, user, adminActiveTab, loadAnalytics]);
 
   // Load Popup Banners
   useEffect(() => {
@@ -276,6 +344,15 @@ export const AdminDashboardSection: React.FC = () => {
     );
     return () => unsub();
   }, [authReady, isAdmin, user]);
+
+  useEffect(() => {
+    return () => {
+      if (pbPreviewObjectUrlRef.current) {
+        URL.revokeObjectURL(pbPreviewObjectUrlRef.current);
+        pbPreviewObjectUrlRef.current = '';
+      }
+    };
+  }, []);
 
   if (!isAdmin) {
     return (
@@ -292,6 +369,83 @@ export const AdminDashboardSection: React.FC = () => {
   // ==========================================
   // PROFILE BANNERS & UNLOCK HANDLERS
   // ==========================================
+  const clearMobileUploadState = () => {
+    if (pbPreviewObjectUrlRef.current) {
+      URL.revokeObjectURL(pbPreviewObjectUrlRef.current);
+      pbPreviewObjectUrlRef.current = '';
+    }
+    setPbSelectedFile(null);
+    setPbLocalPreviewUrl('');
+    setPbUploadedImageUrl('');
+    setPbUploadProgress(0);
+    setPbUploadError(null);
+    setPbPreviewError(false);
+    if (pbFileInputRef.current) {
+      pbFileInputRef.current.value = '';
+    }
+  };
+
+  const clearUrlUploadState = () => {
+    setPbUrlInput('');
+    setPbPreviewError(false);
+  };
+
+  const resetProfileBannerForm = () => {
+    clearMobileUploadState();
+    clearUrlUploadState();
+    setPbUploadMethod('mobile');
+    setEditingPbId(null);
+    setEditingPbTitle('');
+    setPbForm({
+      category: 'Naruto',
+      enabled: true,
+      isLocked: false,
+    });
+    setCustomCategoryInput('');
+    setPbError(null);
+  };
+
+  const handleSelectPbUploadMethod = (method: 'mobile' | 'url') => {
+    setPbError(null);
+    setPbNotice(null);
+    if (method === 'mobile') {
+      clearUrlUploadState();
+      setPbUploadMethod('mobile');
+    } else {
+      if (pbUploading) return;
+      clearMobileUploadState();
+      setPbUploadMethod('url');
+    }
+  };
+
+  const performMobileFileUpload = async (file: File) => {
+    setPbUploading(true);
+    setPbUploadError(null);
+    setPbError(null);
+    setPbNotice(null);
+    setPbUploadedImageUrl('');
+    setPbUploadProgress(5);
+
+    try {
+      const uploadOutcome = await runWithFreshAdminToken((token) =>
+        uploadBannerImage(token, file, (pct) => setPbUploadProgress(pct))
+      );
+      setPbUploadedImageUrl(uploadOutcome.imageUrl);
+      setPbUploadProgress(100);
+      setPbNotice('Image uploaded to server! Review the preview below and click publish.');
+      window.setTimeout(() => setPbNotice(null), 4000);
+    } catch (err) {
+      const msg =
+        err instanceof Error
+          ? err.message
+          : 'Failed to upload selected image to server. Please try again.';
+      setPbUploadedImageUrl('');
+      setPbUploadProgress(0);
+      setPbUploadError(msg);
+    } finally {
+      setPbUploading(false);
+    }
+  };
   const handleSaveProfileBanner = async (e: React.FormEvent) => {
     e.preventDefault();
     setPbError(null);
@@ -301,12 +455,9 @@ export const AdminDashboardSection: React.FC = () => {
       setPbError('Signed-in administrator session required.');
       return;
     }
-    if (!pbForm.title.trim()) {
-      setPbError('Banner title is required.');
-      return;
-    }
-    if (!pbForm.imageUrl.trim()) {
-      setPbError('Please provide a banner image URL or upload an image file.');
+
+    if (pbForm.category === 'Custom' && !customCategoryInput.trim()) {
+      setPbError('Please enter a custom category name.');
       return;
     }
 
@@ -314,43 +465,71 @@ export const AdminDashboardSection: React.FC = () => {
       pbForm.category === 'Custom' && customCategoryInput.trim()
         ? customCategoryInput.trim()
         : pbForm.category;
+    const normalizedCategory = normalizeBannerCategory(effectiveCategory);
+    const internalTitle =
+      editingPbId && editingPbTitle.trim() ? editingPbTitle.trim() : `${normalizedCategory} Banner`;
 
-    const { highRes, thumbnail } = getOptimizedUrls(pbForm.imageUrl, pbForm.thumbnailUrl);
+    let finalImageUrl = '';
+
+    if (pbUploadMethod === 'mobile') {
+      if (pbUploading) {
+        setPbError('Please wait for the mobile image upload to finish.');
+        return;
+      }
+      const serverPath = pbUploadedImageUrl.trim();
+      if (!serverPath) {
+        setPbError(pbUploadError || 'Please select and upload an image from your device first.');
+        return;
+      }
+      if (/^(blob:|data:|file:|content:)/i.test(serverPath)) {
+        setPbError('Local temporary image cannot be published directly. Please upload it to the server.');
+        return;
+      }
+      finalImageUrl = serverPath;
+    } else {
+      const enteredUrl = pbUrlInput.trim();
+      if (!enteredUrl) {
+        setPbError('Please enter a valid banner image URL.');
+        return;
+      }
+      if (/^(blob:|data:|file:|content:)/i.test(enteredUrl)) {
+        setPbError('Please paste an image web URL (https:// or http://), or switch to Upload From Mobile.');
+        return;
+      }
+      if (!enteredUrl.startsWith('/api/banners/image/')) {
+        try {
+          const parsed = new URL(enteredUrl);
+          if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+            setPbError('Image URL must start with https:// or http://.');
+            return;
+          }
+        } catch {
+          setPbError('Please enter a valid image URL starting with https:// or http://.');
+          return;
+        }
+      }
+      finalImageUrl = enteredUrl;
+    }
+
+    const bannerPayload: ProfileBannerInput = {
+      title: internalTitle,
+      category: normalizedCategory,
+      imageUrl: finalImageUrl,
+      enabled: pbForm.enabled,
+      isLocked: pbForm.isLocked,
+    };
 
     setPbSaving(true);
     try {
       if (editingPbId) {
-        await updateProfileBanner(editingPbId, {
-          title: pbForm.title,
-          category: effectiveCategory,
-          imageUrl: highRes,
-          thumbnailUrl: thumbnail,
-          enabled: pbForm.enabled,
-          isLocked: pbForm.isLocked,
-        });
-        setPbNotice(`Banner "${pbForm.title}" updated successfully.`);
+        await updateProfileBanner(editingPbId, bannerPayload);
+        setPbNotice(`${normalizedCategory} banner updated successfully.`);
       } else {
-        await addCustomProfileBanner(user.uid, {
-          title: pbForm.title,
-          category: effectiveCategory,
-          imageUrl: highRes,
-          thumbnailUrl: thumbnail,
-          enabled: pbForm.enabled,
-          isLocked: pbForm.isLocked,
-        });
-        setPbNotice(`New anime banner "${pbForm.title}" published!`);
+        await addCustomProfileBanner(user.uid, bannerPayload);
+        setPbNotice(`New ${normalizedCategory} banner published to gallery!`);
       }
 
-      setPbForm({
-        title: '',
-        category: 'Naruto',
-        imageUrl: '',
-        thumbnailUrl: '',
-        enabled: true,
-        isLocked: false,
-      });
-      setCustomCategoryInput('');
-      setEditingPbId(null);
+      resetProfileBannerForm();
       window.setTimeout(() => setPbNotice(null), 3500);
     } catch (err) {
       setPbError(err instanceof Error ? err.message : 'Failed to save profile banner.');
@@ -364,67 +543,63 @@ export const AdminDashboardSection: React.FC = () => {
     e.target.value = '';
     if (!file) return;
 
-    setPbUploading(true);
-    setPbError(null);
-    try {
-      // 1. Generate optimized WebP thumbnail client-side
-      const thumbPromise = generateClientThumbnail(file, 480, 270).catch(() => '');
+    // Mutual exclusion: selecting a local mobile image immediately clears any URL input
+    clearUrlUploadState();
+    setPbUploadMethod('mobile');
 
-      // 2. Upload file to server endpoint or fallback to high-res WebP
-      const uploadOutcome = await runWithFreshAdminToken((token) => uploadBannerImage(token, file)).catch(
-        () => null
-      );
-
-      const generatedThumb = await thumbPromise;
-      let finalHighRes = uploadOutcome?.imageUrl || '';
-
-      if (!finalHighRes) {
-        // Fallback to client-side high-res WebP
-        finalHighRes = await generateClientThumbnail(file, 1600, 900);
-      }
-
-      setPbForm((prev) => ({
-        ...prev,
-        imageUrl: finalHighRes,
-        thumbnailUrl: generatedThumb || finalHighRes,
-      }));
-      setPbNotice('Banner image uploaded and WebP thumbnail generated!');
-      window.setTimeout(() => setPbNotice(null), 3000);
-    } catch {
-      // Fallback to local Data URL
-      const reader = new FileReader();
-      reader.onload = () => {
-        if (typeof reader.result === 'string') {
-          setPbForm((prev) => ({
-            ...prev,
-            imageUrl: reader.result as string,
-            thumbnailUrl: reader.result as string,
-          }));
-        }
-      };
-      reader.readAsDataURL(file);
-    } finally {
-      setPbUploading(false);
+    if (pbPreviewObjectUrlRef.current) {
+      URL.revokeObjectURL(pbPreviewObjectUrlRef.current);
     }
+    const localObjUrl = URL.createObjectURL(file);
+    pbPreviewObjectUrlRef.current = localObjUrl;
+
+    setPbSelectedFile(file);
+    setPbLocalPreviewUrl(localObjUrl);
+    setPbPreviewError(false);
+
+    await performMobileFileUpload(file);
+  };
+
+  const handleBannerUrlInputChange = (rawUrl: string) => {
+    // Mutual exclusion: entering a URL immediately clears any selected local file upload
+    if (pbSelectedFile || pbLocalPreviewUrl || pbUploadedImageUrl || pbUploadError) {
+      clearMobileUploadState();
+    }
+    setPbUploadMethod('url');
+    setPbUrlInput(rawUrl);
+    setPbPreviewError(false);
+    setPbError(null);
   };
 
   const handleStartEditProfileBanner = (banner: ProfileBanner) => {
+    clearMobileUploadState();
+    clearUrlUploadState();
+
     setEditingPbId(banner.id);
+    setEditingPbTitle(banner.title || '');
     const normalized = normalizeBannerCategory(banner.category);
     const isCuratedCat = (BANNER_CATEGORIES as readonly string[]).includes(normalized);
     setPbForm({
-      title: banner.title,
       category: isCuratedCat ? normalized : 'Custom',
-      imageUrl: banner.imageUrl,
-      thumbnailUrl: banner.thumbnailUrl || '',
       enabled: banner.enabled,
       isLocked: banner.isLocked,
     });
     if (!isCuratedCat) {
       setCustomCategoryInput(banner.category);
+    } else {
+      setCustomCategoryInput('');
     }
+
+    if (banner.imageUrl.startsWith('/api/banners/image/')) {
+      setPbUploadMethod('mobile');
+      setPbUploadedImageUrl(banner.imageUrl);
+      setPbUploadProgress(100);
+    } else {
+      setPbUploadMethod('url');
+      setPbUrlInput(banner.imageUrl);
+    }
+
     setPbError(null);
-    // Scroll smoothly to form
     window.scrollTo({ top: 300, behavior: 'smooth' });
   };
 
@@ -439,7 +614,7 @@ export const AdminDashboardSection: React.FC = () => {
         customizationSettings || DEFAULT_CUSTOMIZATION_SETTINGS
       );
       setPbNotice(
-        `Banner "${banner.title}" is now ${!isCurrentlyLocked ? 'Locked 🔒' : 'Unlocked 🔓'}.`
+        `Banner "${banner.category}" is now ${!isCurrentlyLocked ? 'Locked 🔒' : 'Unlocked 🔓'}.`
       );
       window.setTimeout(() => setPbNotice(null), 3000);
     } catch (err) {
@@ -467,14 +642,7 @@ export const AdminDashboardSection: React.FC = () => {
         await deleteProfileBanner(banner.id);
         setConfirmDeletePbId(null);
         if (editingPbId === banner.id) {
-          setEditingPbId(null);
-          setPbForm({
-            title: '',
-            category: 'Anime Banners',
-            imageUrl: '',
-            enabled: true,
-            isLocked: false,
-          });
+          resetProfileBannerForm();
         }
         setPbNotice('Banner deleted from Firestore.');
         window.setTimeout(() => setPbNotice(null), 3000);
@@ -704,6 +872,18 @@ export const AdminDashboardSection: React.FC = () => {
         <div className="kuro-segment-track flex flex-wrap rounded-2xl p-1 gap-1 border border-white/[0.08] bg-black/40">
           <button
             type="button"
+            onClick={() => setAdminActiveTab('watch-analytics')}
+            className={`flex items-center gap-2 rounded-xl px-4 py-2 text-xs font-bold transition-all ${
+              adminActiveTab === 'watch-analytics'
+                ? 'kuro-segment-active text-white shadow-[0_0_15px_rgba(168,85,247,0.4)]'
+                : 'kuro-segment-idle text-slate-400 hover:text-white'
+            }`}
+          >
+            <Film className="h-4 w-4 text-violet-400" />
+            <span>User Watch Analytics</span>
+          </button>
+          <button
+            type="button"
             onClick={() => setAdminActiveTab('customization')}
             className={`flex items-center gap-2 rounded-xl px-4 py-2 text-xs font-bold transition-all ${
               adminActiveTab === 'customization'
@@ -711,7 +891,7 @@ export const AdminDashboardSection: React.FC = () => {
                 : 'kuro-segment-idle text-slate-400 hover:text-white'
             }`}
           >
-            <ImageIcon className="h-4 w-4 text-violet-400" />
+            <ImageIcon className="h-4 w-4 text-fuchsia-400" />
             <span>Profile Banners &amp; Avatars</span>
           </button>
           <button
@@ -735,11 +915,30 @@ export const AdminDashboardSection: React.FC = () => {
                 : 'kuro-segment-idle text-slate-400 hover:text-white'
             }`}
           >
-            <Megaphone className="h-4 w-4 text-fuchsia-400" />
+            <Megaphone className="h-4 w-4 text-amber-400" />
             <span>Announcement Popups</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setAdminActiveTab('updates')}
+            className={`flex items-center gap-2 rounded-xl px-4 py-2 text-xs font-bold transition-all ${
+              adminActiveTab === 'updates'
+                ? 'kuro-segment-active text-white shadow-[0_0_15px_rgba(168,85,247,0.4)]'
+                : 'kuro-segment-idle text-slate-400 hover:text-white'
+            }`}
+          >
+            <Smartphone className="h-4 w-4 text-cyan-400" />
+            <span>App Update Manager</span>
           </button>
         </div>
       </div>
+
+      {/* ========================================================
+          USER WATCH ANALYTICS SYSTEM
+          ======================================================== */}
+      {adminActiveTab === 'watch-analytics' && (
+        <AdminWatchAnalyticsSection onRefreshParent={loadAnalytics} />
+      )}
 
       {/* ========================================================
           TAB 1: PROFILE BANNERS & AVATARS MANAGEMENT (REQUESTED)
@@ -841,57 +1040,31 @@ export const AdminDashboardSection: React.FC = () => {
 
           {/* Add / Edit Profile Banner Form */}
           <section className="kuro-glass rounded-3xl p-5 sm:p-6 border border-white/[0.08] space-y-5">
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between gap-3">
               <div>
                 <h3 className="text-base sm:text-lg font-bold text-white flex items-center gap-2">
                   <ImageIcon className="h-5 w-5 text-violet-400" />
                   <span>{editingPbId ? 'Edit Profile Banner' : 'Add New Profile Banner'}</span>
                 </h3>
                 <p className="text-xs text-slate-400">
-                  Add new wide landscape banner artwork to the user profile gallery.
+                  Add wide landscape banner artwork from your mobile gallery or via image URL.
                 </p>
               </div>
 
               {editingPbId && (
                 <button
                   type="button"
-                  onClick={() => {
-                    setEditingPbId(null);
-                    setPbForm({
-                      title: '',
-                      category: 'Anime Banners',
-                      imageUrl: '',
-                      enabled: true,
-                      isLocked: false,
-                    });
-                    setCustomCategoryInput('');
-                  }}
-                  className="kuro-btn-glass rounded-xl px-3 py-1.5 text-xs font-semibold text-slate-300"
+                  onClick={resetProfileBannerForm}
+                  className="kuro-btn-glass rounded-xl px-3 py-1.5 text-xs font-semibold text-slate-300 shrink-0"
                 >
                   Cancel Edit
                 </button>
               )}
             </div>
 
-            <form onSubmit={handleSaveProfileBanner} className="space-y-4">
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                {/* Title */}
-                <div>
-                  <label className="block text-xs font-semibold text-slate-200 mb-1.5">
-                    Banner Title *
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    maxLength={120}
-                    value={pbForm.title}
-                    onChange={(e) => setPbForm((p) => ({ ...p, title: e.target.value }))}
-                    placeholder="e.g. Solo Leveling Arise Horizon"
-                    className="h-10 w-full rounded-xl border border-white/[0.1] bg-[#07080d] px-3.5 text-xs text-white focus:border-violet-500 focus:outline-none"
-                  />
-                </div>
-
-                {/* Category Dropdown */}
+            <form onSubmit={handleSaveProfileBanner} className="space-y-5">
+              {/* Category Selection */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <label className="block text-xs font-semibold text-slate-200 mb-1.5">
                     Category (15 Anime Collections) *
@@ -899,7 +1072,7 @@ export const AdminDashboardSection: React.FC = () => {
                   <select
                     value={pbForm.category}
                     onChange={(e) => setPbForm((p) => ({ ...p, category: e.target.value }))}
-                    className="h-10 w-full rounded-xl border border-white/[0.1] bg-[#07080d] px-3 text-xs text-white focus:border-violet-500 focus:outline-none"
+                    className="h-11 w-full rounded-xl border border-white/[0.1] bg-[#07080d] px-3 text-xs sm:text-sm text-white focus:border-violet-500 focus:outline-none"
                   >
                     {BANNER_CATEGORIES.slice(1).map((cat) => (
                       <option key={cat} value={cat}>
@@ -910,7 +1083,6 @@ export const AdminDashboardSection: React.FC = () => {
                   </select>
                 </div>
 
-                {/* Custom Category Input if Custom is selected */}
                 {pbForm.category === 'Custom' && (
                   <div>
                     <label className="block text-xs font-semibold text-slate-200 mb-1.5">
@@ -922,96 +1094,279 @@ export const AdminDashboardSection: React.FC = () => {
                       value={customCategoryInput}
                       onChange={(e) => setCustomCategoryInput(e.target.value)}
                       placeholder="e.g. Mecha Classics"
-                      className="h-10 w-full rounded-xl border border-white/[0.1] bg-[#07080d] px-3.5 text-xs text-white focus:border-violet-500 focus:outline-none"
+                      className="h-11 w-full rounded-xl border border-white/[0.1] bg-[#07080d] px-3.5 text-xs sm:text-sm text-white focus:border-violet-500 focus:outline-none"
                     />
                   </div>
                 )}
+              </div>
 
-                {/* Image URL / Upload */}
-                <div className="sm:col-span-2 lg:col-span-3">
-                  <label className="block text-xs font-semibold text-slate-200 mb-1.5">
-                    Banner Image (Landscape URL or Upload File) *
-                  </label>
-                  <div className="flex flex-col sm:flex-row items-center gap-3">
-                    <input
-                      ref={pbFileInputRef}
-                      type="file"
-                      accept="image/*"
-                      onChange={handleProfileBannerFileUpload}
-                      className="hidden"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => pbFileInputRef.current?.click()}
-                      disabled={pbUploading}
-                      className="kuro-btn-glass w-full sm:w-auto inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-xs font-semibold text-violet-300 hover:text-white shrink-0"
+              {/* Mutually Exclusive Upload Method Selector */}
+              <div className="space-y-3">
+                <label className="block text-xs font-semibold text-slate-200">
+                  Choose Upload Method (Select One) *
+                </label>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  <button
+                    type="button"
+                    onClick={() => handleSelectPbUploadMethod('mobile')}
+                    className={`flex items-center gap-3 rounded-2xl border p-3.5 text-left transition-all min-h-[56px] ${
+                      pbUploadMethod === 'mobile'
+                        ? 'border-violet-400 bg-violet-600/20 text-white shadow-[0_0_20px_rgba(139,92,246,0.25)]'
+                        : 'border-white/[0.08] bg-[#07080d]/80 text-slate-300 hover:border-white/20 hover:bg-white/[0.04]'
+                    }`}
+                  >
+                    <div
+                      className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl ${
+                        pbUploadMethod === 'mobile'
+                          ? 'bg-violet-500/30 text-violet-200'
+                          : 'bg-white/[0.05] text-slate-400'
+                      }`}
                     >
-                      {pbUploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
-                      <span>Upload Banner File</span>
-                    </button>
+                      <Smartphone className="h-4 w-4" />
+                    </div>
+                    <div className="min-w-0">
+                      <div className="text-xs sm:text-sm font-bold leading-tight">Upload From Mobile</div>
+                      <div className="text-[11px] text-slate-400 truncate">
+                        Pick from Android gallery or files
+                      </div>
+                    </div>
+                  </button>
 
-                    <input
-                      type="url"
-                      value={pbForm.imageUrl}
-                      onChange={(e) => {
-                        const url = e.target.value;
-                        const { thumbnail } = getOptimizedUrls(url);
-                        setPbForm((p) => ({
-                          ...p,
-                          imageUrl: url,
-                          thumbnailUrl: p.thumbnailUrl || thumbnail,
-                        }));
-                      }}
-                      placeholder="https://... (high-resolution landscape image)"
-                      className="h-10 flex-1 w-full rounded-xl border border-white/[0.1] bg-[#07080d] px-3.5 text-xs text-white focus:border-violet-500 focus:outline-none"
-                    />
+                  <button
+                    type="button"
+                    disabled={pbUploading}
+                    onClick={() => handleSelectPbUploadMethod('url')}
+                    className={`flex items-center gap-3 rounded-2xl border p-3.5 text-left transition-all min-h-[56px] ${
+                      pbUploadMethod === 'url'
+                        ? 'border-violet-400 bg-violet-600/20 text-white shadow-[0_0_20px_rgba(139,92,246,0.25)]'
+                        : 'border-white/[0.08] bg-[#07080d]/80 text-slate-300 hover:border-white/20 hover:bg-white/[0.04]'
+                    } disabled:opacity-50`}
+                  >
+                    <div
+                      className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl ${
+                        pbUploadMethod === 'url'
+                          ? 'bg-violet-500/30 text-violet-200'
+                          : 'bg-white/[0.05] text-slate-400'
+                      }`}
+                    >
+                      <Globe className="h-4 w-4" />
+                    </div>
+                    <div className="min-w-0">
+                      <div className="text-xs sm:text-sm font-bold leading-tight">Upload Using Image URL</div>
+                      <div className="text-[11px] text-slate-400 truncate">
+                        Paste a direct landscape image link
+                      </div>
+                    </div>
+                  </button>
+                </div>
+
+                {/* Hidden File Input for Mobile Gallery / File Manager */}
+                <input
+                  ref={pbFileInputRef}
+                  type="file"
+                  accept="image/*"
+                  onChange={handleProfileBannerFileUpload}
+                  className="hidden"
+                />
+
+                {/* Option A: Upload From Mobile Panel */}
+                {pbUploadMethod === 'mobile' && (
+                  <div className="rounded-2xl border border-white/[0.08] bg-[#07080d]/90 p-4 space-y-3">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="text-xs font-semibold text-white">
+                          {pbSelectedFile
+                            ? pbSelectedFile.name
+                            : pbUploadedImageUrl
+                              ? 'Uploaded Server Banner Image'
+                              : 'Select a landscape image from your phone gallery or file manager'}
+                        </p>
+                        <p className="text-[11px] text-slate-400 mt-0.5">
+                          {pbSelectedFile
+                            ? `${(pbSelectedFile.size / (1024 * 1024)).toFixed(2)} MB · JPG, PNG, WebP, or GIF (max 8 MB)`
+                            : 'No URL required. Uploaded directly to KuroStream server storage.'}
+                        </p>
+                      </div>
+
+                      <div className="flex items-center gap-2 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => pbFileInputRef.current?.click()}
+                          disabled={pbUploading}
+                          className="kuro-btn-primary inline-flex min-h-[42px] items-center justify-center gap-2 rounded-xl px-4 py-2 text-xs font-bold shadow-md disabled:opacity-60"
+                        >
+                          {pbUploading ? (
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                          ) : (
+                            <Upload className="h-4 w-4" />
+                          )}
+                          <span>
+                            {pbUploading
+                              ? 'Uploading...'
+                              : pbSelectedFile || pbUploadedImageUrl
+                                ? 'Choose Different Image'
+                                : 'Select From Phone'}
+                          </span>
+                        </button>
+
+                        {(pbSelectedFile || pbUploadedImageUrl) && !pbUploading && (
+                          <button
+                            type="button"
+                            onClick={clearMobileUploadState}
+                            aria-label="Clear selected image"
+                            className="kuro-btn-glass inline-flex min-h-[42px] items-center justify-center rounded-xl px-3 text-xs font-semibold text-rose-300 hover:text-rose-200"
+                          >
+                            <X className="h-4 w-4" />
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Real Upload Progress Bar */}
+                    {(pbUploading || pbUploadProgress > 0) && (
+                      <div className="space-y-1.5">
+                        <div className="flex items-center justify-between text-[11px]">
+                          <span className={pbUploadedImageUrl ? 'text-emerald-300 font-semibold' : 'text-violet-300 font-semibold'}>
+                            {pbUploading
+                              ? 'Uploading image to server...'
+                              : pbUploadedImageUrl
+                                ? 'Upload complete — ready to publish'
+                                : 'Upload status'}
+                          </span>
+                          <span className="font-mono text-slate-300">{pbUploadProgress}%</span>
+                        </div>
+                        <div className="h-2 w-full overflow-hidden rounded-full bg-white/[0.08]">
+                          <div
+                            className={`h-full rounded-full transition-all duration-200 ${
+                              pbUploadedImageUrl
+                                ? 'bg-gradient-to-r from-emerald-500 to-teal-400'
+                                : 'bg-gradient-to-r from-violet-600 to-fuchsia-500'
+                            }`}
+                            style={{ width: `${pbUploadProgress}%` }}
+                          />
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Real Upload Error Message & Retry */}
+                    {pbUploadError && (
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 rounded-xl border border-rose-500/40 bg-rose-950/40 px-3.5 py-2.5 text-xs text-rose-200">
+                        <div className="flex items-start gap-2">
+                          <AlertCircle className="h-4 w-4 shrink-0 text-rose-400 mt-0.5" />
+                          <span>{pbUploadError}</span>
+                        </div>
+                        {pbSelectedFile && (
+                          <button
+                            type="button"
+                            onClick={() => performMobileFileUpload(pbSelectedFile)}
+                            disabled={pbUploading}
+                            className="inline-flex items-center gap-1.5 rounded-lg border border-rose-400/40 bg-rose-500/20 px-3 py-1.5 text-[11px] font-bold text-white hover:bg-rose-500/30 shrink-0"
+                          >
+                            <RefreshCw className="h-3 w-3" />
+                            <span>Retry Upload</span>
+                          </button>
+                        )}
+                      </div>
+                    )}
                   </div>
-                </div>
+                )}
 
-                {/* Toggles */}
-                <div className="sm:col-span-2 lg:col-span-3 flex flex-wrap items-center gap-6 pt-1">
-                  <label className="inline-flex cursor-pointer items-center gap-2 text-xs text-slate-200">
-                    <input
-                      type="checkbox"
-                      checked={pbForm.enabled}
-                      onChange={(e) => setPbForm((p) => ({ ...p, enabled: e.target.checked }))}
-                      className="h-4 w-4 rounded border-white/20 bg-[#07080d] text-violet-500 focus:ring-violet-500"
-                    />
-                    <span>Enabled for Users</span>
-                  </label>
+                {/* Option B: Upload Using Image URL Panel */}
+                {pbUploadMethod === 'url' && (
+                  <div className="rounded-2xl border border-white/[0.08] bg-[#07080d]/90 p-4 space-y-2">
+                    <label className="block text-xs font-semibold text-slate-200">
+                      Image URL *
+                    </label>
+                    <div className="flex items-center gap-2">
+                      <div className="relative flex-1">
+                        <Link2 className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
+                        <input
+                          type="url"
+                          value={pbUrlInput}
+                          onChange={(e) => handleBannerUrlInputChange(e.target.value)}
+                          placeholder="https://example.com/anime-banner.webp"
+                          className="h-11 w-full rounded-xl border border-white/[0.1] bg-[#0c0e18] pl-10 pr-3.5 text-xs sm:text-sm text-white placeholder:text-slate-500 focus:border-violet-500 focus:outline-none"
+                        />
+                      </div>
+                      {pbUrlInput && (
+                        <button
+                          type="button"
+                          onClick={clearUrlUploadState}
+                          aria-label="Clear URL"
+                          className="kuro-btn-glass inline-flex h-11 items-center justify-center rounded-xl px-3 text-xs font-semibold text-slate-300 hover:text-white"
+                        >
+                          <X className="h-4 w-4" />
+                        </button>
+                      )}
+                    </div>
+                    <p className="text-[11px] text-slate-400">
+                      Paste a direct landscape image URL (no local file upload needed).
+                    </p>
+                  </div>
+                )}
+              </div>
 
-                  <label className="inline-flex cursor-pointer items-center gap-2 text-xs text-slate-200">
-                    <input
-                      type="checkbox"
-                      checked={pbForm.isLocked}
-                      onChange={(e) => setPbForm((p) => ({ ...p, isLocked: e.target.checked }))}
-                      className="h-4 w-4 rounded border-white/20 bg-[#07080d] text-violet-500 focus:ring-violet-500"
-                    />
-                    <span>Locked (Only Admins / Unlocked users)</span>
-                  </label>
-                </div>
+              {/* Toggles */}
+              <div className="flex flex-wrap items-center gap-6 pt-1">
+                <label className="inline-flex cursor-pointer items-center gap-2 text-xs text-slate-200">
+                  <input
+                    type="checkbox"
+                    checked={pbForm.enabled}
+                    onChange={(e) => setPbForm((p) => ({ ...p, enabled: e.target.checked }))}
+                    className="h-4 w-4 rounded border-white/20 bg-[#07080d] text-violet-500 focus:ring-violet-500"
+                  />
+                  <span>Enabled for Users</span>
+                </label>
+
+                <label className="inline-flex cursor-pointer items-center gap-2 text-xs text-slate-200">
+                  <input
+                    type="checkbox"
+                    checked={pbForm.isLocked}
+                    onChange={(e) => setPbForm((p) => ({ ...p, isLocked: e.target.checked }))}
+                    className="h-4 w-4 rounded border-white/20 bg-[#07080d] text-violet-500 focus:ring-violet-500"
+                  />
+                  <span>Locked (Only Admins / Unlocked users)</span>
+                </label>
               </div>
 
               {/* Show Image Preview Before Publishing */}
-              {pbForm.imageUrl && (
+              {(pbUploadMethod === 'mobile' ? pbUploadedImageUrl || pbLocalPreviewUrl : pbUrlInput.trim()) && (
                 <div className="rounded-2xl border border-violet-500/30 bg-[#0a0c16] p-4 space-y-2">
-                  <div className="flex items-center justify-between">
+                  <div className="flex items-center justify-between gap-2">
                     <span className="text-xs font-semibold text-violet-300 flex items-center gap-1.5">
                       <Eye className="h-3.5 w-3.5" /> Image Preview Before Publishing
                     </span>
-                    <span className="text-[10px] text-slate-400">16:9 Landscape · WebP Ready</span>
+                    <span className="text-[10px] text-slate-400">
+                      {pbUploadMethod === 'mobile'
+                        ? pbUploadedImageUrl
+                          ? 'Server Stored · Ready'
+                          : 'Local Preview'
+                        : 'External Image URL'}
+                    </span>
                   </div>
                   <div className="relative aspect-[16/9] w-full max-w-md overflow-hidden rounded-xl border border-white/[0.1] bg-[#141728]">
                     <OptimizedBannerImage
-                      src={pbForm.imageUrl}
-                      thumbnailUrl={pbForm.thumbnailUrl}
-                      alt={pbForm.title || 'Preview'}
+                      src={
+                        pbUploadMethod === 'mobile'
+                          ? pbUploadedImageUrl || pbLocalPreviewUrl
+                          : pbUrlInput.trim()
+                      }
+                      alt={
+                        pbForm.category === 'Custom' && customCategoryInput
+                          ? customCategoryInput
+                          : pbForm.category
+                      }
+                      onLoad={() => setPbPreviewError(false)}
+                      onError={() => setPbPreviewError(true)}
                       className="h-full w-full"
                     />
-                    <div className="absolute inset-0 bg-gradient-to-t from-black/85 via-transparent to-transparent pointer-events-none" />
+                    <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent pointer-events-none" />
                     <div className="absolute top-2.5 left-2.5 right-2.5 flex items-center justify-between pointer-events-none">
                       <span className="rounded-lg bg-black/70 px-2 py-0.5 text-[10px] font-semibold text-violet-300 backdrop-blur-md border border-white/[0.08]">
-                        {pbForm.category === 'Custom' && customCategoryInput ? customCategoryInput : pbForm.category}
+                        {pbForm.category === 'Custom' && customCategoryInput
+                          ? customCategoryInput
+                          : pbForm.category}
                       </span>
                       {pbForm.isLocked && (
                         <span className="inline-flex items-center gap-1 rounded-lg border border-amber-400/40 bg-amber-950/70 px-2 py-0.5 text-[10px] font-bold text-amber-300 backdrop-blur-md">
@@ -1019,25 +1374,36 @@ export const AdminDashboardSection: React.FC = () => {
                         </span>
                       )}
                     </div>
-                    <div className="absolute bottom-2.5 left-2.5 right-2.5 pointer-events-none">
-                      <p className="truncate text-xs sm:text-sm font-bold text-white drop-shadow">
-                        {pbForm.title || 'Banner Title'}
-                      </p>
-                    </div>
                   </div>
+                  {pbPreviewError && (
+                    <p className="text-[11px] text-amber-300 flex items-center gap-1.5">
+                      <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+                      <span>Preview image could not be loaded. Check the image file or URL before publishing.</span>
+                    </p>
+                  )}
                 </div>
               )}
 
               {/* Submit Bar */}
               <div className="flex flex-col sm:flex-row items-center justify-between gap-4 border-t border-white/[0.06] pt-4">
                 <span className="text-xs text-slate-400">
-                  {pbForm.imageUrl ? 'Review preview artwork above before publishing' : 'Provide an image URL or file upload'}
+                  {pbUploadMethod === 'mobile'
+                    ? pbUploadedImageUrl
+                      ? 'Uploaded image is ready to publish to gallery'
+                      : 'Select an image from your phone to upload'
+                    : pbUrlInput.trim()
+                      ? 'Review URL preview artwork above before publishing'
+                      : 'Enter an image URL above to preview and publish'}
                 </span>
 
                 <button
                   type="submit"
-                  disabled={pbSaving || pbUploading}
-                  className="kuro-btn-primary inline-flex min-h-[42px] items-center gap-2 rounded-xl px-6 py-2 text-xs sm:text-sm font-bold shadow-lg"
+                  disabled={
+                    pbSaving ||
+                    pbUploading ||
+                    (pbUploadMethod === 'mobile' ? !pbUploadedImageUrl.trim() : !pbUrlInput.trim())
+                  }
+                  className="kuro-btn-primary inline-flex min-h-[44px] w-full sm:w-auto items-center justify-center gap-2 rounded-xl px-6 py-2 text-xs sm:text-sm font-bold shadow-lg disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   {pbSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
                   <span>{editingPbId ? 'Update Banner' : 'Add Banner to Gallery'}</span>
@@ -1847,6 +2213,200 @@ export const AdminDashboardSection: React.FC = () => {
             )}
           </div>
         </section>
+      )}
+
+      {/* ========================================================
+          TAB 4: APP UPDATE MANAGER
+          ======================================================== */}
+      {adminActiveTab === 'updates' && (
+        <form onSubmit={handleSaveAppUpdate} className="kuro-glass rounded-3xl p-6 sm:p-8 border border-white/[0.08] space-y-6">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-white/[0.08] pb-5">
+            <div>
+              <div className="flex items-center gap-2.5">
+                <span className="flex h-10 w-10 items-center justify-center rounded-2xl border border-cyan-400/40 bg-cyan-500/20 text-cyan-300">
+                  <Smartphone className="h-5 w-5" />
+                </span>
+                <div>
+                  <h2 className="text-lg font-bold text-white">App Update Manager</h2>
+                  <p className="text-xs text-slate-400">
+                    Control Android APK update notifications, version codes, release notes, and download links
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-3">
+              <label className="inline-flex cursor-pointer items-center gap-2 rounded-2xl border border-white/[0.1] bg-[#070912] px-4 py-2 text-xs font-semibold text-white">
+                <input
+                  type="checkbox"
+                  checked={updateForm.enabled}
+                  onChange={(e) => setUpdateForm((p) => ({ ...p, enabled: e.target.checked }))}
+                  className="h-4 w-4 rounded border-white/20 bg-[#07080d] text-cyan-500 focus:ring-cyan-500"
+                />
+                <span>Notifications Enabled</span>
+              </label>
+            </div>
+          </div>
+
+          {updateNotice && (
+            <div className="rounded-2xl border border-emerald-500/40 bg-emerald-500/15 p-4 text-xs font-semibold text-emerald-200">
+              {updateNotice}
+            </div>
+          )}
+
+          {updateError && (
+            <div className="rounded-2xl border border-rose-500/40 bg-rose-500/15 p-4 text-xs font-semibold text-rose-200">
+              {updateError}
+            </div>
+          )}
+
+          <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3">
+            <div>
+              <label className="block text-xs font-medium text-slate-300 mb-1.5">
+                Latest Version Name (e.g. v2.1.0)
+              </label>
+              <input
+                type="text"
+                maxLength={40}
+                required
+                value={updateForm.latestVersion}
+                onChange={(e) => setUpdateForm((p) => ({ ...p, latestVersion: e.target.value }))}
+                className="h-11 w-full rounded-xl border border-white/[0.1] bg-[#07080d] px-3.5 text-sm text-white focus:border-cyan-500 focus:outline-none"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-slate-300 mb-1.5">
+                Version Code (Numeric integer)
+              </label>
+              <input
+                type="number"
+                min={1}
+                required
+                value={updateForm.versionCode}
+                onChange={(e) => setUpdateForm((p) => ({ ...p, versionCode: Number(e.target.value) || 200 }))}
+                className="h-11 w-full rounded-xl border border-white/[0.1] bg-[#07080d] px-3.5 text-sm text-white focus:border-cyan-500 focus:outline-none tabular-nums"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-slate-300 mb-1.5">
+                Update Type
+              </label>
+              <select
+                value={updateForm.mandatory ? 'mandatory' : 'optional'}
+                onChange={(e) => setUpdateForm((p) => ({ ...p, mandatory: e.target.value === 'mandatory' }))}
+                className="h-11 w-full rounded-xl border border-white/[0.1] bg-[#07080d] px-3.5 text-sm text-white focus:border-cyan-500 focus:outline-none"
+              >
+                <option value="optional">Optional Update (Shows Later button)</option>
+                <option value="mandatory">Mandatory Update (Hides Later button)</option>
+              </select>
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium text-slate-300 mb-1.5">
+              APK Download URL (`apkUrl`)
+            </label>
+            <input
+              type="url"
+              maxLength={500}
+              required
+              value={updateForm.apkUrl}
+              onChange={(e) => setUpdateForm((p) => ({ ...p, apkUrl: e.target.value }))}
+              placeholder="https://github.com/.../kurostream-v2.1.0.apk"
+              className="h-11 w-full rounded-xl border border-white/[0.1] bg-[#07080d] px-3.5 text-sm text-white focus:border-cyan-500 focus:outline-none"
+            />
+          </div>
+
+          <div className="grid grid-cols-1 gap-5 sm:grid-cols-2">
+            <div>
+              <label className="block text-xs font-medium text-slate-300 mb-1.5">
+                Update Title Bar
+              </label>
+              <input
+                type="text"
+                maxLength={160}
+                required
+                value={updateForm.title}
+                onChange={(e) => setUpdateForm((p) => ({ ...p, title: e.target.value }))}
+                className="h-11 w-full rounded-xl border border-white/[0.1] bg-[#07080d] px-3.5 text-sm text-white focus:border-cyan-500 focus:outline-none"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-slate-300 mb-1.5">
+                Update Now Button Text
+              </label>
+              <input
+                type="text"
+                maxLength={60}
+                required
+                value={updateForm.buttonText}
+                onChange={(e) => setUpdateForm((p) => ({ ...p, buttonText: e.target.value }))}
+                className="h-11 w-full rounded-xl border border-white/[0.1] bg-[#07080d] px-3.5 text-sm text-white focus:border-cyan-500 focus:outline-none"
+              />
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium text-slate-300 mb-1.5">
+              Short Summary Description
+            </label>
+            <textarea
+              rows={2}
+              maxLength={1000}
+              value={updateForm.description || ''}
+              onChange={(e) => setUpdateForm((p) => ({ ...p, description: e.target.value }))}
+              className="w-full rounded-xl border border-white/[0.1] bg-[#07080d] p-3 text-sm text-white focus:border-cyan-500 focus:outline-none"
+            />
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium text-slate-300 mb-1.5">
+              Release Notes (Changelog items separated by lines)
+            </label>
+            <textarea
+              rows={4}
+              maxLength={2000}
+              value={updateForm.releaseNotes || ''}
+              onChange={(e) => setUpdateForm((p) => ({ ...p, releaseNotes: e.target.value }))}
+              placeholder="- Enhanced performance&#10;- Bug fixes"
+              className="w-full rounded-xl border border-white/[0.1] bg-[#07080d] p-3 font-mono text-xs text-white focus:border-cyan-500 focus:outline-none"
+            />
+          </div>
+
+          <div className="flex flex-wrap items-center justify-end gap-3 border-t border-white/[0.08] pt-5">
+            <button
+              type="button"
+              onClick={() => setShowUpdatePreview(true)}
+              className="kuro-btn-glass inline-flex min-h-[44px] items-center gap-2 rounded-2xl px-5 py-2.5 text-xs font-semibold text-cyan-200"
+            >
+              <Eye className="h-4 w-4" />
+              <span>Preview Popup</span>
+            </button>
+            <button
+              type="submit"
+              disabled={savingUpdate}
+              className="kuro-btn-primary inline-flex min-h-[44px] items-center gap-2 rounded-2xl px-6 py-2.5 text-xs sm:text-sm font-semibold text-white shadow-lg shadow-cyan-950/50"
+            >
+              {savingUpdate ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Check className="h-4 w-4" />
+              )}
+              <span>Publish Update Config</span>
+            </button>
+          </div>
+        </form>
+      )}
+
+      {/* Preview Modal */}
+      {showUpdatePreview && (
+        <AppUpdateModal
+          previewConfig={updateForm}
+          onClosePreview={() => setShowUpdatePreview(false)}
+        />
       )}
 
       {/* Live Preview Modal for Popup */}
