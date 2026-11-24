@@ -9,6 +9,8 @@ const DEFAULT_BACKEND_ORIGIN = 'https://animeworldbd.vercel.app';
 const OVERRIDE_STORAGE_KEY = 'kurostream_api_override_v1';
 const CONSUMET_OVERRIDE_STORAGE_KEY = 'kurostream_consumet_api_override_v1';
 
+const BACKEND_OVERRIDE_STORAGE_KEY = 'kurostream_backend_api_override_v1';
+
 export const ASSETS = {
   heroFallback: heroFallbackImg,
   posterFallback: posterFallbackImg,
@@ -32,9 +34,58 @@ export function isNativeCapacitorRuntime(): boolean {
   return false;
 }
 
-export function getBackendApiOrigin(): string {
+export function getDefaultBackendApiOrigin(): string {
   const configured = (import.meta.env.VITE_BACKEND_API_URL || DEFAULT_BACKEND_ORIGIN).trim();
   return configured.replace(/\/+$/, '');
+}
+
+export function getBackendApiOrigins(): string[] {
+  const candidates: string[] = [];
+  const push = (raw?: string | null) => {
+    if (!raw) return;
+    const cleaned = raw.trim().replace(/\/+$/, '');
+    if (/^https?:\/\/[a-z0-9.-]+(?::\d+)?$/i.test(cleaned) && !candidates.includes(cleaned)) {
+      candidates.push(cleaned);
+    }
+  };
+
+  try {
+    const override = localStorage.getItem(BACKEND_OVERRIDE_STORAGE_KEY);
+    if (override) push(override);
+  } catch {
+    // ignore storage errors
+  }
+
+  push(import.meta.env.VITE_BACKEND_API_URL);
+  push(DEFAULT_BACKEND_ORIGIN);
+
+  const fallbacksRaw = import.meta.env.VITE_BACKEND_API_FALLBACK_URLS;
+  if (typeof fallbacksRaw === 'string' && fallbacksRaw.trim()) {
+    for (const entry of fallbacksRaw.split(',')) {
+      push(entry);
+    }
+  }
+
+  return candidates;
+}
+
+export function getBackendApiOrigin(): string {
+  return getBackendApiOrigins()[0] || getDefaultBackendApiOrigin();
+}
+
+export function setBackendApiOverride(url: string | null): void {
+  try {
+    if (!url || !url.trim()) {
+      localStorage.removeItem(BACKEND_OVERRIDE_STORAGE_KEY);
+    } else {
+      const cleaned = url.trim().replace(/\/+$/, '');
+      if (/^https?:\/\/[a-z0-9.-]+(?::\d+)?$/i.test(cleaned)) {
+        localStorage.setItem(BACKEND_OVERRIDE_STORAGE_KEY, cleaned);
+      }
+    }
+  } catch {
+    // ignore storage errors
+  }
 }
 
 export function resolveApiUrl(pathOrUrl: string): string {

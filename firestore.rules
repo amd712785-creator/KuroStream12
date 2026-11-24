@@ -38,8 +38,14 @@ service cloud.firestore {
         && request.auth.token.email_verified == true
         && (
           request.auth.token.admin == true
-          || request.auth.token.email == 'amd712785@gmail.com'
-          || request.auth.token.email == 'dyhfrtdturrt@gmail.com'
+          || (
+            'email' in request.auth.token
+            && request.auth.token.email is string
+            && (
+              request.auth.token.email.lower() == 'amd712785@gmail.com'
+              || request.auth.token.email.lower() == 'dyhfrtdturrt@gmail.com'
+            )
+          )
         );
     }
 
@@ -114,13 +120,15 @@ service cloud.firestore {
     function isValidUserProfile(data, userId) {
       return data.keys().hasAll(['uid', 'displayName', 'preferredAudio', 'autoNext', 'createdAt', 'updatedAt'])
         && data.keys().hasOnly([
-          'uid', 'displayName', 'photoURL', 'bannerURL', 'preferredAudio', 'autoNext',
+          'uid', 'displayName', 'email', 'photoURL', 'bannerURL', 'preferredAudio', 'autoNext',
           'lastActiveDay', 'lastActiveAt', 'createdAt', 'updatedAt',
           'theme', 'streakCurrent', 'streakLongest', 'streakLastWatchedDate',
           'streakWatchedDays', 'totalEpisodesCompleted', 'todayEpisodesCompleted',
           'todayCompletedDate', 'totalWatchSeconds', 'todayWatchSeconds',
           'todayWatchDate', 'watchedAnimeIds', 'unlockedAchievements',
-          'achievementUnlockDates', 'equippedBadges'
+          'achievementUnlockDates', 'equippedBadges',
+          'xp', 'level', 'lastLoginXpDay', 'lastGoalXpDay', 'xpStreakMilestones', 'xpUpdatedAt',
+          'equippedFrame', 'checkinStreak', 'lastCheckinDate', 'totalCheckins', 'coins'
         ])
         && data.uid is string
         && data.uid == userId
@@ -128,6 +136,7 @@ service cloud.firestore {
         && data.displayName is string
         && data.displayName.size() >= 1
         && data.displayName.size() <= 80
+        && (!('email' in data) || (data.email is string && data.email.size() <= 160 && (!('email' in request.auth.token) || !(request.auth.token.email is string) || data.email.lower() == request.auth.token.email.lower())))
         && (!('photoURL' in data) || (data.photoURL is string && data.photoURL.size() <= 500))
         && (!('bannerURL' in data) || (data.bannerURL is string && data.bannerURL.size() <= 500))
         && data.preferredAudio in ['sub', 'dub', 'hindi']
@@ -149,8 +158,28 @@ service cloud.firestore {
         && (!('unlockedAchievements' in data) || (data.unlockedAchievements is list && data.unlockedAchievements.size() <= 30))
         && (!('achievementUnlockDates' in data) || (data.achievementUnlockDates is map && data.achievementUnlockDates.size() <= 30))
         && (!('equippedBadges' in data) || isValidEquippedBadges(data))
-        && data.createdAt is timestamp
+        && (!('xp' in data) || (data.xp is number && data.xp >= 0))
+        && (!('level' in data) || (data.level is number && data.level >= 1 && data.level <= 999))
+        && (!('lastLoginXpDay' in data) || (data.lastLoginXpDay is string && data.lastLoginXpDay.size() <= 10 && data.lastLoginXpDay.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')))
+        && (!('lastGoalXpDay' in data) || (data.lastGoalXpDay is string && data.lastGoalXpDay.size() <= 10 && data.lastGoalXpDay.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')))
+        && (!('xpStreakMilestones' in data) || (data.xpStreakMilestones is list && data.xpStreakMilestones.size() <= 10))
+        && (!('xpUpdatedAt' in data) || data.xpUpdatedAt is timestamp)
+        && (!('equippedFrame' in data) || (data.equippedFrame is string && data.equippedFrame.size() <= 40))
+        && (!('checkinStreak' in data) || (data.checkinStreak is number && data.checkinStreak >= 0))
+        && (!('lastCheckinDate' in data) || (data.lastCheckinDate is string && data.lastCheckinDate.size() <= 10 && data.lastCheckinDate.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')))
+        && (!('totalCheckins' in data) || (data.totalCheckins is number && data.totalCheckins >= 0))
+        && (!('coins' in data) || (data.coins is number && data.coins >= 0))
+        && (data.createdAt is timestamp || (data.createdAt is string && data.createdAt.size() <= 40))
         && data.updatedAt is timestamp;
+    }
+
+    function isXpUpdateValid(inc, ext) {
+      return isAdmin()
+        || !inc.diff(ext).affectedKeys().hasAny(['xp', 'level'])
+        || (
+          'xp' in inc && inc.xp is number && inc.xp >= 0
+          && (!('xp' in ext) ? inc.xp <= 550 : (inc.xp >= ext.xp && (inc.xp - ext.xp) <= 550))
+        );
     }
 
     function isValidWatchActivityMonth(data, userId, monthKey) {
@@ -217,6 +246,55 @@ service cloud.firestore {
         && data.durationSeconds is number
         && data.durationSeconds >= 0
         && data.audioMode in ['sub', 'dub', 'hindi']
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidWatchLogItem(data, userId, logId) {
+      return data.keys().hasAll([
+          'id', 'ownerId', 'animeId', 'animeTitle', 'episodeId',
+          'episodeNumber', 'serverName', 'audioMode', 'watchedSeconds',
+          'progressSeconds', 'durationSeconds', 'completed', 'watchedDate',
+          'startedAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'ownerId', 'animeId', 'animeTitle', 'coverImage', 'episodeId',
+          'episodeNumber', 'episodeTitle', 'serverName', 'audioMode', 'watchedSeconds',
+          'progressSeconds', 'durationSeconds', 'completed', 'watchedDate',
+          'startedAt', 'updatedAt'
+        ])
+        && data.id is string
+        && data.id == logId
+        && isValidId(data.id)
+        && data.ownerId is string
+        && data.ownerId == userId
+        && isValidId(data.ownerId)
+        && data.animeId is number
+        && data.animeId > 0
+        && data.animeTitle is string
+        && data.animeTitle.size() >= 1
+        && data.animeTitle.size() <= 240
+        && (!('coverImage' in data) || (data.coverImage is string && data.coverImage.size() <= 500))
+        && data.episodeId is string
+        && data.episodeId.size() >= 1
+        && data.episodeId.size() <= 200
+        && data.episodeNumber is number
+        && data.episodeNumber >= 0
+        && (!('episodeTitle' in data) || (data.episodeTitle is string && data.episodeTitle.size() <= 240))
+        && data.serverName is string
+        && data.serverName.size() >= 1
+        && data.serverName.size() <= 80
+        && data.audioMode in ['sub', 'dub', 'hindi']
+        && data.watchedSeconds is number
+        && data.watchedSeconds >= 0
+        && data.progressSeconds is number
+        && data.progressSeconds >= 0
+        && data.durationSeconds is number
+        && data.durationSeconds >= 0
+        && data.completed is bool
+        && data.watchedDate is string
+        && data.watchedDate.size() == 10
+        && data.watchedDate.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+        && data.startedAt is timestamp
         && data.updatedAt is timestamp;
     }
 
@@ -367,12 +445,6 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
-    match /customization_settings/{settingId} {
-      allow get, list: if isSignedIn();
-      allow create, update: if isAdmin();
-      allow delete: if false;
-    }
-
     match /app_updates/{updateId} {
       allow get: if isSignedIn();
       allow list: if isSignedIn();
@@ -408,16 +480,34 @@ service cloud.firestore {
 
     function isValidActiveSession(data, sessionId) {
       return data.keys().hasAll(['id', 'userId', 'userName', 'animeId', 'animeTitle', 'episodeNumber', 'serverName', 'updatedAt'])
-        && data.keys().hasOnly(['id', 'userId', 'userName', 'userEmail', 'userAvatar', 'animeId', 'animeTitle', 'episodeNumber', 'episodeTitle', 'serverName', 'progressSeconds', 'durationSeconds', 'updatedAt'])
+        && data.keys().hasOnly([
+          'id', 'userId', 'userName', 'userEmail', 'userAvatar',
+          'animeId', 'animeTitle', 'episodeNumber', 'episodeTitle',
+          'serverName', 'status', 'watchedSeconds', 'progressSeconds', 'durationSeconds', 'updatedAt'
+        ])
         && data.id is string
         && data.id == sessionId
         && data.userId is string
         && data.userId == request.auth.uid
         && data.userName is string
+        && data.userName.size() >= 1
+        && data.userName.size() <= 120
+        && (!('userEmail' in data) || (data.userEmail is string && data.userEmail.size() <= 160))
+        && (!('userAvatar' in data) || (data.userAvatar is string && data.userAvatar.size() <= 500))
         && data.animeId is number
         && data.animeTitle is string
+        && data.animeTitle.size() >= 1
+        && data.animeTitle.size() <= 240
         && data.episodeNumber is number
+        && data.episodeNumber >= 0
+        && (!('episodeTitle' in data) || (data.episodeTitle is string && data.episodeTitle.size() <= 240))
         && data.serverName is string
+        && data.serverName.size() >= 1
+        && data.serverName.size() <= 80
+        && (!('status' in data) || data.status in ['playing', 'paused', 'buffering'])
+        && (!('watchedSeconds' in data) || (data.watchedSeconds is number && data.watchedSeconds >= 0))
+        && (!('progressSeconds' in data) || (data.progressSeconds is number && data.progressSeconds >= 0))
+        && (!('durationSeconds' in data) || (data.durationSeconds is number && data.durationSeconds >= 0))
         && data.updatedAt is timestamp;
     }
 
@@ -426,7 +516,7 @@ service cloud.firestore {
       allow list: if isAdmin();
       allow create, update: if isValidId(sessionId)
         && sessionId == request.auth.uid
-        && isSignedIn()
+        && isVerifiedOwner(sessionId)
         && isValidActiveSession(incoming(), sessionId)
         && incoming().userId == request.auth.uid
         && incoming().updatedAt == request.time;
@@ -440,26 +530,55 @@ service cloud.firestore {
         && isVerifiedOwner(userId)
         && isValidUserProfile(incoming(), userId)
         && (!('equippedBadges' in incoming()) || incoming().equippedBadges.size() == 0 || isAdmin())
+        && (!('xp' in incoming()) || incoming().xp <= 25 || isAdmin())
+        && (!('level' in incoming()) || incoming().level == 1 || isAdmin())
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time
         && (!('lastActiveAt' in incoming()) || incoming().lastActiveAt == request.time);
       allow update: if isValidId(userId)
-        && isVerifiedOwner(userId)
-        && isValidUserProfile(incoming(), userId)
-        && isEquippedBadgesAuthorizedOnUpdate(incoming(), existing())
-        && incoming().uid == existing().uid
-        && incoming().createdAt == existing().createdAt
-        && incoming().updatedAt == request.time
-        && (!('lastActiveAt' in incoming()) || incoming().lastActiveAt == request.time || incoming().lastActiveAt == existing().lastActiveAt)
-        && incoming().diff(existing()).affectedKeys().hasOnly([
-          'displayName', 'photoURL', 'bannerURL', 'preferredAudio', 'autoNext',
-          'lastActiveDay', 'lastActiveAt', 'updatedAt',
-          'theme', 'streakCurrent', 'streakLongest', 'streakLastWatchedDate',
-          'streakWatchedDays', 'totalEpisodesCompleted', 'todayEpisodesCompleted',
-          'todayCompletedDate', 'totalWatchSeconds', 'todayWatchSeconds',
-          'todayWatchDate', 'watchedAnimeIds', 'unlockedAchievements',
-          'achievementUnlockDates', 'equippedBadges'
-        ]);
+        && (
+          isAdmin()
+          || (
+            isVerifiedOwner(userId)
+            && isValidUserProfile(incoming(), userId)
+            && isEquippedBadgesAuthorizedOnUpdate(incoming(), existing())
+            && isXpUpdateValid(incoming(), existing())
+            && (
+              (!('uid' in existing()) || !(existing().uid is string) || existing().uid != userId)
+              || incoming().uid == existing().uid
+            )
+            && (
+              !incoming().diff(existing()).affectedKeys().hasAny(['createdAt'])
+              || ('createdAt' in existing() && incoming().createdAt == existing().createdAt)
+              || (!('createdAt' in existing()) && (incoming().createdAt is timestamp || incoming().createdAt == request.time))
+            )
+            && incoming().updatedAt == request.time
+            && (!('lastActiveAt' in incoming()) || incoming().lastActiveAt == request.time || ('lastActiveAt' in existing() && incoming().lastActiveAt == existing().lastActiveAt))
+            && (!('xpUpdatedAt' in incoming()) || incoming().xpUpdatedAt == request.time || ('xpUpdatedAt' in existing() && incoming().xpUpdatedAt == existing().xpUpdatedAt))
+            && incoming().diff(existing()).addedKeys().hasOnly([
+              'uid', 'displayName', 'email', 'photoURL', 'bannerURL', 'preferredAudio', 'autoNext',
+              'lastActiveDay', 'lastActiveAt', 'createdAt', 'updatedAt',
+              'theme', 'streakCurrent', 'streakLongest', 'streakLastWatchedDate',
+              'streakWatchedDays', 'totalEpisodesCompleted', 'todayEpisodesCompleted',
+              'todayCompletedDate', 'totalWatchSeconds', 'todayWatchSeconds',
+              'todayWatchDate', 'watchedAnimeIds', 'unlockedAchievements',
+              'achievementUnlockDates', 'equippedBadges',
+              'xp', 'level', 'lastLoginXpDay', 'lastGoalXpDay', 'xpStreakMilestones', 'xpUpdatedAt',
+              'equippedFrame', 'checkinStreak', 'lastCheckinDate', 'totalCheckins', 'coins'
+            ])
+            && incoming().diff(existing()).changedKeys().hasOnly([
+              'uid', 'displayName', 'email', 'photoURL', 'bannerURL', 'preferredAudio', 'autoNext',
+              'lastActiveDay', 'lastActiveAt', 'createdAt', 'updatedAt',
+              'theme', 'streakCurrent', 'streakLongest', 'streakLastWatchedDate',
+              'streakWatchedDays', 'totalEpisodesCompleted', 'todayEpisodesCompleted',
+              'todayCompletedDate', 'totalWatchSeconds', 'todayWatchSeconds',
+              'todayWatchDate', 'watchedAnimeIds', 'unlockedAchievements',
+              'achievementUnlockDates', 'equippedBadges',
+              'xp', 'level', 'lastLoginXpDay', 'lastGoalXpDay', 'xpStreakMilestones', 'xpUpdatedAt',
+              'equippedFrame', 'checkinStreak', 'lastCheckinDate', 'totalCheckins', 'coins'
+            ])
+          )
+        );
       allow delete: if isValidId(userId) && isVerifiedOwner(userId);
 
       match /watchlist/{animeId} {
@@ -522,6 +641,33 @@ service cloud.firestore {
         allow delete: if isValidId(userId) && isValidId(animeId) && isVerifiedOwner(userId);
       }
 
+      match /watchLogs/{logId} {
+        allow get: if (isValidId(userId) && isValidId(logId) && isVerifiedOwner(userId)) || isAdmin();
+        allow list: if (isValidId(userId) && isVerifiedOwner(userId) && resource.data.ownerId == request.auth.uid) || isAdmin();
+        allow create: if isValidId(userId)
+          && isValidId(logId)
+          && isVerifiedOwner(userId)
+          && isValidWatchLogItem(incoming(), userId, logId)
+          && incoming().startedAt == request.time
+          && incoming().updatedAt == request.time;
+        allow update: if isValidId(userId)
+          && isValidId(logId)
+          && isVerifiedOwner(userId)
+          && isValidWatchLogItem(incoming(), userId, logId)
+          && incoming().ownerId == existing().ownerId
+          && incoming().id == existing().id
+          && incoming().animeId == existing().animeId
+          && incoming().startedAt == existing().startedAt
+          && incoming().updatedAt == request.time
+          && incoming().watchedSeconds >= existing().watchedSeconds
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'animeTitle', 'coverImage', 'episodeId', 'episodeNumber', 'episodeTitle',
+            'serverName', 'audioMode', 'watchedSeconds', 'progressSeconds',
+            'durationSeconds', 'completed', 'watchedDate', 'updatedAt'
+          ]);
+        allow delete: if isValidId(userId) && isValidId(logId) && isVerifiedOwner(userId);
+      }
+
       match /watchActivity/{monthKey} {
         allow get: if (isValidId(userId) && isValidMonthKey(monthKey) && isVerifiedOwner(userId)) || isAdmin();
         allow list: if (isValidId(userId) && isVerifiedOwner(userId) && resource.data.ownerId == request.auth.uid) || isAdmin();
@@ -539,6 +685,367 @@ service cloud.firestore {
           && incoming().updatedAt == request.time
           && incoming().diff(existing()).affectedKeys().hasOnly(['days', 'updatedAt']);
         allow delete: if isValidId(userId) && isValidMonthKey(monthKey) && isVerifiedOwner(userId);
+      }
+
+      match /notifications/{notificationId} {
+        allow get: if isValidId(userId) && isValidId(notificationId) && (isVerifiedOwner(userId) || isAdmin());
+        allow list: if (isValidId(userId) && isVerifiedOwner(userId) && resource.data.ownerId == request.auth.uid) || isAdmin();
+        allow create: if isValidId(userId)
+          && isValidId(notificationId)
+          && (isVerifiedOwner(userId) || isAdmin())
+          && isValidUserNotification(incoming(), userId, notificationId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time;
+        allow update: if isValidId(userId)
+          && isValidId(notificationId)
+          && (isVerifiedOwner(userId) || isAdmin())
+          && isValidUserNotification(incoming(), userId, notificationId)
+          && incoming().id == existing().id
+          && incoming().ownerId == existing().ownerId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly(['read', 'title', 'message', 'actionUrl', 'updatedAt']);
+        allow delete: if isValidId(userId) && isValidId(notificationId) && (isVerifiedOwner(userId) || isAdmin());
+      }
+
+      match /notificationStates/{notificationId} {
+        allow get: if isValidId(userId) && isValidId(notificationId) && isVerifiedOwner(userId);
+        allow list: if isValidId(userId) && isVerifiedOwner(userId) && resource.data.ownerId == request.auth.uid;
+        allow create, update: if isValidId(userId)
+          && isValidId(notificationId)
+          && isVerifiedOwner(userId)
+          && isValidUserNotificationState(incoming(), userId, notificationId)
+          && incoming().updatedAt == request.time;
+        allow delete: if isValidId(userId) && isValidId(notificationId) && isVerifiedOwner(userId);
+      }
+
+      match /xpHistory/{entryId} {
+        allow get: if (isValidId(userId) && isValidId(entryId) && isVerifiedOwner(userId)) || isAdmin();
+        allow list: if (isValidId(userId) && isVerifiedOwner(userId) && resource.data.ownerId == request.auth.uid) || isAdmin();
+        allow create: if isValidId(userId)
+          && isValidId(entryId)
+          && isVerifiedOwner(userId)
+          && isValidXpHistoryEntry(incoming(), userId, entryId)
+          && incoming().createdAt == request.time;
+        allow update: if false;
+        allow delete: if isValidId(userId) && isValidId(entryId) && isVerifiedOwner(userId);
+      }
+    }
+
+    function isValidNotificationCategory(category) {
+      return category is string && category in [
+        'new_episode', 'new_release', 'app_update', 'admin_announcement', 'maintenance', 'service_alert'
+      ];
+    }
+
+    function isValidGlobalNotification(data, notifId) {
+      return data.keys().hasAll([
+          'id', 'category', 'title', 'message', 'targetType',
+          'targetUserIds', 'enabled', 'createdBy', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'category', 'title', 'message', 'targetType', 'targetUserIds',
+          'actionUrl', 'animeId', 'enabled', 'startAt', 'expiresAt',
+          'createdBy', 'createdAt', 'updatedAt'
+        ])
+        && data.id is string
+        && data.id == notifId
+        && isValidId(data.id)
+        && isValidNotificationCategory(data.category)
+        && data.title is string
+        && data.title.size() >= 1
+        && data.title.size() <= 160
+        && data.message is string
+        && data.message.size() >= 1
+        && data.message.size() <= 1200
+        && data.targetType in ['all', 'selected']
+        && data.targetUserIds is list
+        && data.targetUserIds.size() <= 100
+        && (!('actionUrl' in data) || (data.actionUrl is string && data.actionUrl.size() <= 500))
+        && (!('animeId' in data) || (data.animeId is number && data.animeId >= 0))
+        && data.enabled is bool
+        && (!('startAt' in data) || (data.startAt is string && data.startAt.size() <= 40))
+        && (!('expiresAt' in data) || (data.expiresAt is string && data.expiresAt.size() <= 40))
+        && data.createdBy is string
+        && isValidId(data.createdBy)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidNotificationSettings(data, settingId) {
+      return data.keys().hasAll(['id', 'enabledCategories', 'updatedBy', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'enabledCategories', 'updatedBy', 'updatedAt'])
+        && data.id is string
+        && data.id == settingId
+        && data.id == 'global'
+        && data.enabledCategories is map
+        && data.enabledCategories.size() <= 10
+        && data.updatedBy is string
+        && isValidId(data.updatedBy)
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidUserNotification(data, userId, notifId) {
+      return data.keys().hasAll(['id', 'ownerId', 'category', 'title', 'message', 'read', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'id', 'ownerId', 'category', 'title', 'message', 'read',
+          'actionUrl', 'animeId', 'episodeNumber', 'createdAt', 'updatedAt'
+        ])
+        && data.id is string
+        && data.id == notifId
+        && isValidId(data.id)
+        && data.ownerId is string
+        && data.ownerId == userId
+        && isValidId(data.ownerId)
+        && isValidNotificationCategory(data.category)
+        && data.title is string
+        && data.title.size() >= 1
+        && data.title.size() <= 160
+        && data.message is string
+        && data.message.size() >= 1
+        && data.message.size() <= 1200
+        && data.read is bool
+        && (!('actionUrl' in data) || (data.actionUrl is string && data.actionUrl.size() <= 500))
+        && (!('animeId' in data) || (data.animeId is number && data.animeId >= 0))
+        && (!('episodeNumber' in data) || (data.episodeNumber is number && data.episodeNumber >= 0))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidUserNotificationState(data, userId, notifId) {
+      return data.keys().hasAll(['id', 'ownerId', 'notificationId', 'read', 'deleted', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'ownerId', 'notificationId', 'read', 'deleted', 'updatedAt'])
+        && data.id is string
+        && data.id == notifId
+        && isValidId(data.id)
+        && data.ownerId is string
+        && data.ownerId == userId
+        && isValidId(data.ownerId)
+        && data.notificationId is string
+        && data.notificationId == notifId
+        && data.read is bool
+        && data.deleted is bool
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidXpHistoryEntry(data, userId, entryId) {
+      return data.keys().hasAll([
+          'id', 'ownerId', 'eventKey', 'actionType', 'xpDelta', 'reason', 'levelAfter', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'ownerId', 'eventKey', 'actionType', 'xpDelta', 'reason',
+          'animeTitle', 'episodeNumber', 'levelAfter', 'createdAt'
+        ])
+        && data.id is string
+        && data.id == entryId
+        && isValidId(data.id)
+        && data.ownerId is string
+        && data.ownerId == userId
+        && isValidId(data.ownerId)
+        && data.eventKey is string
+        && data.eventKey.size() >= 1
+        && data.eventKey.size() <= 128
+        && data.actionType in ['first_episode', 'episode_complete', 'daily_goal', 'daily_login', 'streak_milestone']
+        && data.xpDelta is number
+        && data.xpDelta >= 1
+        && data.xpDelta <= 500
+        && data.reason is string
+        && data.reason.size() >= 1
+        && data.reason.size() <= 200
+        && (!('animeTitle' in data) || (data.animeTitle is string && data.animeTitle.size() <= 240))
+        && (!('episodeNumber' in data) || (data.episodeNumber is number && data.episodeNumber >= 0))
+        && data.levelAfter is number
+        && data.levelAfter >= 1
+        && data.createdAt is timestamp;
+    }
+
+    function isValidCalendarScheduleEntry(data, entryId) {
+      return data.keys().hasAll([
+          'id', 'title', 'episodeNumber', 'releaseAt', 'status', 'removed', 'updatedBy', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'animeId', 'airingScheduleId', 'title', 'posterUrl', 'episodeNumber',
+          'releaseAt', 'status', 'removed', 'note', 'updatedBy', 'createdAt', 'updatedAt'
+        ])
+        && data.id is string
+        && data.id == entryId
+        && isValidId(data.id)
+        && (!('animeId' in data) || (data.animeId is number && data.animeId >= 0))
+        && (!('airingScheduleId' in data) || (data.airingScheduleId is number && data.airingScheduleId >= 0))
+        && data.title is string
+        && data.title.size() >= 1
+        && data.title.size() <= 240
+        && (!('posterUrl' in data) || (data.posterUrl is string && data.posterUrl.size() <= 500))
+        && data.episodeNumber is number
+        && data.episodeNumber >= 0
+        && data.releaseAt is number
+        && data.releaseAt >= 0
+        && data.status in ['upcoming', 'released', 'delayed']
+        && data.removed is bool
+        && (!('note' in data) || (data.note is string && data.note.size() <= 300))
+        && data.updatedBy is string
+        && isValidId(data.updatedBy)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    match /notifications/{notificationId} {
+      allow get: if isValidId(notificationId) && (
+        isAdmin()
+        || (isSignedIn() && (resource.data.targetType == 'all' || request.auth.uid in resource.data.targetUserIds))
+      );
+      allow list: if isAdmin() || (
+        isSignedIn() && (resource.data.targetType == 'all' || request.auth.uid in resource.data.targetUserIds)
+      );
+      allow create: if isValidId(notificationId)
+        && isAdmin()
+        && isValidGlobalNotification(incoming(), notificationId)
+        && incoming().createdBy == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(notificationId)
+        && isAdmin()
+        && isValidGlobalNotification(incoming(), notificationId)
+        && incoming().id == existing().id
+        && incoming().createdBy == existing().createdBy
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'category', 'title', 'message', 'targetType', 'targetUserIds',
+          'actionUrl', 'animeId', 'enabled', 'startAt', 'expiresAt', 'updatedAt'
+        ]);
+      allow delete: if isValidId(notificationId) && isAdmin();
+    }
+
+    match /notification_settings/{settingId} {
+      allow get: if isSignedIn();
+      allow list: if isSignedIn();
+      allow create, update: if isValidId(settingId)
+        && settingId == 'global'
+        && isAdmin()
+        && isValidNotificationSettings(incoming(), settingId)
+        && incoming().updatedAt == request.time;
+      allow delete: if false;
+    }
+
+    function isValidCommunityPost(data, postId) {
+      return data.keys().hasAll(['authorUid', 'authorName', 'authorAvatar', 'content', 'likesCount', 'likedBy', 'commentsCount', 'reported', 'reportsCount', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'authorUid', 'authorName', 'authorAvatar', 'authorFrame', 'content', 'imageUrl', 'likesCount', 'likedBy', 'commentsCount', 'reported', 'reportsCount', 'createdAt', 'updatedAt'])
+        && (!('id' in data) || data.id == postId)
+        && data.authorUid is string
+        && isValidId(data.authorUid)
+        && data.authorName is string
+        && data.authorName.size() >= 1
+        && data.authorName.size() <= 80
+        && data.authorAvatar is string
+        && data.authorAvatar.size() <= 500
+        && (!('authorFrame' in data) || (data.authorFrame is string && data.authorFrame.size() <= 40))
+        && data.content is string
+        && data.content.size() >= 1
+        && data.content.size() <= 2000
+        && (!('imageUrl' in data) || (data.imageUrl is string && data.imageUrl.size() <= 500))
+        && data.likesCount is number
+        && data.likesCount >= 0
+        && data.likedBy is list
+        && data.likedBy.size() <= 5000
+        && data.commentsCount is number
+        && data.commentsCount >= 0
+        && data.reported is bool
+        && data.reportsCount is number
+        && data.reportsCount >= 0
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidCommunityComment(data, commentId) {
+      return data.keys().hasAll(['postId', 'authorUid', 'authorName', 'authorAvatar', 'content', 'createdAt'])
+        && data.keys().hasOnly(['id', 'postId', 'authorUid', 'authorName', 'authorAvatar', 'authorFrame', 'content', 'createdAt'])
+        && (!('id' in data) || data.id == commentId)
+        && data.postId is string
+        && isValidId(data.postId)
+        && data.authorUid is string
+        && isValidId(data.authorUid)
+        && data.authorName is string
+        && data.authorName.size() >= 1
+        && data.authorName.size() <= 80
+        && data.authorAvatar is string
+        && data.authorAvatar.size() <= 500
+        && (!('authorFrame' in data) || (data.authorFrame is string && data.authorFrame.size() <= 40))
+        && data.content is string
+        && data.content.size() >= 1
+        && data.content.size() <= 1000
+        && data.createdAt is timestamp;
+    }
+
+    match /calendar_entries/{entryId} {
+      allow get: if isSignedIn();
+      allow list: if isSignedIn();
+      allow create: if isValidId(entryId)
+        && isAdmin()
+        && isValidCalendarScheduleEntry(incoming(), entryId)
+        && incoming().updatedBy == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(entryId)
+        && isAdmin()
+        && isValidCalendarScheduleEntry(incoming(), entryId)
+        && incoming().id == existing().id
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedBy == request.auth.uid
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'animeId', 'airingScheduleId', 'title', 'posterUrl', 'episodeNumber',
+          'releaseAt', 'status', 'removed', 'note', 'updatedBy', 'updatedAt'
+        ]);
+      allow delete: if isValidId(entryId) && isAdmin();
+    }
+
+    match /community_posts/{postId} {
+      allow get: if isValidId(postId) && isSignedIn();
+      allow list: if isSignedIn();
+      allow create: if isValidId(postId)
+        && isSignedIn()
+        && isValidCommunityPost(incoming(), postId)
+        && incoming().authorUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && incoming().likesCount == 0
+        && incoming().commentsCount == 0
+        && incoming().reported == false
+        && incoming().reportsCount == 0;
+      allow update: if isValidId(postId)
+        && isSignedIn()
+        && isValidCommunityPost(incoming(), postId)
+        && incoming().authorUid == existing().authorUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          (incoming().authorUid == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['content', 'imageUrl', 'authorName', 'authorAvatar', 'authorFrame', 'updatedAt']))
+          || incoming().diff(existing()).affectedKeys().hasOnly(['likesCount', 'likedBy', 'updatedAt'])
+          || incoming().diff(existing()).affectedKeys().hasOnly(['reported', 'reportsCount', 'updatedAt'])
+          || incoming().diff(existing()).affectedKeys().hasOnly(['commentsCount', 'updatedAt'])
+          || isAdmin()
+        );
+      allow delete: if isValidId(postId) && (
+        (isSignedIn() && existing().authorUid == request.auth.uid)
+        || isAdmin()
+      );
+
+      match /comments/{commentId} {
+        allow get: if isValidId(postId) && isValidId(commentId) && isSignedIn();
+        allow list: if isValidId(postId) && isSignedIn();
+        allow create: if isValidId(postId)
+          && isValidId(commentId)
+          && isSignedIn()
+          && isValidCommunityComment(incoming(), commentId)
+          && incoming().authorUid == request.auth.uid
+          && incoming().postId == postId
+          && incoming().createdAt == request.time;
+        allow update: if false;
+        allow delete: if isValidId(postId) && isValidId(commentId) && (
+          (isSignedIn() && existing().authorUid == request.auth.uid)
+          || isAdmin()
+        );
       }
     }
   }

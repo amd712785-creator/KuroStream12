@@ -3,6 +3,7 @@ import { ASSETS } from '@/src/config/env';
 
 interface AnimeImageProps {
   src?: string | null;
+  fallbackSrc?: string | null;
   alt: string;
   variant?: 'poster' | 'banner' | 'avatar';
   className?: string;
@@ -11,26 +12,32 @@ interface AnimeImageProps {
 
 export const AnimeImage: React.FC<AnimeImageProps> = ({
   src,
+  fallbackSrc,
   alt,
   variant = 'poster',
   className = '',
   priority = false,
 }) => {
-  const fallback =
+  const assetFallback =
     variant === 'banner'
       ? ASSETS.heroFallback
       : variant === 'avatar'
         ? ASSETS.defaultAvatar
         : ASSETS.posterFallback;
 
-  const resolvedInitial = src && src.trim() ? src.trim() : fallback;
+  const cleanFallbackSrc =
+    fallbackSrc && fallbackSrc.trim() && fallbackSrc.trim() !== (src || '').trim()
+      ? fallbackSrc.trim()
+      : null;
+
+  const resolvedInitial = src && src.trim() ? src.trim() : cleanFallbackSrc || assetFallback;
   const [imgSrc, setImgSrc] = useState<string>(resolvedInitial);
   const [loaded, setLoaded] = useState(false);
   const [failedAll, setFailedAll] = useState(false);
   const imgRef = useRef<HTMLImageElement>(null);
 
   useEffect(() => {
-    const nextSrc = src && src.trim() ? src.trim() : fallback;
+    const nextSrc = src && src.trim() ? src.trim() : cleanFallbackSrc || assetFallback;
     setImgSrc(nextSrc);
     setFailedAll(false);
     const el = imgRef.current;
@@ -39,7 +46,7 @@ export const AnimeImage: React.FC<AnimeImageProps> = ({
     } else {
       setLoaded(false);
     }
-  }, [src, fallback]);
+  }, [src, cleanFallbackSrc, assetFallback]);
 
   if (failedAll) {
     return (
@@ -77,8 +84,11 @@ export const AnimeImage: React.FC<AnimeImageProps> = ({
         fetchPriority={priority ? 'high' : undefined}
         onLoad={() => setLoaded(true)}
         onError={() => {
-          if (imgSrc !== fallback) {
-            setImgSrc(fallback);
+          if (cleanFallbackSrc && imgSrc !== cleanFallbackSrc && imgSrc !== assetFallback) {
+            setImgSrc(cleanFallbackSrc);
+            setLoaded(false);
+          } else if (imgSrc !== assetFallback) {
+            setImgSrc(assetFallback);
             setLoaded(false);
           } else {
             setFailedAll(true);

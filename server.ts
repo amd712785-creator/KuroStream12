@@ -4,6 +4,8 @@ import * as cheerio from 'cheerio';
 import crypto from 'crypto';
 import fs from 'fs';
 import http from 'http';
+import https from 'https';
+import net from 'net';
 import os from 'os';
 import path from 'path';
 import { Readable } from 'stream';
@@ -75,6 +77,7 @@ function resolveWritableDataDir(): string {
 const DATA_DIR = resolveWritableDataDir();
 const BANNER_UPLOADS_DIR = path.join(DATA_DIR, 'uploads', 'banners');
 const ANALYTICS_FILE_PATH = path.join(DATA_DIR, 'analytics.json');
+const XP_LEDGER_FILE_PATH = path.join(DATA_DIR, 'xp-ledger.json');
 
 interface FirebaseProjectConfig {
   projectId: string;
@@ -521,7 +524,9 @@ function verifyStreamSessionCookie(req: Request): { valid: boolean; uid?: string
 }
 
 function getExtraAllowedOrigins(): string[] {
-  const raw = process.env.ALLOWED_ORIGINS || '';
+  const raw = [process.env.ALLOWED_ORIGINS || '', process.env.APP_URL || '']
+    .filter(Boolean)
+    .join(',');
   return raw
     .split(',')
     .map((o) => o.trim().replace(/\/+$/, ''))
@@ -536,6 +541,7 @@ function isAllowedAppOrigin(req: Request, requestOrigin: string): boolean {
     requestOrigin === 'capacitor://localhost' ||
     requestOrigin === 'ionic://localhost' ||
     /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(requestOrigin) ||
+    /^(capacitor|ionic):\/\/localhost(:\d+)?$/i.test(requestOrigin) ||
     /^https:\/\/[a-z0-9.-]+\.(run\.app|vercel\.app|web\.app|firebaseapp\.com|googleusercontent\.com|usercontent\.goog)$/i.test(
       requestOrigin
     )
@@ -581,11 +587,15 @@ function applyProtectedCorsHeaders(
     'Access-Control-Allow-Methods',
     options.methods || 'GET, HEAD, POST, DELETE, OPTIONS'
   );
-  res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, Range, If-Range');
+  res.setHeader(
+    'Access-Control-Allow-Headers',
+    'Authorization, Content-Type, Range, If-Range, X-Requested-With'
+  );
   res.setHeader(
     'Access-Control-Expose-Headers',
     'Content-Length, Content-Range, Accept-Ranges, Content-Type, Content-Disposition'
   );
+  res.setHeader('Access-Control-Max-Age', '3600');
 }
 
 async function verifyFirebaseUserRequest(req: Request): Promise<VerifiedFirebaseUserResult> {
@@ -725,6 +735,10 @@ async function verifyFirebaseUserRequest(req: Request): Promise<VerifiedFirebase
   };
 }
 
+interface AuthenticatedRequest extends Request {
+  firebaseUser?: VerifiedFirebaseUserResult;
+}
+
 async function requireFirebaseAuth(req: Request, res: Response, next: NextFunction): Promise<void> {
   const authCheck = await verifyFirebaseUserRequest(req);
   if (!authCheck.ok) {
@@ -747,6 +761,7 @@ async function requireFirebaseAuth(req: Request, res: Response, next: NextFuncti
     return;
   }
 
+  (req as AuthenticatedRequest).firebaseUser = authCheck;
   next();
 }
 
@@ -857,6 +872,18 @@ const ANISKIP_API_URL = 'https://api.aniskip.com/v2/skip-times';
 const ANIMEWORLD_UPSTREAM = (
   process.env.ANIMEWORLD_UPSTREAM_URL || 'https://animesky.app'
 ).replace(/\/+$/, '');
+const ANIMEWORLD_UPSTREAMS: string[] = Array.from(
+  new Set(
+    [
+      ANIMEWORLD_UPSTREAM,
+      ...(process.env.ANIMEWORLD_UPSTREAM_URLS || '').split(','),
+      'https://animesky.app',
+      'https://animesalt.cx',
+    ]
+      .map((u) => u.trim().replace(/\/+$/, ''))
+      .filter((u) => /^https?:\/\//i.test(u))
+  )
+);
 const ANIMEWORLD_INDIA_API_URL = (
   process.env.ANIMEWORLD_INDIA_API_URL || ''
 )
@@ -864,7 +891,7 @@ const ANIMEWORLD_INDIA_API_URL = (
   .replace(/\/+$/, '');
 
 const BROWSER_UA =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
 interface CacheEntry<T> {
   expiresAt: number;
@@ -912,17 +939,48 @@ function normalizeUrl(raw: string): string {
   return raw.trim().replace(/^https:\/{3,}/i, 'https://').replace(/^http:\/{3,}/i, 'http://');
 }
 
+function isBlockedPrivateIp(ipRaw: string): boolean {
+  const ip = ipRaw.trim().replace(/^\[|\]$/g, '').toLowerCase();
+  const ver = net.isIP(ip);
+  if (!ver) return false;
+  if (ver === 4) {
+    const parts = ip.split('.').map(Number);
+    if (parts.length !== 4 || parts.some((n) => !Number.isFinite(n) || n < 0 || n > 255)) {
+      return true;
+    }
+    const [a, b] = parts;
+    if (a === 0 || a === 10 || a === 127) return true;
+    if (a === 169 && b === 254) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+    if (a === 100 && b >= 64 && b <= 127) return true;
+    if (a >= 224) return true;
+    return false;
+  }
+  if (ip === '::' || ip === '::1') return true;
+  if (ip.startsWith('fc') || ip.startsWith('fd') || ip.startsWith('fe80:')) return true;
+  if (ip.startsWith('::ffff:')) {
+    return isBlockedPrivateIp(ip.slice('::ffff:'.length));
+  }
+  return false;
+}
+
 function isBlockedPrivateHost(hostname: string): boolean {
-  const h = hostname.toLowerCase();
+  const h = hostname.trim().replace(/^\[|\]$/g, '').toLowerCase();
   if (
+    !h ||
     h === 'localhost' ||
     h === '127.0.0.1' ||
     h === '::1' ||
     h === '0.0.0.0' ||
     h.endsWith('.local') ||
-    h.endsWith('.internal')
+    h.endsWith('.internal') ||
+    h.endsWith('.localhost')
   ) {
     return true;
+  }
+  if (net.isIP(h)) {
+    return isBlockedPrivateIp(h);
   }
   if (/^10\./.test(h) || /^192\.168\./.test(h) || /^169\.254\./.test(h)) {
     return true;
@@ -1446,6 +1504,36 @@ function normalizeAnimeWorldImg(src?: string | null): string | null {
   return trimmed;
 }
 
+const AW_ALLOWED_IMAGE_HOST_PATTERNS: RegExp[] = [
+  /^image\.tmdb\.org$/i,
+  /^(?:[a-z0-9-]+\.)?tmdb\.org$/i,
+  /^animesky\.app$/i,
+  /^(?:[a-z0-9-]+\.)?animesky\.app$/i,
+  /^animesalt\.cx$/i,
+  /^(?:[a-z0-9-]+\.)?animesalt\.cx$/i,
+  /^i[0-3]\.wp\.com$/i,
+  /^wp\.com$/i,
+  /^as-cdn\d+\.top$/i,
+  /^s4\.anilist\.co$/i,
+];
+
+function isAllowedAwImageUrl(rawUrl: string): boolean {
+  try {
+    const parsed = new URL(rawUrl);
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return false;
+    if (isBlockedPrivateHost(parsed.hostname)) return false;
+    return AW_ALLOWED_IMAGE_HOST_PATTERNS.some((re) => re.test(parsed.hostname));
+  } catch {
+    return false;
+  }
+}
+
+function buildAnimeWorldProxyImageUrl(rawImg?: string | null): string | null {
+  const normalized = normalizeAnimeWorldImg(rawImg);
+  if (!normalized || !isAllowedAwImageUrl(normalized)) return null;
+  return `/api/anime-world-india/v1/image.php?url=${encodeURIComponent(normalized)}`;
+}
+
 function extractSlugFromHref(href: string | undefined, segment: string): string | null {
   if (!href) return null;
   const match = href.match(new RegExp(`/${segment}/([^/?#]+)`, 'i'));
@@ -1457,6 +1545,32 @@ function parseAnimeWorldCards($: cheerio.CheerioAPI, root?: cheerio.Cheerio<any>
   const items: Array<Record<string, unknown>> = [];
   const seen = new Set<string>();
 
+  const pushCardItem = (
+    title: string,
+    imgRaw: string | undefined,
+    year: string | null,
+    rating: string | null,
+    seriesId: string | null,
+    movieId: string | null
+  ) => {
+    const idKey = seriesId ? `series:${seriesId}` : movieId ? `movie:${movieId}` : '';
+    if (!idKey || seen.has(idKey) || !title) return;
+    seen.add(idKey);
+    const image = normalizeAnimeWorldImg(imgRaw);
+    const proxyImage = buildAnimeWorldProxyImageUrl(image);
+    items.push({
+      title,
+      image,
+      ...(proxyImage ? { proxyImage } : {}),
+      year,
+      rating,
+      type: seriesId ? 'series' : 'movie',
+      ...(seriesId ? { seriesId } : {}),
+      ...(movieId ? { movieId } : {}),
+    });
+  };
+
+  // 1. Primary AnimeSky Torofilm V2 markup
   container.find('article.tr-movie-card').each((_, el) => {
     const card = $(el);
     const linkEl = card.find('a.tr-movie-link').first();
@@ -1464,60 +1578,107 @@ function parseAnimeWorldCards($: cheerio.CheerioAPI, root?: cheerio.Cheerio<any>
     const seriesId = extractSlugFromHref(href, 'series');
     const movieId =
       extractSlugFromHref(href, 'movies') || extractSlugFromHref(href, 'movie');
-    const idKey = seriesId ? `series:${seriesId}` : movieId ? `movie:${movieId}` : '';
-    if (!idKey || seen.has(idKey)) return;
-    seen.add(idKey);
-
     const imgEl = card.find('img').first();
-    const imgRaw = imgEl.attr('data-src') || imgEl.attr('src');
+    const imgRaw = imgEl.attr('data-src') || imgEl.attr('data-lazy-src') || imgEl.attr('src');
     const title = card.find('.tr-movie-title, h3, h2').first().text().trim();
     const year = card.find('.year, .tr-year').first().text().trim() || null;
     const rating = card.find('.vote, .tr-rating').first().text().trim() || null;
-    if (!title) return;
+    pushCardItem(title, imgRaw, year, rating, seriesId, movieId);
+  });
 
-    items.push({
-      title,
-      image: normalizeAnimeWorldImg(imgRaw),
-      year,
-      rating,
-      type: seriesId ? 'series' : 'movie',
-      ...(seriesId ? { seriesId } : {}),
-      ...(movieId ? { movieId } : {}),
+  // 2. Legacy / Mirror Torofilm markup (animesalt.cx `article.post.movies` & `ul.post-lst li`)
+  if (items.length === 0) {
+    container
+      .find('article.post:not(.episodes), ul.post-lst li.status-publish, article.movies')
+      .each((_, el) => {
+        const node = $(el);
+        const linkEl = node
+          .find('a.lnk-blk, a[href*="/series/"], a[href*="/movies/"], a[href*="/movie/"]')
+          .first();
+        const href = linkEl.attr('href') || '';
+        const seriesId = extractSlugFromHref(href, 'series');
+        const movieId =
+          extractSlugFromHref(href, 'movies') || extractSlugFromHref(href, 'movie');
+        const imgEl = node.find('img').first();
+        const imgRaw =
+          imgEl.attr('data-src') || imgEl.attr('data-lazy-src') || imgEl.attr('src');
+        const title = node.find('h2.entry-title, h3, h2, .entry-title').first().text().trim();
+        const year = node.find('span.year, .year').first().text().trim() || null;
+        const rating = node.find('span.vote, .vote').first().text().trim() || null;
+        pushCardItem(title, imgRaw, year, rating, seriesId, movieId);
+      });
+  }
+
+  return items;
+}
+
+function parseEpisodesFromAnimeWorldHtml(html: string) {
+  const $ = cheerio.load(html);
+  const episodes: Array<Record<string, unknown>> = [];
+  const seen = new Set<string>();
+
+  // 1. Primary AnimeSky Torofilm V2 episode cards
+  $('article.tr-episode-card').each((_, el) => {
+    const card = $(el);
+    const href = card.find('a.tr-episode-link').first().attr('href') || '';
+    const episodeId = extractSlugFromHref(href, 'episode');
+    if (!episodeId || seen.has(episodeId)) return;
+    seen.add(episodeId);
+
+    const epTitle = card.find('.tr-episode-title, h3, h2').first().text().trim() || episodeId;
+    const epNumber = card.find('.tr-episode-number').first().text().trim() || '';
+    const imgEl = card.find('img').first();
+    const image = normalizeAnimeWorldImg(
+      imgEl.attr('data-src') || imgEl.attr('data-lazy-src') || imgEl.attr('src')
+    );
+    const proxyImage = buildAnimeWorldProxyImageUrl(image);
+    episodes.push({
+      episodeId,
+      title: epTitle,
+      episodeNumber: epNumber,
+      airDate: null,
+      image,
+      ...(proxyImage ? { proxyImage } : {}),
+      overview: null,
     });
   });
 
-  // Fallback for legacy Torofilm post-lst markup if present
-  if (items.length === 0) {
-    container.find('ul.post-lst li.status-publish').each((_, el) => {
-      const li = $(el);
-      const href = li.find('a.lnk-blk').first().attr('href') || '';
-      const seriesId = extractSlugFromHref(href, 'series');
-      const movieId =
-        extractSlugFromHref(href, 'movies') || extractSlugFromHref(href, 'movie');
-      const idKey = seriesId ? `series:${seriesId}` : movieId ? `movie:${movieId}` : '';
-      if (!idKey || seen.has(idKey)) return;
-      seen.add(idKey);
+  // 2. Classic Torofilm / Mirror (`article.episodes`, `ul#episode_by_temp li`)
+  if (episodes.length === 0) {
+    $('ul#episode_by_temp li, article.episodes, li.episodes').each((_, el) => {
+      const node = $(el);
+      const href =
+        node.find('a.lnk-blk, a[href*="/episode/"]').first().attr('href') || '';
+      const episodeId = extractSlugFromHref(href, 'episode');
+      if (!episodeId || seen.has(episodeId)) return;
+      seen.add(episodeId);
 
-      const imgEl = li.find('img').first();
-      const imgRaw = imgEl.attr('data-src') || imgEl.attr('src');
-      const title = li.find('h2.entry-title, h3').first().text().trim();
-      const year = li.find('span.year').first().text().trim() || null;
-      const rating = li.find('span.vote').first().text().trim() || null;
-      if (!title) return;
-
-      items.push({
-        title,
-        image: normalizeAnimeWorldImg(imgRaw),
-        year,
-        rating,
-        type: seriesId ? 'series' : 'movie',
-        ...(seriesId ? { seriesId } : {}),
-        ...(movieId ? { movieId } : {}),
+      const epTitle =
+        node.find('h2.entry-title, .entry-title, h3, h2').first().text().trim() || episodeId;
+      const rawNum = node.find('.num-epi, .num').first().text().trim() || '';
+      const epNumber = rawNum
+        ? /^\d+$/.test(rawNum)
+          ? `EP ${rawNum}`
+          : rawNum
+        : '';
+      const imgEl = node.find('img').first();
+      const image = normalizeAnimeWorldImg(
+        imgEl.attr('data-src') || imgEl.attr('data-lazy-src') || imgEl.attr('src')
+      );
+      const proxyImage = buildAnimeWorldProxyImageUrl(image);
+      episodes.push({
+        episodeId,
+        title: epTitle,
+        episodeNumber: epNumber,
+        airDate: null,
+        image,
+        ...(proxyImage ? { proxyImage } : {}),
+        overview: null,
       });
     });
   }
 
-  return items;
+  return { $, episodes };
 }
 
 function classifyAnimeWorldStreamType(url: string): 'hls' | 'mp4' | 'embed' {
@@ -1570,10 +1731,11 @@ function parseAnimeWorldPagination($: cheerio.CheerioAPI, page: number) {
 }
 
 function extractAnimeWorldPageMeta($: cheerio.CheerioAPI, fallbackTitle: string) {
-  const title = $('h1.hero-title, h1.episode-title, h1.entry-title').first().text().trim() || fallbackTitle;
+  const title =
+    $('h1.hero-title, h1.episode-title, h1.entry-title').first().text().trim() || fallbackTitle;
   const poster = normalizeAnimeWorldImg(
-    $('.hero-poster img, .post-thumbnail img').first().attr('data-src') ||
-      $('.hero-poster img, .post-thumbnail img').first().attr('src')
+    $('.hero-poster img, .post-thumbnail img, article.TPost .Image img').first().attr('data-src') ||
+      $('.hero-poster img, .post-thumbnail img, article.TPost .Image img').first().attr('src')
   );
   const ogImg = normalizeAnimeWorldImg($('meta[property="og:image"]').attr('content'));
   const backdropAttr = normalizeAnimeWorldImg(
@@ -1581,10 +1743,11 @@ function extractAnimeWorldPageMeta($: cheerio.CheerioAPI, fallbackTitle: string)
       $('.hero-backdrop img, .backdrop img, .hero-bg img').first().attr('src')
   );
   const banner = backdropAttr || (ogImg && ogImg !== poster ? ogImg : null);
-  const description = $('#overview-text p, .description p, .hero-description').first().text().trim() || null;
+  const description =
+    $('#overview-text p, .description p, .hero-description').first().text().trim() || null;
 
   const heroBadges: string[] = [];
-  $('.hero-badge').each((_, el) => {
+  $('.hero-badge, .entry-meta .year, .entry-meta span').each((_, el) => {
     const txt = $(el).text().trim();
     if (txt) heroBadges.push(txt);
   });
@@ -1598,7 +1761,7 @@ function extractAnimeWorldPageMeta($: cheerio.CheerioAPI, fallbackTitle: string)
   const rating = ratingMatch ? ratingMatch[1] : null;
 
   const languages: string[] = [];
-  $('a.language-tag').each((_, el) => {
+  $('a.language-tag, a[href*="/category/hindi"], a[href*="/category/english"], a[href*="/category/japanese"], a[href*="/category/tamil"], a[href*="/category/telugu"]').each((_, el) => {
     const lang = $(el).text().trim();
     if (lang && !languages.includes(lang)) languages.push(lang);
   });
@@ -1687,12 +1850,55 @@ interface AwHtmlResult {
   ok: boolean;
   status: number;
   html: string;
+  upstream?: string;
   blockedByUpstream?: boolean;
 }
 
-const AW_HTML_CACHE_MAX = 100;
+const AW_HTML_CACHE_MAX = 120;
 const awHtmlCache = new Map<string, { expiresAt: number; value: AwHtmlResult }>();
 const awHtmlInFlight = new Map<string, Promise<AwHtmlResult>>();
+
+const AW_PARSED_CACHE_MAX = 120;
+const awParsedCache = new Map<
+  string,
+  { freshUntil: number; staleUntil: number; payload: Record<string, unknown> }
+>();
+
+function readAwParsedCache(
+  key: string,
+  allowStale = false
+): Record<string, unknown> | null {
+  const entry = awParsedCache.get(key);
+  if (!entry) return null;
+  const now = Date.now();
+  if (now <= entry.freshUntil || (allowStale && now <= entry.staleUntil)) {
+    return entry.payload;
+  }
+  if (now > entry.staleUntil) {
+    awParsedCache.delete(key);
+  }
+  return null;
+}
+
+function writeAwParsedCache(
+  key: string,
+  payload: Record<string, unknown>,
+  freshTtlMs = 120_000,
+  staleTtlMs = 20 * 60_000
+): void {
+  if (awParsedCache.has(key)) {
+    awParsedCache.delete(key);
+  } else if (awParsedCache.size >= AW_PARSED_CACHE_MAX) {
+    const oldest = awParsedCache.keys().next().value;
+    if (oldest !== undefined) awParsedCache.delete(oldest);
+  }
+  const now = Date.now();
+  awParsedCache.set(key, {
+    freshUntil: now + freshTtlMs,
+    staleUntil: now + freshTtlMs + staleTtlMs,
+    payload,
+  });
+}
 
 function getAwHtmlCacheTtlMs(url: string): number {
   const lower = url.toLowerCase();
@@ -1701,89 +1907,353 @@ function getAwHtmlCacheTtlMs(url: string): number {
   return 90_000;
 }
 
-async function fetchAnimeWorldHtml(url: string): Promise<AwHtmlResult> {
-  const cached = awHtmlCache.get(url);
-  if (cached) {
-    if (Date.now() <= cached.expiresAt) {
-      awHtmlCache.delete(url);
-      awHtmlCache.set(url, cached);
-      return cached.value;
-    }
-    awHtmlCache.delete(url);
+const dohIpCache = new Map<string, { expiresAt: number; ips: string[] }>();
+
+async function resolvePublicHostnameViaDoh(hostname: string): Promise<string[]> {
+  if (isBlockedPrivateHost(hostname)) return [];
+  const cached = dohIpCache.get(hostname);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.ips;
   }
 
-  const existing = awHtmlInFlight.get(url);
-  if (existing) return existing;
+  const resolvers = [
+    `https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(hostname)}&type=A`,
+    `https://dns.google/resolve?name=${encodeURIComponent(hostname)}&type=A`,
+  ];
 
-  const task = (async (): Promise<AwHtmlResult> => {
+  for (const endpoint of resolvers) {
     try {
       const res = await fetchWithTimeout(
-        url,
-        {
-          headers: {
-            'User-Agent': BROWSER_UA,
-            Accept:
-              'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate, br',
-            Referer: `${ANIMEWORLD_UPSTREAM}/`,
-            Origin: ANIMEWORLD_UPSTREAM,
-            'Sec-Ch-Ua': '"Not/A)Brand";v="8", "Chromium";v="126", "Google Chrome";v="126"',
-            'Sec-Ch-Ua-Mobile': '?0',
-            'Sec-Ch-Ua-Platform': '"Windows"',
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'same-origin',
-            'Upgrade-Insecure-Requests': '1',
-          },
-        },
-        8000
+        endpoint,
+        { headers: { Accept: 'application/dns-json' } },
+        4000
       );
-      const cfMitigated = (res.headers.get('cf-mitigated') || '').toLowerCase();
-      const serverHeader = (res.headers.get('server') || '').toLowerCase();
-      const rawBody = await res.text().catch(() => '');
-      const lowerBody = rawBody.slice(0, 4000).toLowerCase();
-      const hasCfChallengeMarker =
-        lowerBody.includes('just a moment...') ||
-        lowerBody.includes('cf_chl_opt') ||
-        lowerBody.includes('cf-browser-verification') ||
-        lowerBody.includes('attention required! | cloudflare');
-      const blockedByUpstream =
-        (res.status === 403 || res.status === 503) &&
-        (cfMitigated.includes('challenge') || serverHeader.includes('cloudflare') || hasCfChallengeMarker);
-      const html = res.ok ? rawBody : '';
-      if (!res.ok) {
+      if (!res.ok) continue;
+      const json = (await res.json()) as {
+        Answer?: Array<{ type?: number; data?: string }>;
+      };
+      const ips = (json.Answer || [])
+        .filter((a) => a.type === 1 && typeof a.data === 'string' && net.isIP(a.data) === 4)
+        .map((a) => a.data as string)
+        .filter((ip) => !isBlockedPrivateIp(ip));
+      if (ips.length > 0) {
+        dohIpCache.set(hostname, { expiresAt: Date.now() + 5 * 60_000, ips });
+        return ips;
+      }
+    } catch {
+      // try next DoH resolver
+    }
+  }
+  return [];
+}
+
+async function httpsGetWithDirectIp(
+  targetUrl: string,
+  resolvedIp: string,
+  headers: Record<string, string>,
+  timeoutMs = 12000
+): Promise<{ status: number; headers: Record<string, string>; body: string }> {
+  if (isBlockedPrivateIp(resolvedIp)) {
+    throw new Error('Refused connection to private IP address.');
+  }
+  const u = new URL(targetUrl);
+  if (isBlockedPrivateHost(u.hostname)) {
+    throw new Error('Refused connection to private hostname.');
+  }
+  return new Promise((resolve, reject) => {
+    const req = https.request(
+      {
+        host: resolvedIp,
+        port: u.port ? Number(u.port) : 443,
+        path: `${u.pathname}${u.search}`,
+        method: 'GET',
+        servername: u.hostname,
+        rejectUnauthorized: true,
+        headers: {
+          ...headers,
+          Host: u.host,
+          'Accept-Encoding': 'gzip, deflate, br',
+        },
+        timeout: timeoutMs,
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        const encoding = String(res.headers['content-encoding'] || '').toLowerCase();
+        let stream: NodeJS.ReadableStream = res;
+        if (encoding.includes('br')) {
+          stream = res.pipe(zlib.createBrotliDecompress());
+        } else if (encoding.includes('gzip')) {
+          stream = res.pipe(zlib.createGunzip());
+        } else if (encoding.includes('deflate')) {
+          stream = res.pipe(zlib.createInflate());
+        }
+        stream.on('data', (chunk: Buffer) => chunks.push(chunk));
+        stream.on('end', () => {
+          const outHeaders: Record<string, string> = {};
+          for (const [k, v] of Object.entries(res.headers)) {
+            if (typeof v === 'string') outHeaders[k.toLowerCase()] = v;
+            else if (Array.isArray(v)) outHeaders[k.toLowerCase()] = v.join(', ');
+          }
+          resolve({
+            status: res.statusCode || 502,
+            headers: outHeaders,
+            body: Buffer.concat(chunks).toString('utf8'),
+          });
+        });
+        stream.on('error', reject);
+      }
+    );
+    req.on('timeout', () => {
+      req.destroy(new Error(`HTTPS DoH request timed out after ${timeoutMs}ms`));
+    });
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+function buildAnimeWorldRequestHeaders(url: string, upstreamBase: string, isAjax = false): Record<string, string> {
+  const referer = `${upstreamBase.replace(/\/+$/, '')}/`;
+  if (isAjax) {
+    return {
+      'User-Agent': BROWSER_UA,
+      Accept: '*/*',
+      'Accept-Language': 'en-US,en;q=0.9',
+      Referer: referer,
+      Origin: upstreamBase.replace(/\/+$/, ''),
+      'X-Requested-With': 'XMLHttpRequest',
+      'Sec-Fetch-Dest': 'empty',
+      'Sec-Fetch-Mode': 'cors',
+      'Sec-Fetch-Site': 'same-origin',
+    };
+  }
+  return {
+    'User-Agent': BROWSER_UA,
+    Accept:
+      'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Accept-Encoding': 'gzip, deflate, br',
+    Referer: referer,
+    'Sec-Ch-Ua': '"Chromium";v="131", "Not_A Brand";v="24"',
+    'Sec-Ch-Ua-Mobile': '?0',
+    'Sec-Ch-Ua-Platform': '"Windows"',
+    'Sec-Fetch-Dest': 'document',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Site': 'same-origin',
+    'Upgrade-Insecure-Requests': '1',
+  };
+}
+
+function detectUpstreamBlock(
+  status: number,
+  cfMitigatedHeader: string,
+  serverHeader: string,
+  rawBody: string
+): boolean {
+  const lowerBody = rawBody.slice(0, 4000).toLowerCase();
+  const hasCfChallengeMarker =
+    lowerBody.includes('just a moment...') ||
+    lowerBody.includes('cf_chl_opt') ||
+    lowerBody.includes('cf-browser-verification') ||
+    lowerBody.includes('attention required! | cloudflare');
+  return (
+    (status === 403 || status === 503) &&
+    (cfMitigatedHeader.includes('challenge') ||
+      serverHeader.includes('cloudflare') ||
+      hasCfChallengeMarker)
+  );
+}
+
+async function fetchAnimeWorldHtml(
+  url: string,
+  options?: { upstreamBase?: string; isAjax?: boolean; method?: 'GET' | 'POST'; body?: string }
+): Promise<AwHtmlResult> {
+  const method = options?.method || 'GET';
+  const cacheKey = method === 'GET' ? url : '';
+
+  if (cacheKey) {
+    const cached = awHtmlCache.get(cacheKey);
+    if (cached) {
+      if (Date.now() <= cached.expiresAt) {
+        awHtmlCache.delete(cacheKey);
+        awHtmlCache.set(cacheKey, cached);
+        return cached.value;
+      }
+      awHtmlCache.delete(cacheKey);
+    }
+
+    const existing = awHtmlInFlight.get(cacheKey);
+    if (existing) return existing;
+  }
+
+  let parsedTarget: URL;
+  try {
+    parsedTarget = new URL(url);
+    if (!['http:', 'https:'].includes(parsedTarget.protocol) || isBlockedPrivateHost(parsedTarget.hostname)) {
+      return { ok: false, status: 403, html: '' };
+    }
+  } catch {
+    return { ok: false, status: 400, html: '' };
+  }
+
+  const upstreamBase = (options?.upstreamBase || parsedTarget.origin).replace(/\/+$/, '');
+  const isAjax = Boolean(options?.isAjax || url.includes('/wp-admin/admin-ajax.php'));
+  const headers = buildAnimeWorldRequestHeaders(url, upstreamBase, isAjax);
+  if (method === 'POST') {
+    headers['Content-Type'] = 'application/x-www-form-urlencoded; charset=UTF-8';
+  }
+
+  const runAttempt = async (): Promise<AwHtmlResult> => {
+    const timeoutMs = 13000;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const res = await fetchWithTimeout(
+          url,
+          {
+            method,
+            headers,
+            ...(method === 'POST' && options?.body ? { body: options.body } : {}),
+            redirect: 'follow',
+          },
+          timeoutMs
+        );
+        const cfMitigated = (res.headers.get('cf-mitigated') || '').toLowerCase();
+        const serverHeader = (res.headers.get('server') || '').toLowerCase();
+        const rawBody = await res.text().catch(() => '');
+        const blockedByUpstream = detectUpstreamBlock(res.status, cfMitigated, serverHeader, rawBody);
+
+        if (res.ok && rawBody && !blockedByUpstream) {
+          const result: AwHtmlResult = {
+            ok: true,
+            status: res.status,
+            html: rawBody,
+            upstream: upstreamBase,
+            blockedByUpstream: false,
+          };
+          if (cacheKey) {
+            if (awHtmlCache.has(cacheKey)) {
+              awHtmlCache.delete(cacheKey);
+            } else if (awHtmlCache.size >= AW_HTML_CACHE_MAX) {
+              const oldest = awHtmlCache.keys().next().value;
+              if (oldest !== undefined) awHtmlCache.delete(oldest);
+            }
+            awHtmlCache.set(cacheKey, { expiresAt: Date.now() + getAwHtmlCacheTtlMs(url), value: result });
+          }
+          return result;
+        }
+
+        const shouldRetryStatus = res.status >= 500 || res.status === 429;
+        if (attempt === 0 && shouldRetryStatus && !blockedByUpstream) {
+          await new Promise((r) => setTimeout(r, 350));
+          continue;
+        }
+
         console.warn(
           `[AnimeWorld Diagnostic] Upstream request failed: URL=${url}, Status=${res.status} ${res.statusText}${
             blockedByUpstream ? ' (Cloudflare challenge)' : ''
           }`
         );
-      }
-      const result: AwHtmlResult = { ok: res.ok, status: res.status, html, blockedByUpstream };
-      if (res.ok && html && !blockedByUpstream) {
-        if (awHtmlCache.has(url)) {
-          awHtmlCache.delete(url);
-        } else if (awHtmlCache.size >= AW_HTML_CACHE_MAX) {
-          const oldest = awHtmlCache.keys().next().value;
-          if (oldest !== undefined) awHtmlCache.delete(oldest);
+        return {
+          ok: false,
+          status: res.status,
+          html: '',
+          upstream: upstreamBase,
+          blockedByUpstream,
+        };
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        // On DNS resolution failure (or transient TLS/socket failure on first attempt), try DoH direct IP on GET HTTPS
+        if (method === 'GET' && parsedTarget.protocol === 'https:') {
+          try {
+            const dohIps = await resolvePublicHostnameViaDoh(parsedTarget.hostname);
+            for (const ip of dohIps.slice(0, 2)) {
+              try {
+                const dohRes = await httpsGetWithDirectIp(url, ip, headers, 12000);
+                const blocked = detectUpstreamBlock(
+                  dohRes.status,
+                  dohRes.headers['cf-mitigated'] || '',
+                  dohRes.headers['server'] || '',
+                  dohRes.body
+                );
+                if (dohRes.status >= 200 && dohRes.status < 300 && dohRes.body && !blocked) {
+                  const result: AwHtmlResult = {
+                    ok: true,
+                    status: dohRes.status,
+                    html: dohRes.body,
+                    upstream: upstreamBase,
+                    blockedByUpstream: false,
+                  };
+                  if (cacheKey) {
+                    awHtmlCache.set(cacheKey, {
+                      expiresAt: Date.now() + getAwHtmlCacheTtlMs(url),
+                      value: result,
+                    });
+                  }
+                  return result;
+                }
+              } catch {
+                // try next DoH IP
+              }
+            }
+          } catch {
+            // ignore DoH errors
+          }
         }
-        awHtmlCache.set(url, { expiresAt: Date.now() + getAwHtmlCacheTtlMs(url), value: result });
+        if (attempt === 0) {
+          await new Promise((r) => setTimeout(r, 350));
+          continue;
+        }
+        console.error(`[AnimeWorld Diagnostic] Upstream fetch error: URL=${url}, Error=${errMsg}`);
+        return { ok: false, status: 502, html: '', upstream: upstreamBase };
       }
-      return result;
-    } catch (err) {
-      console.error(
-        `[AnimeWorld Diagnostic] Upstream fetch error: URL=${url}, Error=${
-          err instanceof Error ? err.message : String(err)
-        }`
-      );
-      return { ok: false, status: 502, html: '' };
     }
-  })().finally(() => {
-    awHtmlInFlight.delete(url);
+    return { ok: false, status: 502, html: '', upstream: upstreamBase };
+  };
+
+  if (!cacheKey) {
+    return runAttempt();
+  }
+
+  const task = runAttempt().finally(() => {
+    awHtmlInFlight.delete(cacheKey);
   });
 
-  awHtmlInFlight.set(url, task);
+  awHtmlInFlight.set(cacheKey, task);
   return task;
+}
+
+async function fetchAnimeWorldPathWithMirrors(
+  buildUrl: (upstreamBase: string) => string,
+  options?: {
+    isAjax?: boolean;
+    validateHtml?: (html: string) => boolean;
+  }
+): Promise<AwHtmlResult> {
+  let lastResult: AwHtmlResult = {
+    ok: false,
+    status: 502,
+    html: '',
+    upstream: ANIMEWORLD_UPSTREAM,
+  };
+
+  for (const base of ANIMEWORLD_UPSTREAMS) {
+    const url = buildUrl(base);
+    const result = await fetchAnimeWorldHtml(url, {
+      upstreamBase: base,
+      isAjax: options?.isAjax,
+    });
+    if (result.ok && result.html) {
+      if (!options?.validateHtml || options.validateHtml(result.html)) {
+        return { ...result, upstream: base };
+      }
+    }
+    lastResult = { ...result, upstream: base };
+    // Never fall back past an authentic 404 only when trying same-slug search; for catalogs/pages/403/5xx try mirror!
+    if (result.status === 404 && url.includes('/?s=')) {
+      break;
+    }
+  }
+
+  return lastResult;
 }
 
 function formatAnimeWorldUpstreamError(status: number, blockedByUpstream?: boolean, context = 'request'): string {
@@ -1793,44 +2263,138 @@ function formatAnimeWorldUpstreamError(status: number, blockedByUpstream?: boole
   return `AnimeWorld India ${context} returned HTTP ${status || 502}`;
 }
 
-async function verifyRavokAudioLanguages(ravokUrl: string): Promise<string[]> {
+interface RavokResolvedDetails {
+  languages: string[];
+  hlsUrl: string | null;
+  refererOrigin: string;
+}
+
+const ravokDetailsCache = new Map<string, { expiresAt: number; details: RavokResolvedDetails }>();
+
+async function resolveRavokStreamDetails(
+  ravokUrl: string,
+  upstreamReferer = `${ANIMEWORLD_UPSTREAM}/`
+): Promise<RavokResolvedDetails> {
+  const cached = ravokDetailsCache.get(ravokUrl);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.details;
+  }
+
+  let parsedRavok: URL;
   try {
-    const res = await fetchWithTimeout(
+    parsedRavok = new URL(ravokUrl);
+    if (!['http:', 'https:'].includes(parsedRavok.protocol) || isBlockedPrivateHost(parsedRavok.hostname)) {
+      return { languages: [], hlsUrl: null, refererOrigin: `${ANIMEWORLD_UPSTREAM}/` };
+    }
+  } catch {
+    return { languages: [], hlsUrl: null, refererOrigin: `${ANIMEWORLD_UPSTREAM}/` };
+  }
+
+  const ravokOrigin = parsedRavok.origin;
+  const codeMap: Record<string, string> = {
+    hin: 'Hindi',
+    eng: 'English',
+    jpn: 'Japanese',
+    tam: 'Tamil',
+    tel: 'Telugu',
+    ben: 'Bengali',
+    mal: 'Malayalam',
+    mar: 'Marathi',
+    kan: 'Kannada',
+    kor: 'Korean',
+  };
+
+  let languages: string[] = [];
+  let hlsUrl: string | null = null;
+
+  const videoIdMatch = parsedRavok.pathname.match(/\/video\/([a-zA-Z0-9_-]+)/i);
+  const videoId = videoIdMatch ? videoIdMatch[1] : '';
+
+  const [pageResult, apiResult] = await Promise.allSettled([
+    fetchWithTimeout(
       ravokUrl,
       {
         headers: {
-          Referer: `${ANIMEWORLD_UPSTREAM}/`,
+          Referer: upstreamReferer,
           'User-Agent': BROWSER_UA,
           Accept: 'text/html,*/*',
         },
       },
-      4500
-    );
-    if (!res.ok) return [];
-    const html = await res.text();
+      5500
+    ).then(async (res) => (res.ok ? res.text() : '')),
+    videoId
+      ? fetchWithTimeout(
+          `${ravokOrigin}/player/index.php?data=${encodeURIComponent(videoId)}&do=getVideo`,
+          {
+            method: 'POST',
+            headers: {
+              'User-Agent': BROWSER_UA,
+              Referer: ravokUrl,
+              Origin: ravokOrigin,
+              'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+              'X-Requested-With': 'XMLHttpRequest',
+              Accept: 'application/json, text/javascript, */*; q=0.01',
+            },
+            body: `hash=${encodeURIComponent(videoId)}&r=${encodeURIComponent(upstreamReferer)}`,
+          },
+          6000
+        ).then(async (res) => (res.ok ? res.text() : ''))
+      : Promise.resolve(''),
+  ]);
+
+  if (pageResult.status === 'fulfilled' && pageResult.value) {
+    const html = pageResult.value;
     const match = html.match(/var\s+defaultAudio\s*=\s*(\[[^\]]+\])/);
     if (match) {
-      const codes = JSON.parse(match[1]) as string[];
-      const codeMap: Record<string, string> = {
-        hin: 'Hindi',
-        eng: 'English',
-        jpn: 'Japanese',
-        tam: 'Tamil',
-        tel: 'Telugu',
-        ben: 'Bengali',
-        mal: 'Malayalam',
-        mar: 'Marathi',
-        kan: 'Kannada',
-        kor: 'Korean',
-      };
-      return codes
-        .map((c) => codeMap[c.toLowerCase()])
-        .filter((x): x is string => Boolean(x));
+      try {
+        const codes = JSON.parse(match[1]) as string[];
+        languages = codes
+          .map((c) => codeMap[c.toLowerCase()])
+          .filter((x): x is string => Boolean(x));
+      } catch {
+        // ignore JSON parse error
+      }
     }
-  } catch {
-    // ignore ravok metadata inspection timeout
   }
-  return [];
+
+  if (apiResult.status === 'fulfilled' && apiResult.value) {
+    try {
+      const json = JSON.parse(apiResult.value) as {
+        hls?: boolean;
+        videoSource?: string;
+        securedLink?: string;
+      };
+      const candidate = (json.videoSource || json.securedLink || '').trim();
+      if (isValidHttpUrl(candidate)) {
+        const parsedCandidate = new URL(candidate);
+        if (!isBlockedPrivateHost(parsedCandidate.hostname)) {
+          hlsUrl = candidate;
+        }
+      }
+    } catch {
+      // ignore non-JSON getVideo response
+    }
+  }
+
+  const details: RavokResolvedDetails = {
+    languages,
+    hlsUrl,
+    refererOrigin: `${ravokOrigin}/`,
+  };
+
+  if (languages.length > 0 || hlsUrl) {
+    ravokDetailsCache.set(ravokUrl, {
+      expiresAt: Date.now() + 45_000,
+      details,
+    });
+  }
+
+  return details;
+}
+
+async function verifyRavokAudioLanguages(ravokUrl: string): Promise<string[]> {
+  const details = await resolveRavokStreamDetails(ravokUrl);
+  return details.languages;
 }
 
 function isValidHttpUrl(raw: unknown): raw is string {
@@ -3568,28 +4132,51 @@ export function createExpressApp() {
     const today = getTodayDateKey();
     const todayBucket = getOrCreateDailyBucket(today);
 
-    // Last 7 days real activity series (oldest -> newest)
+    // Last 7 days & 90 days real activity series (oldest -> newest)
     const dailySeries: Array<{
       date: string;
       visits: number;
       activeUsers: number;
       registeredActive: number;
     }> = [];
-    for (let offset = 6; offset >= 0; offset -= 1) {
+    const dailySeries90: Array<{
+      date: string;
+      visits: number;
+      activeUsers: number;
+      registeredActive: number;
+    }> = [];
+
+    const wauActors = new Set<string>();
+    const mauActors = new Set<string>();
+
+    for (let offset = 89; offset >= 0; offset -= 1) {
       const d = new Date(Date.now() - offset * 86400_000).toISOString().slice(0, 10);
       const bucket = analyticsStore.daily[d];
-      const uniqueToday = bucket
-        ? new Set([
+      const actorIds = bucket
+        ? [
             ...(bucket.activeUserIds || []).map((id) => `u:${id}`),
             ...(bucket.guestClientIds || []).map((id) => `c:${id}`),
-          ]).size
-        : 0;
-      dailySeries.push({
+          ]
+        : [];
+      const uniqueDay = new Set(actorIds).size;
+
+      if (offset < 7) {
+        actorIds.forEach((id) => wauActors.add(id));
+      }
+      if (offset < 30) {
+        actorIds.forEach((id) => mauActors.add(id));
+      }
+
+      const point = {
         date: d,
         visits: bucket?.visits || 0,
-        activeUsers: uniqueToday,
+        activeUsers: uniqueDay,
         registeredActive: bucket?.activeUserIds?.length || 0,
-      });
+      };
+      dailySeries90.push(point);
+      if (offset < 7) {
+        dailySeries.push(point);
+      }
     }
 
     const todayCombinedActors = new Set([
@@ -3604,11 +4191,243 @@ export function createExpressApp() {
       usersActiveToday: todayCombinedActors,
       registeredActiveToday: todayBucket.activeUserIds.length,
       guestActiveToday: todayBucket.guestClientIds.length,
+      wau: wauActors.size,
+      mau: mauActors.size,
       totalWebsiteVisits: analyticsStore.totalWebsiteVisits,
       visitsToday: todayBucket.visits,
       totalUniqueVisitors: knownClientsSet.size,
       dailySeries,
+      dailySeries90,
       updatedAt: new Date().toISOString(),
+    });
+  });
+
+  // ==========================================
+  // USER LEVEL & XP BACKEND VALIDATION SYSTEM
+  // ==========================================
+  type ServerXpActionType =
+    | 'first_episode'
+    | 'episode_complete'
+    | 'daily_goal'
+    | 'daily_login'
+    | 'streak_milestone';
+
+  const XP_REWARDS_TABLE: Record<Exclude<ServerXpActionType, 'streak_milestone'>, number> = {
+    first_episode: 20,
+    episode_complete: 10,
+    daily_goal: 15,
+    daily_login: 5,
+  };
+
+  const STREAK_MILESTONE_XP: Record<number, number> = {
+    3: 25,
+    7: 50,
+    15: 100,
+    30: 200,
+    100: 500,
+  };
+
+  const xpRequiredForLevelServer = (level: number): number => {
+    if (level <= 1) return 0;
+    let total = 0;
+    for (let l = 2; l <= level; l++) {
+      total += Math.round(35 + 15 * (l - 2) + 0.65 * Math.pow(l - 2, 2));
+    }
+    return total;
+  };
+
+  const getLevelTitleServer = (level: number): string => {
+    if (level >= 50) return 'KuroStream Elite';
+    if (level >= 30) return 'Anime Legend';
+    if (level >= 20) return 'Anime Master';
+    if (level >= 10) return 'Otaku';
+    if (level >= 5) return 'Anime Fan';
+    return 'Beginner';
+  };
+
+  const computeLevelFromXpServer = (xp: number): { level: number; title: string } => {
+    const safeXp = Math.max(0, Math.floor(xp));
+    let lvl = 1;
+    while (lvl < 99 && safeXp >= xpRequiredForLevelServer(lvl + 1)) {
+      lvl += 1;
+    }
+    return { level: lvl, title: getLevelTitleServer(lvl) };
+  };
+
+  interface XpLedgerStore {
+    claimedKeys: Record<string, number>;
+    lastRateWindow: Record<string, number[]>;
+  }
+
+  const loadXpLedger = (): XpLedgerStore => {
+    try {
+      if (fs.existsSync(XP_LEDGER_FILE_PATH)) {
+        const raw = fs.readFileSync(XP_LEDGER_FILE_PATH, 'utf8');
+        const parsed = JSON.parse(raw) as Partial<XpLedgerStore>;
+        return {
+          claimedKeys: parsed.claimedKeys && typeof parsed.claimedKeys === 'object' ? parsed.claimedKeys : {},
+          lastRateWindow: {},
+        };
+      }
+    } catch {
+      // start fresh
+    }
+    return { claimedKeys: {}, lastRateWindow: {} };
+  };
+
+  const xpLedgerStore = loadXpLedger();
+  let xpLedgerSaveTimer: NodeJS.Timeout | null = null;
+  const scheduleXpLedgerPersist = () => {
+    if (xpLedgerSaveTimer || isVercelRuntime) return;
+    xpLedgerSaveTimer = setTimeout(() => {
+      xpLedgerSaveTimer = null;
+      try {
+        fs.mkdirSync(DATA_DIR, { recursive: true });
+        const entries = Object.entries(xpLedgerStore.claimedKeys);
+        if (entries.length > 50000) {
+          entries.sort((a, b) => a[1] - b[1]);
+          xpLedgerStore.claimedKeys = Object.fromEntries(entries.slice(-40000));
+        }
+        const tmp = `${XP_LEDGER_FILE_PATH}.tmp`;
+        fs.writeFileSync(tmp, JSON.stringify({ claimedKeys: xpLedgerStore.claimedKeys }), 'utf8');
+        fs.renameSync(tmp, XP_LEDGER_FILE_PATH);
+      } catch {
+        // non-fatal
+      }
+    }, 1000);
+  };
+
+  app.post('/api/xp/award', jsonParser, requireFirebaseAuth, (req: Request, res: Response) => {
+    const authUser = (req as AuthenticatedRequest).firebaseUser;
+    if (!authUser?.uid) {
+      res.status(401).json({ ok: false, error: 'Authentication required.' });
+      return;
+    }
+
+    const body = (req.body || {}) as Record<string, unknown>;
+    const actionType = typeof body.actionType === 'string' ? body.actionType : '';
+    const rawEventKey = typeof body.eventKey === 'string' ? body.eventKey.trim().slice(0, 120) : '';
+    const watchedSeconds = Math.max(0, Number(body.watchedSeconds) || 0);
+    const durationSeconds = Math.max(0, Number(body.durationSeconds) || 0);
+    const progressSeconds = Math.max(0, Number(body.progressSeconds) || 0);
+    const todayWatchSeconds = Math.max(0, Number(body.todayWatchSeconds) || 0);
+    const streakDays = Math.max(0, Math.floor(Number(body.streakDays) || 0));
+    const milestoneDays = Math.max(0, Math.floor(Number(body.milestoneDays) || 0));
+    const currentTotalXp = Math.max(0, Math.floor(Number(body.currentTotalXp) || 0));
+
+    const validActions: ServerXpActionType[] = [
+      'first_episode',
+      'episode_complete',
+      'daily_goal',
+      'daily_login',
+      'streak_milestone',
+    ];
+    if (!validActions.includes(actionType as ServerXpActionType) || !rawEventKey) {
+      res.status(400).json({ ok: false, awarded: false, error: 'Invalid XP claim parameters.' });
+      return;
+    }
+
+    const sanitizedKey = rawEventKey.replace(/[^a-zA-Z0-9_.\-:]/g, '_');
+    const claimId = `${authUser.uid}:${sanitizedKey}`;
+
+    if (xpLedgerStore.claimedKeys[claimId]) {
+      res.json({
+        ok: true,
+        awarded: false,
+        duplicate: true,
+        xpDelta: 0,
+        nextTotalXp: currentTotalXp,
+        ...computeLevelFromXpServer(currentTotalXp),
+        reason: 'Reward already claimed.',
+      });
+      return;
+    }
+
+    // Per-user anti-spam rate window: max 30 XP claims per 10 minutes
+    const now = Date.now();
+    const recentTimestamps = (xpLedgerStore.lastRateWindow[authUser.uid] || []).filter(
+      (t) => now - t < 10 * 60 * 1000
+    );
+    if (recentTimestamps.length >= 30) {
+      res.status(429).json({
+        ok: false,
+        awarded: false,
+        error: 'XP claim rate limit exceeded. Please continue watching naturally.',
+      });
+      return;
+    }
+
+    let xpDelta = 0;
+    let reason = '';
+
+    if (actionType === 'first_episode' || actionType === 'episode_complete') {
+      const hasMinimumDuration =
+        watchedSeconds >= 45 ||
+        (durationSeconds > 0 && progressSeconds >= Math.max(30, durationSeconds * 0.65)) ||
+        (durationSeconds > 0 && durationSeconds <= 90 && watchedSeconds >= 20);
+      if (!hasMinimumDuration) {
+        res.status(400).json({
+          ok: false,
+          awarded: false,
+          error: 'Insufficient verified playback time to claim episode completion XP.',
+        });
+        return;
+      }
+      xpDelta = XP_REWARDS_TABLE[actionType];
+      reason =
+        actionType === 'first_episode'
+          ? 'Completed first anime episode'
+          : 'Completed anime episode';
+    } else if (actionType === 'daily_goal') {
+      if (todayWatchSeconds < 900) {
+        res.status(400).json({
+          ok: false,
+          awarded: false,
+          error: 'Daily watch goal (15 minutes) not reached yet.',
+        });
+        return;
+      }
+      xpDelta = XP_REWARDS_TABLE.daily_goal;
+      reason = 'Completed daily watch goal (15m+)';
+    } else if (actionType === 'daily_login') {
+      xpDelta = XP_REWARDS_TABLE.daily_login;
+      reason = 'Daily login bonus';
+    } else if (actionType === 'streak_milestone') {
+      const bonus = STREAK_MILESTONE_XP[milestoneDays];
+      if (!bonus || streakDays < milestoneDays) {
+        res.status(400).json({
+          ok: false,
+          awarded: false,
+          error: 'Streak milestone criteria not met.',
+        });
+        return;
+      }
+      xpDelta = bonus;
+      reason = `${milestoneDays}-day watch streak milestone bonus`;
+    }
+
+    recentTimestamps.push(now);
+    xpLedgerStore.lastRateWindow[authUser.uid] = recentTimestamps;
+    xpLedgerStore.claimedKeys[claimId] = now;
+    scheduleXpLedgerPersist();
+
+    const nextTotalXp = currentTotalXp + xpDelta;
+    const prevLvl = computeLevelFromXpServer(currentTotalXp);
+    const nextLvl = computeLevelFromXpServer(nextTotalXp);
+
+    res.json({
+      ok: true,
+      awarded: true,
+      duplicate: false,
+      eventKey: sanitizedKey,
+      actionType,
+      xpDelta,
+      reason,
+      nextTotalXp,
+      level: nextLvl.level,
+      levelTitle: nextLvl.title,
+      leveledUp: nextLvl.level > prevLvl.level,
+      issuedAt: now,
     });
   });
 
@@ -3842,9 +4661,21 @@ export function createExpressApp() {
   // Actual AnimeWorld India PHP API v1 endpoints (protected by Firebase authentication)
   app.get('/api/anime-world-india/v1/home.php', requireFirebaseAuth, async (req: Request, res: Response) => {
     if (await tryProxyAnimeWorldPhpApi('home.php', req, res)) return;
+    const cacheKey = 'aw:home';
+    const fresh = readAwParsedCache(cacheKey, false);
+    if (fresh) {
+      res.json(fresh);
+      return;
+    }
     try {
-      const { ok, status, html, blockedByUpstream } = await fetchAnimeWorldHtml(`${ANIMEWORLD_UPSTREAM}/`);
+      const { ok, status, html, upstream, blockedByUpstream } =
+        await fetchAnimeWorldPathWithMirrors((base) => `${base}/`);
       if (!ok || !html) {
+        const stale = readAwParsedCache(cacheKey, true);
+        if (stale) {
+          res.json({ ...stale, stale: true });
+          return;
+        }
         res.status(status || 502).json({
           success: false,
           blockedByCloudflare: Boolean(blockedByUpstream || status === 403),
@@ -3856,13 +4687,22 @@ export function createExpressApp() {
       const allCards = parseAnimeWorldCards($);
       const latest_series = allCards.filter((item) => item.type === 'series');
       const latest_movies = allCards.filter((item) => item.type === 'movie');
-      res.json({
+      const payload = {
         success: true,
-        source: ANIMEWORLD_UPSTREAM,
+        source: upstream || ANIMEWORLD_UPSTREAM,
         latest_series,
         latest_movies,
-      });
+      };
+      if (latest_series.length > 0 || latest_movies.length > 0) {
+        writeAwParsedCache(cacheKey, payload, 120_000, 20 * 60_000);
+      }
+      res.json(payload);
     } catch (err) {
+      const stale = readAwParsedCache(cacheKey, true);
+      if (stale) {
+        res.json({ ...stale, stale: true });
+        return;
+      }
       res.status(502).json({
         success: false,
         error: err instanceof Error ? err.message : 'Failed to load AnimeWorld India homepage.',
@@ -3873,11 +4713,23 @@ export function createExpressApp() {
   app.get('/api/anime-world-india/v1/series.php', requireFirebaseAuth, async (req: Request, res: Response) => {
     if (await tryProxyAnimeWorldPhpApi('series.php', req, res)) return;
     const page = Math.max(1, Number(req.query.p || 1));
-    const targetUrl =
-      page > 1 ? `${ANIMEWORLD_UPSTREAM}/series/page/${page}/` : `${ANIMEWORLD_UPSTREAM}/series/`;
+    const cacheKey = `aw:series:${page}`;
+    const fresh = readAwParsedCache(cacheKey, false);
+    if (fresh) {
+      res.json(fresh);
+      return;
+    }
     try {
-      const { ok, status, html, blockedByUpstream } = await fetchAnimeWorldHtml(targetUrl);
+      const { ok, status, html, upstream, blockedByUpstream } =
+        await fetchAnimeWorldPathWithMirrors((base) =>
+          page > 1 ? `${base}/series/page/${page}/` : `${base}/series/`
+        );
       if (!ok || !html) {
+        const stale = readAwParsedCache(cacheKey, true);
+        if (stale) {
+          res.json({ ...stale, stale: true });
+          return;
+        }
         res.status(status || 404).json({
           success: false,
           blockedByCloudflare: Boolean(blockedByUpstream || status === 403),
@@ -3888,14 +4740,24 @@ export function createExpressApp() {
       const $ = cheerio.load(html);
       const series = parseAnimeWorldCards($).filter((x) => x.seriesId);
       const pagination = parseAnimeWorldPagination($, page);
-      res.json({
+      const usedBase = upstream || ANIMEWORLD_UPSTREAM;
+      const payload = {
         success: true,
-        source: `${ANIMEWORLD_UPSTREAM}/series`,
+        source: `${usedBase}/series`,
         ...pagination,
         total_results: series.length,
         series,
-      });
+      };
+      if (series.length > 0) {
+        writeAwParsedCache(cacheKey, payload, 120_000, 20 * 60_000);
+      }
+      res.json(payload);
     } catch (err) {
+      const stale = readAwParsedCache(cacheKey, true);
+      if (stale) {
+        res.json({ ...stale, stale: true });
+        return;
+      }
       res.status(502).json({
         success: false,
         error: err instanceof Error ? err.message : 'Failed to fetch series list.',
@@ -3906,11 +4768,23 @@ export function createExpressApp() {
   app.get('/api/anime-world-india/v1/movie.php', requireFirebaseAuth, async (req: Request, res: Response) => {
     if (await tryProxyAnimeWorldPhpApi('movie.php', req, res)) return;
     const page = Math.max(1, Number(req.query.p || 1));
-    const targetUrl =
-      page > 1 ? `${ANIMEWORLD_UPSTREAM}/movies/page/${page}/` : `${ANIMEWORLD_UPSTREAM}/movies/`;
+    const cacheKey = `aw:movie:${page}`;
+    const fresh = readAwParsedCache(cacheKey, false);
+    if (fresh) {
+      res.json(fresh);
+      return;
+    }
     try {
-      const { ok, status, html, blockedByUpstream } = await fetchAnimeWorldHtml(targetUrl);
+      const { ok, status, html, upstream, blockedByUpstream } =
+        await fetchAnimeWorldPathWithMirrors((base) =>
+          page > 1 ? `${base}/movies/page/${page}/` : `${base}/movies/`
+        );
       if (!ok || !html) {
+        const stale = readAwParsedCache(cacheKey, true);
+        if (stale) {
+          res.json({ ...stale, stale: true });
+          return;
+        }
         res.status(status || 404).json({
           success: false,
           blockedByCloudflare: Boolean(blockedByUpstream || status === 403),
@@ -3921,14 +4795,24 @@ export function createExpressApp() {
       const $ = cheerio.load(html);
       const movies = parseAnimeWorldCards($).filter((x) => x.movieId || x.type === 'movie');
       const pagination = parseAnimeWorldPagination($, page);
-      res.json({
+      const usedBase = upstream || ANIMEWORLD_UPSTREAM;
+      const payload = {
         success: true,
-        source: `${ANIMEWORLD_UPSTREAM}/movies`,
+        source: `${usedBase}/movies`,
         ...pagination,
         total_results: movies.length,
         movies,
-      });
+      };
+      if (movies.length > 0) {
+        writeAwParsedCache(cacheKey, payload, 120_000, 20 * 60_000);
+      }
+      res.json(payload);
     } catch (err) {
+      const stale = readAwParsedCache(cacheKey, true);
+      if (stale) {
+        res.json({ ...stale, stale: true });
+        return;
+      }
       res.status(502).json({
         success: false,
         error: err instanceof Error ? err.message : 'Failed to fetch movies list.',
@@ -3941,13 +4825,25 @@ export function createExpressApp() {
     const rawLetter = typeof req.query.letter === 'string' ? req.query.letter.trim().toUpperCase() : 'A';
     const letter = rawLetter === '0-9' || /^[A-Z]$/.test(rawLetter) ? rawLetter : 'A';
     const page = Math.max(1, Number(req.query.p || 1));
-    const targetUrl =
-      page > 1
-        ? `${ANIMEWORLD_UPSTREAM}/letter/${encodeURIComponent(letter)}/page/${page}/`
-        : `${ANIMEWORLD_UPSTREAM}/letter/${encodeURIComponent(letter)}/`;
+    const cacheKey = `aw:a2z:${letter}:${page}`;
+    const fresh = readAwParsedCache(cacheKey, false);
+    if (fresh) {
+      res.json(fresh);
+      return;
+    }
     try {
-      const { ok, status, html, blockedByUpstream } = await fetchAnimeWorldHtml(targetUrl);
+      const { ok, status, html, upstream, blockedByUpstream } =
+        await fetchAnimeWorldPathWithMirrors((base) =>
+          page > 1
+            ? `${base}/letter/${encodeURIComponent(letter)}/page/${page}/`
+            : `${base}/letter/${encodeURIComponent(letter)}/`
+        );
       if (!ok || !html) {
+        const stale = readAwParsedCache(cacheKey, true);
+        if (stale) {
+          res.json({ ...stale, stale: true });
+          return;
+        }
         res.status(status || 404).json({
           success: false,
           blockedByCloudflare: Boolean(blockedByUpstream || status === 403),
@@ -3958,15 +4854,25 @@ export function createExpressApp() {
       const $ = cheerio.load(html);
       const results = parseAnimeWorldCards($);
       const pagination = parseAnimeWorldPagination($, page);
-      res.json({
+      const usedBase = upstream || ANIMEWORLD_UPSTREAM;
+      const payload = {
         success: true,
         letter,
-        source: `${ANIMEWORLD_UPSTREAM}/letter/${letter}`,
+        source: `${usedBase}/letter/${letter}`,
         ...pagination,
         total_results: results.length,
         results,
-      });
+      };
+      if (results.length > 0) {
+        writeAwParsedCache(cacheKey, payload, 180_000, 20 * 60_000);
+      }
+      res.json(payload);
     } catch (err) {
+      const stale = readAwParsedCache(cacheKey, true);
+      if (stale) {
+        res.json({ ...stale, stale: true });
+        return;
+      }
       res.status(502).json({
         success: false,
         error: err instanceof Error ? err.message : 'Failed to fetch A-Z list.',
@@ -3982,12 +4888,13 @@ export function createExpressApp() {
       res.status(400).json({ success: false, error: 'Missing query parameter' });
       return;
     }
-    const targetUrl =
-      page > 1
-        ? `${ANIMEWORLD_UPSTREAM}/page/${page}/?s=${encodeURIComponent(query)}`
-        : `${ANIMEWORLD_UPSTREAM}/?s=${encodeURIComponent(query)}`;
     try {
-      const { ok, status, html, blockedByUpstream } = await fetchAnimeWorldHtml(targetUrl);
+      const { ok, status, html, upstream, blockedByUpstream } =
+        await fetchAnimeWorldPathWithMirrors((base) =>
+          page > 1
+            ? `${base}/page/${page}/?s=${encodeURIComponent(query)}`
+            : `${base}/?s=${encodeURIComponent(query)}`
+        );
       if (!ok || !html) {
         res.status(status || 404).json({
           success: false,
@@ -3999,13 +4906,14 @@ export function createExpressApp() {
       const $ = cheerio.load(html);
       const results = parseAnimeWorldCards($);
       const pagination = parseAnimeWorldPagination($, page);
+      const usedBase = upstream || ANIMEWORLD_UPSTREAM;
       res.json({
         success: true,
         query,
         currentPage: page,
         ...pagination,
         total_results: results.length,
-        source: `${ANIMEWORLD_UPSTREAM}/search`,
+        source: `${usedBase}/search`,
         results,
       });
     } catch (err) {
@@ -4028,10 +4936,23 @@ export function createExpressApp() {
       res.status(400).json({ success: false, error: 'Missing seriesID parameter' });
       return;
     }
-    const targetUrl = `${ANIMEWORLD_UPSTREAM}/series/${encodeURIComponent(seriesID)}/`;
+    const cacheKey = `aw:seasons:${seriesID}`;
+    const fresh = readAwParsedCache(cacheKey, false);
+    if (fresh) {
+      res.json(fresh);
+      return;
+    }
     try {
-      const { ok, status, html, blockedByUpstream } = await fetchAnimeWorldHtml(targetUrl);
+      const { ok, status, html, upstream, blockedByUpstream } =
+        await fetchAnimeWorldPathWithMirrors(
+          (base) => `${base}/series/${encodeURIComponent(seriesID)}/`
+        );
       if (!ok || !html) {
+        const stale = readAwParsedCache(cacheKey, true);
+        if (stale) {
+          res.json({ ...stale, stale: true });
+          return;
+        }
         res.status(status || 404).json({
           success: false,
           blockedByCloudflare: Boolean(blockedByUpstream || status === 403),
@@ -4044,12 +4965,19 @@ export function createExpressApp() {
 
       const seasons: Array<Record<string, unknown>> = [];
       let summedEpisodes = 0;
-      $('a.season-btn.sel-temp').each((_, el) => {
+      $('a.season-btn.sel-temp, .sel-temp a[data-post], a[data-post][data-season]').each((_, el) => {
         const btn = $(el);
         const postId = btn.attr('data-post') || '';
         const seasonNum = btn.attr('data-season') || '1';
-        const seasonName = btn.find('.season-label').text().trim() || `Season ${seasonNum}`;
-        const episodesText = btn.find('.season-episodes').text().trim() || '';
+        const rawText = btn.text().trim().replace(/\s+/g, ' ');
+        const seasonName =
+          btn.find('.season-label').text().trim() ||
+          rawText.split('•')[0]?.trim() ||
+          `Season ${seasonNum}`;
+        const episodesText =
+          btn.find('.season-episodes').text().trim() ||
+          rawText.split('•')[1]?.trim() ||
+          '';
         const parenMatch = episodesText.match(/\((\d+)\)/);
         const countMatch = parenMatch || episodesText.match(/^(\d+)/);
         if (countMatch) {
@@ -4059,19 +4987,21 @@ export function createExpressApp() {
         const seasonId = postId
           ? `${seriesID}__post-${postId}__season-${seasonNum}`
           : `${seriesID}-season-${seasonNum}`;
-        seasons.push({
-          seasonNumber: seasonNum,
-          seasonName,
-          episodes: episodesText,
-          seasonId,
-          postId,
-          isSubOnly,
-        });
+        if (!seasons.some((s) => s.seasonId === seasonId)) {
+          seasons.push({
+            seasonNumber: seasonNum,
+            seasonName,
+            episodes: episodesText,
+            seasonId,
+            postId,
+            isSubOnly,
+          });
+        }
       });
 
       // Fallback if single-season series has no season selector buttons
       if (seasons.length === 0) {
-        const epCount = $('article.tr-episode-card').length;
+        const epCount = $('article.tr-episode-card, ul#episode_by_temp li, article.episodes').length;
         summedEpisodes = epCount;
         seasons.push({
           seasonNumber: '1',
@@ -4085,15 +5015,18 @@ export function createExpressApp() {
       const epsBadge = meta.heroBadges.find((b) => /\d+\s*Eps?/i.test(b));
       const badgeEpNum = epsBadge ? Number(epsBadge.match(/(\d+)/)?.[1] || 0) : 0;
       const totalEpisodes = badgeEpNum > 0 ? badgeEpNum : summedEpisodes;
+      const usedBase = upstream || ANIMEWORLD_UPSTREAM;
 
-      res.json({
+      const payload = {
         success: true,
-        source: `${ANIMEWORLD_UPSTREAM}/series`,
+        source: `${usedBase}/series`,
         series: {
           seriesId: seriesID,
           title: meta.title,
           poster: meta.poster,
+          ...(meta.poster ? { proxyPoster: buildAnimeWorldProxyImageUrl(meta.poster) } : {}),
           banner: meta.banner,
+          ...(meta.banner ? { proxyBanner: buildAnimeWorldProxyImageUrl(meta.banner) } : {}),
           year: meta.year,
           rating: meta.rating,
           totalSeasons: String(seasons.length),
@@ -4103,8 +5036,15 @@ export function createExpressApp() {
           description: meta.description,
         },
         seasons,
-      });
+      };
+      writeAwParsedCache(cacheKey, payload, 180_000, 20 * 60_000);
+      res.json(payload);
     } catch (err) {
+      const stale = readAwParsedCache(cacheKey, true);
+      if (stale) {
+        res.json({ ...stale, stale: true });
+        return;
+      }
       res.status(502).json({
         success: false,
         error: err instanceof Error ? err.message : 'Failed to load seasons.',
@@ -4120,53 +5060,106 @@ export function createExpressApp() {
       return;
     }
 
-    const parseEpisodesFromHtml = (html: string) => {
-      const $ = cheerio.load(html);
-      const episodes: Array<Record<string, unknown>> = [];
-      const seen = new Set<string>();
-      $('article.tr-episode-card').each((_, el) => {
-        const card = $(el);
-        const href = card.find('a.tr-episode-link').first().attr('href') || '';
-        const episodeId = extractSlugFromHref(href, 'episode');
-        if (!episodeId || seen.has(episodeId)) return;
-        seen.add(episodeId);
-
-        const epTitle = card.find('.tr-episode-title, h3, h2').first().text().trim() || episodeId;
-        const epNumber = card.find('.tr-episode-number').first().text().trim() || '';
-        const imgEl = card.find('img').first();
-        const image = normalizeAnimeWorldImg(imgEl.attr('data-src') || imgEl.attr('src'));
-        episodes.push({
-          episodeId,
-          title: epTitle,
-          episodeNumber: epNumber,
-          airDate: null,
-          image,
-          overview: null,
-        });
-      });
-      return { $, episodes };
-    };
+    const cacheKey = `aw:episodes:${seasonId}`;
+    const fresh = readAwParsedCache(cacheKey, false);
+    if (fresh) {
+      res.json(fresh);
+      return;
+    }
 
     try {
       const encodedMatch = seasonId.match(/^(.+?)__post-(\d+)__season-(\d+)$/);
       if (encodedMatch) {
         const [, seriesSlug, postId, seasonNum] = encodedMatch;
-        const ajaxUrl = `${ANIMEWORLD_UPSTREAM}/wp-admin/admin-ajax.php?action=action_select_season&season=${encodeURIComponent(
+        // Try GET then POST on primary upstream first
+        let primaryUsedBase = ANIMEWORLD_UPSTREAM;
+        const primaryAjaxUrl = `${primaryUsedBase}/wp-admin/admin-ajax.php?action=action_select_season&season=${encodeURIComponent(
           seasonNum
         )}&post=${encodeURIComponent(postId)}`;
-        const { ok, status, html, blockedByUpstream } = await fetchAnimeWorldHtml(ajaxUrl);
-        if (!ok || !html) {
-          res.status(status || 404).json({
+        let ajaxRes = await fetchAnimeWorldHtml(primaryAjaxUrl, {
+          upstreamBase: primaryUsedBase,
+          isAjax: true,
+        });
+        let episodes = ajaxRes.ok && ajaxRes.html ? parseEpisodesFromAnimeWorldHtml(ajaxRes.html).episodes : [];
+
+        // If GET failed or returned empty, retry with POST admin-ajax.php
+        if (episodes.length === 0) {
+          const postRes = await fetchAnimeWorldHtml(`${primaryUsedBase}/wp-admin/admin-ajax.php`, {
+            upstreamBase: primaryUsedBase,
+            isAjax: true,
+            method: 'POST',
+            body: `action=action_select_season&season=${encodeURIComponent(seasonNum)}&post=${encodeURIComponent(postId)}`,
+          });
+          if (postRes.ok && postRes.html) {
+            const parsedPost = parseEpisodesFromAnimeWorldHtml(postRes.html).episodes;
+            if (parsedPost.length > 0) {
+              ajaxRes = postRes;
+              episodes = parsedPost;
+            }
+          }
+        }
+
+        // If primary still failed or had 0 episodes, load series page via mirror(s) to resolve mirror postId cleanly
+        if (episodes.length === 0) {
+          const seriesMirror = await fetchAnimeWorldPathWithMirrors(
+            (base) => `${base}/series/${encodeURIComponent(seriesSlug)}/`
+          );
+          if (seriesMirror.ok && seriesMirror.html) {
+            const mirrorBase = seriesMirror.upstream || ANIMEWORLD_UPSTREAM;
+            const $series = cheerio.load(seriesMirror.html);
+            const mirrorBtn = $series(
+              `a.season-btn.sel-temp[data-season="${seasonNum}"], a[data-post][data-season="${seasonNum}"]`
+            ).first();
+            const mirrorPostId = mirrorBtn.attr('data-post') || postId;
+            if (seasonNum === '1') {
+              const inlineEps = parseEpisodesFromAnimeWorldHtml(seriesMirror.html).episodes;
+              if (inlineEps.length > 0) {
+                primaryUsedBase = mirrorBase;
+                episodes = inlineEps;
+                ajaxRes = { ok: true, status: 200, html: seriesMirror.html, upstream: mirrorBase };
+              }
+            }
+            if (episodes.length === 0 && mirrorPostId) {
+              const mAjaxUrl = `${mirrorBase}/wp-admin/admin-ajax.php?action=action_select_season&season=${encodeURIComponent(
+                seasonNum
+              )}&post=${encodeURIComponent(mirrorPostId)}`;
+              const mRes = await fetchAnimeWorldHtml(mAjaxUrl, {
+                upstreamBase: mirrorBase,
+                isAjax: true,
+              });
+              if (mRes.ok && mRes.html) {
+                const parsedM = parseEpisodesFromAnimeWorldHtml(mRes.html).episodes;
+                if (parsedM.length > 0) {
+                  primaryUsedBase = mirrorBase;
+                  episodes = parsedM;
+                  ajaxRes = mRes;
+                }
+              }
+            }
+          }
+        }
+
+        if ((!ajaxRes.ok || episodes.length === 0) && !ajaxRes.html) {
+          const stale = readAwParsedCache(cacheKey, true);
+          if (stale) {
+            res.json({ ...stale, stale: true });
+            return;
+          }
+          res.status(ajaxRes.status || 404).json({
             success: false,
-            blockedByCloudflare: Boolean(blockedByUpstream || status === 403),
-            error: formatAnimeWorldUpstreamError(status, blockedByUpstream, 'episodes endpoint'),
+            blockedByCloudflare: Boolean(ajaxRes.blockedByUpstream || ajaxRes.status === 403),
+            error: formatAnimeWorldUpstreamError(
+              ajaxRes.status,
+              ajaxRes.blockedByUpstream,
+              'episodes endpoint'
+            ),
           });
           return;
         }
-        const { episodes } = parseEpisodesFromHtml(html);
-        res.json({
+
+        const payload = {
           success: true,
-          source: `${ANIMEWORLD_UPSTREAM}/season`,
+          source: `${primaryUsedBase}/season`,
           season: {
             seasonId,
             animeTitle: seriesSlug,
@@ -4174,7 +5167,11 @@ export function createExpressApp() {
             totalEpisodes: String(episodes.length),
           },
           episodes,
-        });
+        };
+        if (episodes.length > 0) {
+          writeAwParsedCache(cacheKey, payload, 180_000, 20 * 60_000);
+        }
+        res.json(payload);
         return;
       }
 
@@ -4182,9 +5179,15 @@ export function createExpressApp() {
       const slugMatch = seasonId.match(/^(.+?)(?:__|-)season-(\d+)$/i);
       const seriesSlug = slugMatch ? slugMatch[1] : seasonId;
       const targetSeasonNum = slugMatch ? slugMatch[2] : '1';
-      const seriesUrl = `${ANIMEWORLD_UPSTREAM}/series/${encodeURIComponent(seriesSlug)}/`;
-      const seriesPage = await fetchAnimeWorldHtml(seriesUrl);
+      const seriesPage = await fetchAnimeWorldPathWithMirrors(
+        (base) => `${base}/series/${encodeURIComponent(seriesSlug)}/`
+      );
       if (!seriesPage.ok || !seriesPage.html) {
+        const stale = readAwParsedCache(cacheKey, true);
+        if (stale) {
+          res.json({ ...stale, stale: true });
+          return;
+        }
         res.status(seriesPage.status || 404).json({
           success: false,
           blockedByCloudflare: Boolean(seriesPage.blockedByUpstream || seriesPage.status === 403),
@@ -4197,27 +5200,33 @@ export function createExpressApp() {
         return;
       }
 
+      const usedBase = seriesPage.upstream || ANIMEWORLD_UPSTREAM;
       const $series = cheerio.load(seriesPage.html);
       const animeTitle = $series('h1.hero-title, h1.entry-title').first().text().trim() || seriesSlug;
-      const matchingBtn = $series(`a.season-btn.sel-temp[data-season="${targetSeasonNum}"]`).first();
+      const matchingBtn = $series(
+        `a.season-btn.sel-temp[data-season="${targetSeasonNum}"], a[data-post][data-season="${targetSeasonNum}"]`
+      ).first();
       const postId = matchingBtn.attr('data-post');
 
       let episodes: Array<Record<string, unknown>> = [];
       if (postId && targetSeasonNum !== '1') {
-        const ajaxUrl = `${ANIMEWORLD_UPSTREAM}/wp-admin/admin-ajax.php?action=action_select_season&season=${encodeURIComponent(
+        const ajaxUrl = `${usedBase}/wp-admin/admin-ajax.php?action=action_select_season&season=${encodeURIComponent(
           targetSeasonNum
         )}&post=${encodeURIComponent(postId)}`;
-        const ajaxRes = await fetchAnimeWorldHtml(ajaxUrl);
+        const ajaxRes = await fetchAnimeWorldHtml(ajaxUrl, {
+          upstreamBase: usedBase,
+          isAjax: true,
+        });
         if (ajaxRes.ok && ajaxRes.html) {
-          episodes = parseEpisodesFromHtml(ajaxRes.html).episodes;
+          episodes = parseEpisodesFromAnimeWorldHtml(ajaxRes.html).episodes;
         }
       } else {
-        episodes = parseEpisodesFromHtml(seriesPage.html).episodes;
+        episodes = parseEpisodesFromAnimeWorldHtml(seriesPage.html).episodes;
       }
 
-      res.json({
+      const payload = {
         success: true,
-        source: `${ANIMEWORLD_UPSTREAM}/season`,
+        source: `${usedBase}/season`,
         season: {
           seasonId,
           animeTitle,
@@ -4225,8 +5234,17 @@ export function createExpressApp() {
           totalEpisodes: String(episodes.length),
         },
         episodes,
-      });
+      };
+      if (episodes.length > 0) {
+        writeAwParsedCache(cacheKey, payload, 180_000, 20 * 60_000);
+      }
+      res.json(payload);
     } catch (err) {
+      const stale = readAwParsedCache(cacheKey, true);
+      if (stale) {
+        res.json({ ...stale, stale: true });
+        return;
+      }
       res.status(502).json({
         success: false,
         error: err instanceof Error ? err.message : 'Failed to fetch episodes.',
@@ -4246,12 +5264,15 @@ export function createExpressApp() {
     }
 
     const type = episodeId ? 'episode' : 'movie';
-    const targetUrl = episodeId
-      ? `${ANIMEWORLD_UPSTREAM}/episode/${encodeURIComponent(episodeId)}/`
-      : `${ANIMEWORLD_UPSTREAM}/movies/${encodeURIComponent(movieId)}/`;
+    const pathSegment = episodeId
+      ? `/episode/${encodeURIComponent(episodeId)}/`
+      : `/movies/${encodeURIComponent(movieId)}/`;
 
     try {
-      const { ok, status, html, blockedByUpstream } = await fetchAnimeWorldHtml(targetUrl);
+      const { ok, status, html, upstream, blockedByUpstream } =
+        await fetchAnimeWorldPathWithMirrors((base) => `${base}${pathSegment}`);
+      const usedBase = upstream || ANIMEWORLD_UPSTREAM;
+      const targetUrl = `${usedBase}${pathSegment}`;
       if (!ok || !html) {
         res.status(status === 404 ? 404 : status || 502).json({
           success: false,
@@ -4264,7 +5285,7 @@ export function createExpressApp() {
       const $ = cheerio.load(html);
       const pageMeta = extractAnimeWorldPageMeta($, episodeId || movieId);
       const iframeSrcs: string[] = [];
-      $('#aa-options iframe, .video-player iframe, .video-embed iframe').each((_, el) => {
+      $('#aa-options iframe, .video-player iframe, .video-embed iframe, .VideoPlayer iframe').each((_, el) => {
         const s = ($(el).attr('src') || $(el).attr('data-src') || '').trim();
         if (s && s.startsWith('http') && !iframeSrcs.includes(s)) {
           iframeSrcs.push(s);
@@ -4287,11 +5308,13 @@ export function createExpressApp() {
       let hindiStreamLink: string | null = null;
       let englishStreamLink: string | null = null;
       let japaneseStreamLink: string | null = null;
+      let directMultiHlsLink: string | null = null;
+      let directMultiReferer: string | null = null;
       let hasHindiAudio = false;
 
-      // 1. Parse multi-lang-plyr.php?data=<base64 JSON> (explicit per-language streams!)
+      // 1. Parse multi-lang-plyr.php?data=<base64 JSON> or plyr/player.php?data=<base64 JSON>
       for (const src of iframeSrcs) {
-        if (src.includes('multi-lang-plyr.php') && src.includes('data=')) {
+        if ((src.includes('multi-lang-plyr.php') || src.includes('plyr/player.php')) && src.includes('data=')) {
           try {
             const parsedUrl = new URL(src);
             const rawData = parsedUrl.searchParams.get('data');
@@ -4318,7 +5341,7 @@ export function createExpressApp() {
                   language: lang,
                   url: link,
                   type: classifyAnimeWorldStreamType(link),
-                  label: `AnimeWorld India · ${lang} Audio`,
+                  label: `AnimeWorld India · ${lang} Embed`,
                 });
               }
             }
@@ -4328,13 +5351,14 @@ export function createExpressApp() {
         }
       }
 
-      // 2. Inspect non-multi-lang iframes (ravok.buzz multi-audio or megaplay sub/dub)
+      // 2. Inspect non-multi-lang iframes (ravok.buzz direct multi-audio HLS + embed, or megaplay)
       let ravokUrl: string | null = null;
       for (const src of iframeSrcs) {
-        if (src.includes('multi-lang-plyr.php')) continue;
+        if (src.includes('multi-lang-plyr.php') || src.includes('plyr/player.php')) continue;
         if (src.includes('ravok.buzz')) {
           ravokUrl = src;
-          const ravokLangs = await verifyRavokAudioLanguages(src);
+          const ravokDetails = await resolveRavokStreamDetails(src, `${usedBase}/`);
+          const ravokLangs = ravokDetails.languages;
           for (const l of ravokLangs) {
             if (!audioLanguages.includes(l)) audioLanguages.push(l);
           }
@@ -4342,15 +5366,28 @@ export function createExpressApp() {
           if (ravokHasHindi) {
             hasHindiAudio = true;
           }
+          if (ravokDetails.hlsUrl) {
+            directMultiHlsLink = ravokDetails.hlsUrl;
+            directMultiReferer = ravokDetails.refererOrigin;
+            streams.unshift({
+              language: ravokHasHindi ? 'Multi-Audio (Hindi)' : ravokLangs[0] || 'Multi-Audio',
+              url: ravokDetails.hlsUrl,
+              type: 'hls',
+              label:
+                ravokLangs.length > 0
+                  ? `AnimeWorld India · Direct Multi-Audio HLS (${ravokLangs.join(', ')})`
+                  : 'AnimeWorld India · Direct HLS Stream',
+            });
+          }
           streams.push({
-            language: ravokHasHindi ? 'Hindi' : ravokLangs[0] || 'Multi-Audio',
+            language: ravokHasHindi ? 'Multi-Audio (Hindi)' : ravokLangs[0] || 'Multi-Audio',
             url: src,
             type: 'embed',
             label: ravokHasHindi
-              ? 'AnimeWorld India · Multi-Audio (Hindi Verified)'
+              ? 'AnimeWorld India · PlayX Embed (Hindi Verified)'
               : ravokLangs.length > 0
-                ? `AnimeWorld India · Multi-Audio (${ravokLangs.join(', ')})`
-                : 'AnimeWorld India · PlayX Mirror (Unverified Audio)',
+                ? `AnimeWorld India · PlayX Embed (${ravokLangs.join(', ')})`
+                : 'AnimeWorld India · PlayX Embed',
           });
         } else if (src.includes('megaplay.buzz')) {
           const isDub = src.toLowerCase().includes('/dub');
@@ -4374,28 +5411,41 @@ export function createExpressApp() {
         }
       }
 
-      // Keep only verified HTTP(S) URLs and order according to requested language
+      // Keep only verified HTTP(S) URLs and prioritize direct HLS over blocked external iframes!
       const validStreams = streams.filter((s) => isValidHttpUrl(s.url));
-      const priorityFor = (langStr: string) => {
-        const lower = langStr.toLowerCase();
+      const priorityFor = (item: { language: string; type: string }) => {
+        if (item.type === 'hls') return -1;
+        const lower = item.language.toLowerCase();
         if (requestedLang === 'dub' || requestedLang === 'english') {
-          return lower === 'english' ? 0 : lower === 'multi-audio' ? 1 : 2;
+          return lower.includes('english') ? 0 : lower.includes('multi-audio') ? 1 : 2;
         }
         if (requestedLang === 'sub' || requestedLang === 'japanese') {
-          return lower === 'japanese' ? 0 : lower === 'multi-audio' ? 1 : 2;
+          return lower.includes('japanese') ? 0 : lower.includes('multi-audio') ? 1 : 2;
         }
-        return lower === 'hindi' ? 0 : 1;
+        return lower.includes('hindi') ? 0 : 1;
       };
-      validStreams.sort((a, b) => priorityFor(a.language) - priorityFor(b.language));
+      validStreams.sort((a, b) => priorityFor(a) - priorityFor(b));
 
       let primaryCandidate: string | null = null;
-      if (requestedLang === 'dub' || requestedLang === 'english') {
-        primaryCandidate = englishStreamLink || validStreams[0]?.url || downloadLink || null;
-      } else if (requestedLang === 'sub' || requestedLang === 'japanese') {
-        primaryCandidate = japaneseStreamLink || validStreams[0]?.url || downloadLink || null;
-      } else {
-        primaryCandidate =
-          hindiStreamLink || (hasHindiAudio && ravokUrl) || validStreams[0]?.url || downloadLink || null;
+      if (directMultiHlsLink) {
+        if (
+          (requestedLang === 'hindi' && hasHindiAudio) ||
+          (requestedLang === 'dub' && audioLanguages.some((l) => l.toLowerCase() === 'english')) ||
+          (requestedLang === 'sub' && audioLanguages.some((l) => l.toLowerCase() === 'japanese')) ||
+          audioLanguages.length === 0
+        ) {
+          primaryCandidate = directMultiHlsLink;
+        }
+      }
+      if (!primaryCandidate) {
+        if (requestedLang === 'dub' || requestedLang === 'english') {
+          primaryCandidate = englishStreamLink || validStreams[0]?.url || downloadLink || null;
+        } else if (requestedLang === 'sub' || requestedLang === 'japanese') {
+          primaryCandidate = japaneseStreamLink || validStreams[0]?.url || downloadLink || null;
+        } else {
+          primaryCandidate =
+            hindiStreamLink || (hasHindiAudio && ravokUrl) || validStreams[0]?.url || downloadLink || null;
+        }
       }
       const primaryLink = isValidHttpUrl(primaryCandidate) ? primaryCandidate : validStreams[0]?.url || null;
 
@@ -4404,6 +5454,7 @@ export function createExpressApp() {
         type,
         requestedLang,
         streamCount: validStreams.length,
+        hasDirectHls: Boolean(directMultiHlsLink),
         hasHindiAudio,
         audioLanguages,
         hasPrimaryLink: Boolean(primaryLink),
@@ -4429,6 +5480,7 @@ export function createExpressApp() {
         description: pageMeta.description,
         hasHindiAudio,
         audioLanguages,
+        ...(directMultiReferer ? { headers: { Referer: directMultiReferer } } : {}),
         stream: {
           streamLink: primaryLink,
           file: downloadLink,
@@ -4446,6 +5498,81 @@ export function createExpressApp() {
         success: false,
         error: msg,
       });
+    }
+  });
+
+  // Safe image proxy fallback for ISP-blocked poster/thumbnail hosts (e.g. image.tmdb.org without VPN)
+  app.get('/api/anime-world-india/v1/image.php', async (req: Request, res: Response) => {
+    applyProtectedCorsHeaders(req, res, { methods: 'GET, HEAD, OPTIONS', allowCredentials: true });
+    const rawUrl = typeof req.query.url === 'string' ? req.query.url.trim() : '';
+    if (!rawUrl || !isAllowedAwImageUrl(rawUrl)) {
+      res.status(403).json({ success: false, error: 'Image host is not in allowlist.' });
+      return;
+    }
+
+    try {
+      let currentUrl = new URL(normalizeUrl(rawUrl));
+      let upstream: globalThis.Response | null = null;
+      for (let hop = 0; hop < 4; hop++) {
+        if (!isAllowedAwImageUrl(currentUrl.toString())) {
+          res.status(403).json({ success: false, error: 'Redirect image host blocked.' });
+          return;
+        }
+        const r = await fetchWithTimeout(
+          currentUrl.toString(),
+          {
+            method: 'GET',
+            redirect: 'manual',
+            headers: {
+              'User-Agent': BROWSER_UA,
+              Accept: 'image/avif,image/webp,image/png,image/jpeg,*/*;q=0.8',
+              Referer: `${ANIMEWORLD_UPSTREAM}/`,
+            },
+          },
+          10000
+        );
+        if (r.status >= 300 && r.status < 400) {
+          const loc = r.headers.get('location');
+          if (!loc) break;
+          currentUrl = new URL(loc, currentUrl);
+          continue;
+        }
+        upstream = r;
+        break;
+      }
+
+      if (!upstream || !upstream.ok) {
+        res.status(upstream?.status || 502).end();
+        return;
+      }
+
+      const contentLen = Number(upstream.headers.get('content-length') || 0);
+      if (contentLen > 6 * 1024 * 1024) {
+        res.status(413).end();
+        return;
+      }
+
+      const buffer = Buffer.from(await upstream.arrayBuffer());
+      if (buffer.length > 6 * 1024 * 1024) {
+        res.status(413).end();
+        return;
+      }
+
+      const verified = detectVerifiedImageFormat(buffer);
+      if (!verified) {
+        res.status(415).end();
+        return;
+      }
+
+      res.setHeader('Content-Type', verified.mime);
+      res.setHeader('Content-Length', String(buffer.length));
+      res.setHeader('Cache-Control', 'public, max-age=86400');
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.send(buffer);
+    } catch {
+      if (!res.headersSent) {
+        res.status(502).end();
+      }
     }
   });
 
@@ -5159,14 +6286,27 @@ export function createExpressApp() {
       if (maybePlaylist) {
         const textBody = await upstream.text();
         if (textBody.includes('#EXTM3U')) {
-          const forwardedHost = (req.headers['x-forwarded-host'] || req.headers.host || '')
+          const rawForwardedHost = (req.headers['x-forwarded-host'] || req.headers.host || '')
             .toString()
             .split(',')[0]
             .trim();
-          const forwardedProto = (req.headers['x-forwarded-proto'] || req.protocol || 'https')
+          const forwardedHost = /^[a-z0-9.-]+(?::\d+)?$/i.test(rawForwardedHost)
+            ? rawForwardedHost
+            : '';
+          let forwardedProto = (req.headers['x-forwarded-proto'] || req.protocol || 'https')
             .toString()
             .split(',')[0]
-            .trim();
+            .trim()
+            .toLowerCase();
+          if (forwardedProto !== 'http' && forwardedProto !== 'https') {
+            forwardedProto = 'https';
+          }
+          if (
+            forwardedHost &&
+            (forwardedHost.endsWith('.vercel.app') || forwardedHost.endsWith('.run.app'))
+          ) {
+            forwardedProto = 'https';
+          }
           const proxyOrigin = forwardedHost ? `${forwardedProto}://${forwardedHost}` : '';
           const proxyHref = (target: string) => {
             const absolute = new URL(target, finalUrl).toString();

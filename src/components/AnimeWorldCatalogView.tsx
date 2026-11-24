@@ -17,6 +17,7 @@ import {
 import { AnimeImage } from '@/src/components/AnimeImage';
 import { ServerSelector } from '@/src/components/ServerSelector';
 import {
+  buildAnimeWorldProxyImageUrl,
   fetchAnimeWorldA2Z,
   fetchAnimeWorldHome,
   fetchAnimeWorldLatestEpisodes,
@@ -64,6 +65,7 @@ export const AnimeWorldMediaCard: React.FC<{
       <div className="relative aspect-[2/3] w-full shrink-0 overflow-hidden bg-[#151726]">
         <AnimeImage
           src={item.image}
+          fallbackSrc={buildAnimeWorldProxyImageUrl(item.image, item.proxyImage)}
           alt={item.title}
           className="h-full w-full object-cover object-center transition-transform duration-300 group-hover:scale-105"
         />
@@ -112,6 +114,10 @@ export const AnimeWorldEpisodeCard: React.FC<{ entry: AnimeWorldFeaturedEpisode 
       <div className="relative aspect-video w-full shrink-0 overflow-hidden bg-[#151726]">
         <AnimeImage
           src={entry.episode.image || entry.seriesPoster}
+          fallbackSrc={buildAnimeWorldProxyImageUrl(
+            entry.episode.image || entry.seriesPoster,
+            entry.episode.proxyImage
+          )}
           alt={`${entry.seriesTitle} ${entry.episode.episodeNumber || `Episode ${entry.epNum}`}`}
           className="h-full w-full object-cover object-center transition-transform duration-300 group-hover:scale-105"
         />

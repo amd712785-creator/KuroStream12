@@ -12,12 +12,9 @@ import {
   doc,
   getDocFromServer,
   getFirestore,
-  initializeFirestore,
-  persistentLocalCache,
-  persistentMultipleTabManager,
   type Firestore,
 } from 'firebase/firestore';
-import { isNativeCapacitorRuntime } from '@/src/config/env';
+import { isNativeCapacitorRuntime } from '../config/env';
 import webFirebaseConfig from '../../firebase-applet-config.json';
 
 interface GoogleServicesOAuthClient {
@@ -102,7 +99,8 @@ function buildAndroidConfigFromGoogleServices(
     databaseURL: gs.project_info.firebase_url || undefined,
     storageBucket: gs.project_info.storage_bucket || undefined,
     messagingSenderId: gs.project_info.project_number || undefined,
-    firestoreDatabaseId: undefined,
+    firestoreDatabaseId:
+      webFirebaseConfig.firestoreDatabaseId || 'ai-studio-406f5425-8cb6-4bfc-aadf-2a0ce7c524b3',
     oAuthClientId: directWebClient || appInviteWebClient || '',
     source: 'google-services.json',
   };
@@ -128,7 +126,8 @@ function resolveRuntimeFirebaseConfig(): ResolvedFirebaseConfig {
     authDomain: webFirebaseConfig.authDomain || '',
     storageBucket: webFirebaseConfig.storageBucket || undefined,
     messagingSenderId: webFirebaseConfig.messagingSenderId || undefined,
-    firestoreDatabaseId: webFirebaseConfig.firestoreDatabaseId || undefined,
+    firestoreDatabaseId:
+      webFirebaseConfig.firestoreDatabaseId || 'ai-studio-406f5425-8cb6-4bfc-aadf-2a0ce7c524b3',
     oAuthClientId:
       typeof (webFirebaseConfig as { oAuthClientId?: unknown }).oAuthClientId === 'string'
         ? (webFirebaseConfig as { oAuthClientId: string }).oAuthClientId
@@ -200,29 +199,12 @@ if (isFirebaseConfigured) {
 
   app = initializeApp(sdkOptions);
   try {
-    db = initializeFirestore(
-      app,
-      {
-        localCache: persistentLocalCache({
-          tabManager: persistentMultipleTabManager(),
-        }),
-      },
-      resolvedFirebaseConfig.firestoreDatabaseId || undefined
-    );
-  } catch {
-    try {
-      db = initializeFirestore(
-        app,
-        {
-          localCache: persistentLocalCache(),
-        },
-        resolvedFirebaseConfig.firestoreDatabaseId || undefined
-      );
-    } catch {
-      db = resolvedFirebaseConfig.firestoreDatabaseId
-        ? getFirestore(app, resolvedFirebaseConfig.firestoreDatabaseId)
-        : getFirestore(app);
-    }
+    db = resolvedFirebaseConfig.firestoreDatabaseId
+      ? getFirestore(app, resolvedFirebaseConfig.firestoreDatabaseId)
+      : getFirestore(app);
+  } catch (dbErr) {
+    console.warn('[KuroStream Firebase] getFirestore fallback error:', dbErr);
+    db = getFirestore(app);
   }
 
   try {
@@ -302,7 +284,7 @@ export function handleFirestoreError(
   throw new Error(JSON.stringify(errInfo));
 }
 
-export async function testFirestoreConnection(): Promise<boolean> {
+export async function testConnection(): Promise<boolean> {
   if (!db) return false;
   try {
     await getDocFromServer(doc(db, 'test', 'connection'));
@@ -315,3 +297,5 @@ export async function testFirestoreConnection(): Promise<boolean> {
     return true;
   }
 }
+
+export const testFirestoreConnection = testConnection;

@@ -490,8 +490,9 @@ export const WatchPage: React.FC = () => {
       progressSeconds: sameEpisode ? existing.progressSeconds : 0,
       durationSeconds: sameEpisode ? existing.durationSeconds : 0,
       audioMode,
+      serverName: selectedServer || 'KuroStream Global',
     });
-  }, [anime?.id, effectiveEpisodeId, resolvedEpNumber, audioMode]);
+  }, [anime?.id, effectiveEpisodeId, resolvedEpNumber, audioMode, selectedServer]);
 
   const prevEpisode = currentEpisodeIndex > 0 ? episodes[currentEpisodeIndex - 1] : undefined;
   const nextEpisode =
@@ -523,6 +524,13 @@ export const WatchPage: React.FC = () => {
     historyForAnime && historyForAnime.episodeNumber === epNumber
       ? historyForAnime.progressSeconds
       : 0;
+
+  const sessionLogId = useMemo(() => {
+    const safeEp = String(effectiveEpisodeId || epNumber)
+      .replace(/[^a-zA-Z0-9_-]/g, '_')
+      .slice(0, 32);
+    return `wl_${animeId}_${epNumber}_${safeEp}_${Date.now()}`.slice(0, 120);
+  }, [animeId, effectiveEpisodeId, epNumber]);
 
   const { handleHeartbeat } = useWatchSessionHeartbeat({
     animeId: anime?.id || animeId,
@@ -777,13 +785,21 @@ export const WatchPage: React.FC = () => {
                 serverName: selectedServer || 'KuroStream Global',
               });
             }}
-            onPlaybackTime={(watchedSecondsDelta, _cur, _dur, completedEpisode) => {
+            onPlaybackTime={(watchedSecondsDelta, cur, dur, completedEpisode) => {
               if (!anime) return;
               void recordWatchPlayback({
                 animeKey: `anilist:${anime.id}`,
                 animeId: anime.id,
                 episodeNumber: epNumber,
                 episodeKey: effectiveEpisodeId,
+                sessionLogId,
+                animeTitle: displayTitle,
+                coverImage: anime.coverImage?.large || anime.coverImage?.extraLarge || '',
+                episodeTitle: epTitle,
+                serverName: selectedServer || 'KuroStream Global',
+                audioMode,
+                progressSeconds: cur,
+                durationSeconds: dur,
                 secondsWatched: watchedSecondsDelta,
                 completed: completedEpisode,
               });

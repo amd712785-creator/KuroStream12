@@ -3,6 +3,7 @@ import {
   Activity,
   AlertCircle,
   BarChart3,
+  Bell,
   CalendarClock,
   Check,
   Edit3,
@@ -25,6 +26,7 @@ import {
   Smartphone,
   Sparkles,
   Trash2,
+  TrendingUp,
   Unlock,
   Upload,
   User,
@@ -34,6 +36,8 @@ import {
 } from 'lucide-react';
 import { PopupBannerCard } from '@/src/components/PopupBannerModal';
 import { AppUpdateModal } from '@/src/components/AppUpdateModal';
+import { AdminAdvancedAnalyticsSection } from '@/src/components/AdminAdvancedAnalyticsSection';
+import { AdminNotificationsSection } from '@/src/components/AdminNotificationsSection';
 import { AdminWatchAnalyticsSection } from '@/src/components/AdminWatchAnalyticsSection';
 import { useAuth } from '@/src/context/AuthContext';
 import {
@@ -124,7 +128,13 @@ export const AdminDashboardSection: React.FC = () => {
   const { user, authReady, isAdmin, getIdToken, openAuthModal } = useAuth();
 
   const [adminActiveTab, setAdminActiveTab] = useState<
-    'watch-analytics' | 'customization' | 'analytics' | 'popups' | 'updates'
+    | 'watch-analytics'
+    | 'advanced-analytics'
+    | 'notifications'
+    | 'customization'
+    | 'analytics'
+    | 'popups'
+    | 'updates'
   >('watch-analytics');
 
   // App Update Manager State
@@ -920,6 +930,30 @@ export const AdminDashboardSection: React.FC = () => {
           </button>
           <button
             type="button"
+            onClick={() => setAdminActiveTab('advanced-analytics')}
+            className={`flex items-center gap-2 rounded-xl px-4 py-2 text-xs font-bold transition-all ${
+              adminActiveTab === 'advanced-analytics'
+                ? 'kuro-segment-active text-white shadow-[0_0_15px_rgba(168,85,247,0.4)]'
+                : 'kuro-segment-idle text-slate-400 hover:text-white'
+            }`}
+          >
+            <TrendingUp className="h-4 w-4 text-sky-400" />
+            <span>Advanced Analytics</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setAdminActiveTab('notifications')}
+            className={`flex items-center gap-2 rounded-xl px-4 py-2 text-xs font-bold transition-all ${
+              adminActiveTab === 'notifications'
+                ? 'kuro-segment-active text-white shadow-[0_0_15px_rgba(168,85,247,0.4)]'
+                : 'kuro-segment-idle text-slate-400 hover:text-white'
+            }`}
+          >
+            <Bell className="h-4 w-4 text-violet-300" />
+            <span>Notification Center</span>
+          </button>
+          <button
+            type="button"
             onClick={() => setAdminActiveTab('updates')}
             className={`flex items-center gap-2 rounded-xl px-4 py-2 text-xs font-bold transition-all ${
               adminActiveTab === 'updates'
@@ -939,6 +973,16 @@ export const AdminDashboardSection: React.FC = () => {
       {adminActiveTab === 'watch-analytics' && (
         <AdminWatchAnalyticsSection onRefreshParent={loadAnalytics} />
       )}
+
+      {/* ========================================================
+          ADVANCED ADMIN ANALYTICS
+          ======================================================== */}
+      {adminActiveTab === 'advanced-analytics' && <AdminAdvancedAnalyticsSection />}
+
+      {/* ========================================================
+          ADMIN NOTIFICATION CENTER
+          ======================================================== */}
+      {adminActiveTab === 'notifications' && <AdminNotificationsSection />}
 
       {/* ========================================================
           TAB 1: PROFILE BANNERS & AVATARS MANAGEMENT (REQUESTED)

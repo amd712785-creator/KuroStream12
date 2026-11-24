@@ -72,7 +72,13 @@ export const AnimeWorldWatchPage: React.FC = () => {
   const requestedLang: 'hindi' | 'sub' | 'dub' =
     langParam === 'sub' ? 'sub' : langParam === 'dub' ? 'dub' : 'hindi';
 
-  const { preferences, updatePreferences, recordWatchPlayback, saveWatchProgress } = useAuth();
+  const {
+    preferences,
+    updatePreferences,
+    recordWatchPlayback,
+    saveWatchProgress,
+    getHistoryForAnime,
+  } = useAuth();
   const [autoNext, setAutoNext] = useState<boolean>(preferences.autoNext);
 
   const [rawStreamMeta, setRawStreamMeta] = useState<AnimeWorldStreamResponse | null>(null);
@@ -264,10 +270,54 @@ export const AnimeWorldWatchPage: React.FC = () => {
   const currentDownloadId = `aw-${decodedContentId}`;
   const downloadSelection = useMemo(() => selectDownloadableSource(streamData), [streamData]);
 
+  const stableAnimeId = useMemo(
+    () => stableNumericId(seriesIdParam || decodedContentId),
+    [seriesIdParam, decodedContentId]
+  );
+  const awEpisodeNum = epParam > 0 ? epParam : 1;
+
+  const sessionLogId = useMemo(() => {
+    const safeId = decodedContentId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 36);
+    return `aw_${stableAnimeId}_${awEpisodeNum}_${safeId}_${Date.now()}`.slice(0, 120);
+  }, [stableAnimeId, awEpisodeNum, decodedContentId]);
+
+  const historyForAnime = getHistoryForAnime(stableAnimeId);
+  const initialTime =
+    historyForAnime && historyForAnime.episodeId === decodedContentId
+      ? historyForAnime.progressSeconds
+      : 0;
+
+  useEffect(() => {
+    if (!decodedContentId) return;
+    const existing = getHistoryForAnime(stableAnimeId);
+    const sameEpisode = existing && existing.episodeId === decodedContentId;
+    void saveWatchProgress({
+      animeId: stableAnimeId,
+      title: titleText || 'AnimeWorld Series',
+      coverImage: rawStreamMeta?.poster || seriesPoster || '',
+      episodeId: decodedContentId,
+      episodeNumber: awEpisodeNum,
+      episodeTitle: displayEpLabel,
+      progressSeconds: sameEpisode ? existing.progressSeconds : 0,
+      durationSeconds: sameEpisode ? existing.durationSeconds : 0,
+      audioMode: requestedLang,
+      serverName: 'AnimeWorld India',
+    });
+  }, [
+    decodedContentId,
+    stableAnimeId,
+    titleText,
+    rawStreamMeta?.poster,
+    seriesPoster,
+    awEpisodeNum,
+    displayEpLabel,
+    requestedLang,
+  ]);
+
   const { handleHeartbeat } = useWatchSessionHeartbeat({
-    animeId: stableNumericId(seriesIdParam || decodedContentId),
+    animeId: stableAnimeId,
     animeTitle: titleText || 'AnimeWorld Series',
-    episodeNumber: epParam > 0 ? epParam : 1,
+    episodeNumber: awEpisodeNum,
     episodeTitle: displayEpLabel,
     serverName: 'AnimeWorld India',
   });
@@ -392,6 +442,7 @@ export const AnimeWorldWatchPage: React.FC = () => {
             loading={loadingStream}
             episodeKey={`aw:${decodedContentId}:${requestedLang}`}
             episodeTitle={`${titleText} — ${displayEpLabel}`}
+            initialTime={initialTime}
             autoNext={autoNext}
             hasNextEpisode={Boolean(nextEpisode)}
             audioMode={requestedLang}
@@ -400,13 +451,12 @@ export const AnimeWorldWatchPage: React.FC = () => {
             onNextEpisode={nextEpisode ? () => goToEpisode(nextEpisode, currentEpIndex + 1) : undefined}
             onPreviousEpisode={prevEpisode ? () => goToEpisode(prevEpisode, currentEpIndex - 1) : undefined}
             onProgress={(progressSeconds, durationSeconds) => {
-              const stableId = stableNumericId(seriesIdParam || decodedContentId);
               void saveWatchProgress({
-                animeId: stableId,
+                animeId: stableAnimeId,
                 title: titleText || 'AnimeWorld Series',
-                coverImage: seriesPoster || '',
+                coverImage: rawStreamMeta?.poster || seriesPoster || '',
                 episodeId: decodedContentId,
-                episodeNumber: epParam > 0 ? epParam : 1,
+                episodeNumber: awEpisodeNum,
                 episodeTitle: displayEpLabel,
                 progressSeconds,
                 durationSeconds,
@@ -414,13 +464,20 @@ export const AnimeWorldWatchPage: React.FC = () => {
                 serverName: 'AnimeWorld India',
               });
             }}
-            onPlaybackTime={(watchedSecondsDelta, _cur, _dur, completedEpisode) => {
-              const stableId = stableNumericId(seriesIdParam || decodedContentId);
+            onPlaybackTime={(watchedSecondsDelta, cur, dur, completedEpisode) => {
               void recordWatchPlayback({
                 animeKey: `aw:${seriesIdParam || decodedContentId}`,
-                animeId: stableId,
-                episodeNumber: epParam > 0 ? epParam : 1,
+                animeId: stableAnimeId,
+                episodeNumber: awEpisodeNum,
                 episodeKey: decodedContentId,
+                sessionLogId,
+                animeTitle: titleText || 'AnimeWorld Series',
+                coverImage: rawStreamMeta?.poster || seriesPoster || '',
+                episodeTitle: displayEpLabel,
+                serverName: 'AnimeWorld India',
+                audioMode: requestedLang,
+                progressSeconds: cur,
+                durationSeconds: dur,
                 secondsWatched: watchedSecondsDelta,
                 completed: completedEpisode,
               });

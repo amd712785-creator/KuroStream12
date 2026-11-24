@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Link, NavLink, useNavigate } from 'react-router-dom';
 import {
+  Bell,
   Bookmark,
   Calendar,
   Download,
@@ -20,9 +21,11 @@ import {
   LogOut,
 } from 'lucide-react';
 import { AnimeImage } from '@/src/components/AnimeImage';
+import { NotificationBell } from '@/src/components/NotificationBell';
 import { handleTelegramSupportClick } from '@/src/components/TelegramSupportButton';
 import { ASSETS } from '@/src/config/env';
 import { useAuth } from '@/src/context/AuthContext';
+import { useNotifications } from '@/src/context/NotificationContext';
 import { useServer } from '@/src/context/ServerContext';
 import { getDisplayTitle, searchAnime } from '@/src/services/anilistApi';
 import { searchAnimeWorld } from '@/src/services/animeWorldApi';
@@ -30,6 +33,7 @@ import type { AnimeSummary, AnimeWorldItem } from '@/src/types/anime';
 
 export const Navbar: React.FC = () => {
   const { user, preferences, openAuthModal, signOut } = useAuth();
+  const { unreadCount } = useNotifications();
   const { isAnimeWorld } = useServer();
   const navigate = useNavigate();
 
@@ -168,6 +172,9 @@ export const Navbar: React.FC = () => {
           <NavLink to="/schedule" className={navLinkClass}>
             Schedule
           </NavLink>
+          <NavLink to="/community" className={navLinkClass}>
+            Community
+          </NavLink>
         </nav>
 
         {/* Search + Profile / Menu Action Zone */}
@@ -300,6 +307,8 @@ export const Navbar: React.FC = () => {
             )}
           </div>
 
+          {user && <NotificationBell />}
+
           {user ? (
             <Link
               to="/profile"
@@ -396,6 +405,21 @@ export const Navbar: React.FC = () => {
             >
               <Settings2 className="h-4 w-4" />
               <span>Settings</span>
+            </Link>
+            <Link
+              to="/notifications"
+              onClick={() => setMobileMenuOpen(false)}
+              className="kuro-btn-glass flex min-h-[46px] items-center justify-between gap-3 rounded-2xl px-4 py-2.5 text-sm font-medium text-slate-200"
+            >
+              <span className="flex items-center gap-3">
+                <Bell className="h-4 w-4 text-violet-300" />
+                <span>Notifications</span>
+              </span>
+              {unreadCount > 0 && (
+                <span className="rounded-full bg-violet-500 px-2 py-0.5 text-[11px] font-bold text-white tabular-nums">
+                  {unreadCount > 99 ? '99+' : unreadCount}
+                </span>
+              )}
             </Link>
             <Link
               to="/profile"

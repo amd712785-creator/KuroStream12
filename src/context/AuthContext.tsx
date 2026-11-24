@@ -19,8 +19,10 @@ import {
 import {
   collection,
   deleteDoc,
+  deleteField,
   doc,
   getDoc,
+  getDocFromServer,
   onSnapshot,
   query,
   serverTimestamp,
@@ -59,16 +61,27 @@ import {
   type PlaybackRecordInput,
 } from '@/src/services/achievementService';
 import { applyTheme, getStoredTheme } from '@/src/services/themeService';
+import {
+  claimAndPersistVerifiedXp,
+  computeLevelFromXp,
+  subscribeXpHistory,
+  XP_DAILY_GOAL_SECONDS,
+  XP_REWARDS_CONFIG,
+} from '@/src/services/xpService';
 import type {
   AchievementId,
   AnimeSummary,
   EquipBadgeResult,
+  LevelUpEventPayload,
   LibraryAnimeItem,
   ThemeId,
   UserPreferences,
   UserWatchStats,
   WatchHistoryItem,
+  XpHistoryItem,
+  XpLevelInfo,
 } from '@/src/types/anime';
+import type { ProfileFrameId } from '@/src/types/frames';
 
 const DEFAULT_SIGNED_OUT_PREFERENCES: UserPreferences = {
   displayName: 'KuroStream',
@@ -195,6 +208,10 @@ interface AuthContextValue {
   watchStats: UserWatchStats;
   equippedBadges: AchievementId[];
   equippingBadgeId: AchievementId | null;
+  levelInfo: XpLevelInfo;
+  xpHistory: XpHistoryItem[];
+  levelUpEvent: LevelUpEventPayload | null;
+  dismissLevelUp: () => void;
   watchlist: LibraryAnimeItem[];
   favorites: LibraryAnimeItem[];
   history: WatchHistoryItem[];
@@ -237,13 +254,31 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [sessionPrefs, setSessionPrefs] = useState<UserPreferences>(DEFAULT_SIGNED_OUT_PREFERENCES);
 
   const [cloudPrefs, setCloudPrefs] = useState<UserPreferences>(DEFAULT_SIGNED_OUT_PREFERENCES);
-  const [cloudWatchStats, setCloudWatchStats] = useState<UserWatchStats>(() => getStoredWatchStats());
+  const [cloudWatchStats, setCloudWatchStats] = useState<UserWatchStats>(DEFAULT_WATCH_STATS);
   const [cloudEquippedBadges, setCloudEquippedBadges] = useState<AchievementId[]>([]);
   const [equippingBadgeId, setEquippingBadgeId] = useState<AchievementId | null>(null);
   const [cloudDailyActivity, setCloudDailyActivity] = useState<Record<string, number>>({});
   const [cloudWatchlist, setCloudWatchlist] = useState<LibraryAnimeItem[]>([]);
   const [cloudFavorites, setCloudFavorites] = useState<LibraryAnimeItem[]>([]);
   const [cloudHistory, setCloudHistory] = useState<WatchHistoryItem[]>([]);
+
+  const [cloudXp, setCloudXp] = useState<number>(0);
+  const [xpHistory, setXpHistory] = useState<XpHistoryItem[]>([]);
+  const [levelUpEvent, setLevelUpEvent] = useState<LevelUpEventPayload | null>(null);
+  const xpStateRef = useRef<{
+    xp: number;
+    lastLoginXpDay: string;
+    lastGoalXpDay: string;
+    awardedMilestones: number[];
+    profileLoaded: boolean;
+  }>({
+    xp: 0,
+    lastLoginXpDay: '',
+    lastGoalXpDay: '',
+    awardedMilestones: [],
+    profileLoaded: false,
+  });
+  const claimedXpSessionKeysRef = useRef<Set<string>>(new Set());
 
   const cloudWatchStatsRef = useRef<UserWatchStats>(cloudWatchStats);
   cloudWatchStatsRef.current = cloudWatchStats;
@@ -264,6 +299,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         episodeId: string;
         episodeNumber: number;
         audioMode: string;
+        serverName: string;
         progressSeconds: number;
         writtenAt: number;
       }
@@ -275,6 +311,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     watchedAnimeLen: number;
     achievementsLen: number;
   } | null>(null);
+  const profileReadyPromiseRef = useRef<Promise<void>>(Promise.resolve());
+  const playbackQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const watchLogSessionSecondsRef = useRef<Map<string, number>>(new Map());
+  const createdWatchLogsRef = useRef<Set<string>>(new Set());
+  const completedWatchLogsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     if (!isFirebaseConfigured) return;
@@ -336,7 +377,37 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (!firebaseUser) {
         setIsAdmin(false);
         setCloudEquippedBadges([]);
+        cloudEquippedBadgesRef.current = [];
+        setCloudWatchStats(DEFAULT_WATCH_STATS);
+        cloudWatchStatsRef.current = DEFAULT_WATCH_STATS;
+        setCloudDailyActivity({});
+        cloudDailyActivityRef.current = {};
+        setCloudWatchlist([]);
+        setCloudFavorites([]);
+        setCloudHistory([]);
+        setCloudXp(0);
+        setXpHistory([]);
+        setLevelUpEvent(null);
+        xpStateRef.current = {
+          xp: 0,
+          lastLoginXpDay: '',
+          lastGoalXpDay: '',
+          awardedMilestones: [],
+          profileLoaded: false,
+        };
+        claimedXpSessionKeysRef.current.clear();
+        lastSavedProgressRef.current.clear();
+        lastSyncedArraysRef.current = null;
+        watchLogSessionSecondsRef.current.clear();
+        createdWatchLogsRef.current.clear();
+        completedWatchLogsRef.current.clear();
         return;
+      }
+
+      if (firebaseUser.emailVerified) {
+        const storedForUser = getStoredWatchStats(firebaseUser.uid);
+        cloudWatchStatsRef.current = storedForUser;
+        setCloudWatchStats(storedForUser);
       }
 
       // Verify Admin privileges strictly via Firebase Admin authorization (custom claims + backend verification)
@@ -382,64 +453,352 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (db && firebaseUser.emailVerified) {
         const userRef = doc(db, 'users', firebaseUser.uid);
         const todayKey = getTodayUtcKey();
-        try {
-          const snap = await getDoc(userRef);
-          if (!snap.exists()) {
-            const safeName = (firebaseUser.displayName?.trim() || 'Anime Fan').slice(0, 80);
-            const payload: Record<string, unknown> = {
-              uid: firebaseUser.uid,
-              displayName: safeName,
-              preferredAudio: 'sub',
-              autoNext: true,
-              equippedBadges: [],
-              lastActiveDay: todayKey,
-              lastActiveAt: serverTimestamp(),
-              createdAt: serverTimestamp(),
-              updatedAt: serverTimestamp(),
-            };
-            if (firebaseUser.photoURL) {
-              payload.photoURL = firebaseUser.photoURL.slice(0, 500);
-            }
-            await setDoc(userRef, payload);
-          } else {
-            // Update activity timestamp at most once per 5 minutes per browser session
-            let shouldPing = true;
+        const ALLOWED_PROFILE_KEYS = new Set([
+          'uid',
+          'displayName',
+          'email',
+          'photoURL',
+          'bannerURL',
+          'preferredAudio',
+          'autoNext',
+          'lastActiveDay',
+          'lastActiveAt',
+          'createdAt',
+          'updatedAt',
+          'theme',
+          'streakCurrent',
+          'streakLongest',
+          'streakLastWatchedDate',
+          'streakWatchedDays',
+          'totalEpisodesCompleted',
+          'todayEpisodesCompleted',
+          'todayCompletedDate',
+          'totalWatchSeconds',
+          'todayWatchSeconds',
+          'todayWatchDate',
+          'watchedAnimeIds',
+          'unlockedAchievements',
+          'achievementUnlockDates',
+          'equippedBadges',
+          'xp',
+          'level',
+          'lastLoginXpDay',
+          'lastGoalXpDay',
+          'xpStreakMilestones',
+          'xpUpdatedAt',
+          'equippedFrame',
+          'checkinStreak',
+          'lastCheckinDate',
+          'totalCheckins',
+          'coins',
+        ]);
+        const VALID_THEMES = new Set([
+          'midnight-purple',
+          'deep-black',
+          'ocean-blue',
+          'crimson-red',
+          'emerald-green',
+          'rose-pink',
+          'amoled-black',
+        ]);
+        const DATE_KEY_FIELDS = [
+          'lastActiveDay',
+          'streakLastWatchedDate',
+          'todayCompletedDate',
+          'todayWatchDate',
+          'lastLoginXpDay',
+          'lastGoalXpDay',
+        ] as const;
+        const DATE_RE = /^[0-9]{4}-[0-9]{2}-[0-9]{2}$/;
+        const VALID_BADGE_IDS = new Set<string>(ACHIEVEMENT_BADGES.map((b) => b.id));
+
+        const ensureProfile = async () => {
+          try {
+            let snap: Awaited<ReturnType<typeof getDoc>> | null = null;
+            let resolvedFromServer = false;
             try {
-              const lastPingRaw = sessionStorage.getItem(ACTIVE_PING_STORAGE_KEY);
-              if (lastPingRaw) {
-                const parsed = JSON.parse(lastPingRaw) as { uid?: string; ts?: number; day?: string };
-                if (
-                  parsed.uid === firebaseUser.uid &&
-                  parsed.day === todayKey &&
-                  typeof parsed.ts === 'number' &&
-                  Date.now() - parsed.ts < 5 * 60 * 1000
-                ) {
-                  shouldPing = false;
-                }
-              }
+              snap = await getDocFromServer(userRef);
+              resolvedFromServer = true;
             } catch {
-              // ignore sessionStorage access errors
+              snap = await getDoc(userRef);
             }
 
-            if (shouldPing) {
-              await updateDoc(userRef, {
+            if (!snap.exists()) {
+              if (!resolvedFromServer) {
+                return;
+              }
+              const safeName = (firebaseUser.displayName?.trim() || 'Anime Fan').slice(0, 80);
+              const payload: Record<string, unknown> = {
+                uid: firebaseUser.uid,
+                displayName: safeName,
+                preferredAudio: 'sub',
+                autoNext: true,
+                equippedBadges: [],
                 lastActiveDay: todayKey,
                 lastActiveAt: serverTimestamp(),
+                createdAt: serverTimestamp(),
                 updatedAt: serverTimestamp(),
-              });
+              };
+              if (firebaseUser.email && firebaseUser.email.trim()) {
+                payload.email = firebaseUser.email.trim().slice(0, 160);
+              }
+              if (firebaseUser.photoURL) {
+                payload.photoURL = firebaseUser.photoURL.slice(0, 500);
+              }
+              await setDoc(userRef, payload);
+            } else {
+              const existingData = snap.data() as Record<string, unknown>;
+              const repairPayload: Record<string, unknown> = {};
+              let needsRepair = false;
+
+              // 1. Strip any unknown/deprecated legacy keys that would fail strict schema rules
+              for (const key of Object.keys(existingData)) {
+                if (!ALLOWED_PROFILE_KEYS.has(key)) {
+                  repairPayload[key] = deleteField();
+                  needsRepair = true;
+                }
+              }
+
+              // 2. Backfill or sanitize required fields
+              if (existingData.uid !== firebaseUser.uid) {
+                repairPayload.uid = firebaseUser.uid;
+                needsRepair = true;
+              }
+              if (
+                typeof existingData.displayName !== 'string' ||
+                existingData.displayName.trim().length < 1 ||
+                existingData.displayName.length > 80
+              ) {
+                const rawName =
+                  typeof existingData.displayName === 'string' && existingData.displayName.trim()
+                    ? existingData.displayName.trim()
+                    : firebaseUser.displayName?.trim() || 'Anime Fan';
+                repairPayload.displayName = rawName.slice(0, 80);
+                needsRepair = true;
+              }
+              if (
+                existingData.preferredAudio !== 'sub' &&
+                existingData.preferredAudio !== 'dub' &&
+                existingData.preferredAudio !== 'hindi'
+              ) {
+                repairPayload.preferredAudio = 'sub';
+                needsRepair = true;
+              }
+              if (typeof existingData.autoNext !== 'boolean') {
+                repairPayload.autoNext = true;
+                needsRepair = true;
+              }
+              if (!existingData.createdAt) {
+                repairPayload.createdAt = serverTimestamp();
+                needsRepair = true;
+              }
+
+              // 3. Sanitize optional fields if malformed (e.g., null, wrong type, oversized, invalid regex)
+              const authEmail = firebaseUser.email?.trim().slice(0, 160);
+              if (authEmail) {
+                if (
+                  typeof existingData.email !== 'string' ||
+                  existingData.email.toLowerCase() !== authEmail.toLowerCase()
+                ) {
+                  repairPayload.email = authEmail;
+                  needsRepair = true;
+                }
+              } else if ('email' in existingData && typeof existingData.email !== 'string') {
+                repairPayload.email = deleteField();
+                needsRepair = true;
+              }
+
+              if ('photoURL' in existingData) {
+                if (typeof existingData.photoURL !== 'string') {
+                  repairPayload.photoURL = deleteField();
+                  needsRepair = true;
+                } else if (existingData.photoURL.length > 500) {
+                  repairPayload.photoURL = existingData.photoURL.slice(0, 500);
+                  needsRepair = true;
+                }
+              }
+              if ('bannerURL' in existingData) {
+                if (typeof existingData.bannerURL !== 'string') {
+                  repairPayload.bannerURL = deleteField();
+                  needsRepair = true;
+                } else if (existingData.bannerURL.length > 500) {
+                  repairPayload.bannerURL = existingData.bannerURL.slice(0, 500);
+                  needsRepair = true;
+                }
+              }
+              if (
+                'theme' in existingData &&
+                (typeof existingData.theme !== 'string' || !VALID_THEMES.has(existingData.theme))
+              ) {
+                repairPayload.theme = deleteField();
+                needsRepair = true;
+              }
+
+              for (const dateField of DATE_KEY_FIELDS) {
+                if (dateField in existingData) {
+                  const val = existingData[dateField];
+                  if (typeof val !== 'string' || !DATE_RE.test(val)) {
+                    repairPayload[dateField] =
+                      dateField === 'lastActiveDay' ? todayKey : deleteField();
+                    needsRepair = true;
+                  }
+                }
+              }
+
+              if ('lastActiveAt' in existingData && !(existingData.lastActiveAt instanceof Timestamp)) {
+                repairPayload.lastActiveAt = serverTimestamp();
+                needsRepair = true;
+              }
+              if ('xpUpdatedAt' in existingData && !(existingData.xpUpdatedAt instanceof Timestamp)) {
+                repairPayload.xpUpdatedAt = deleteField();
+                needsRepair = true;
+              }
+              if (
+                'level' in existingData &&
+                (typeof existingData.level !== 'number' ||
+                  !Number.isFinite(existingData.level) ||
+                  existingData.level < 1 ||
+                  existingData.level > 999)
+              ) {
+                const rawLv = Number(existingData.level);
+                repairPayload.level =
+                  Number.isFinite(rawLv) && rawLv >= 1 ? Math.min(999, Math.floor(rawLv)) : 1;
+                if (!('xp' in existingData) || typeof existingData.xp !== 'number' || existingData.xp < 0) {
+                  repairPayload.xp = 0;
+                }
+                needsRepair = true;
+              }
+              if (
+                'xp' in existingData &&
+                (typeof existingData.xp !== 'number' || !Number.isFinite(existingData.xp) || existingData.xp < 0)
+              ) {
+                repairPayload.xp = 0;
+                needsRepair = true;
+              }
+              if ('equippedBadges' in existingData) {
+                if (!Array.isArray(existingData.equippedBadges)) {
+                  repairPayload.equippedBadges = [];
+                  needsRepair = true;
+                } else {
+                  const rawBadges = existingData.equippedBadges as unknown[];
+                  const filtered = Array.from(
+                    new Set(
+                      rawBadges.filter(
+                        (id): id is string => typeof id === 'string' && VALID_BADGE_IDS.has(id)
+                      )
+                    )
+                  ).slice(0, MAX_EQUIPPED_BADGES);
+                  if (
+                    filtered.length !== rawBadges.length ||
+                    filtered.some((id, idx) => rawBadges[idx] !== id)
+                  ) {
+                    repairPayload.equippedBadges = filtered;
+                    needsRepair = true;
+                  }
+                }
+              }
+
+              const NON_NEGATIVE_NUMBER_FIELDS = [
+                'streakCurrent',
+                'streakLongest',
+                'totalEpisodesCompleted',
+                'todayEpisodesCompleted',
+                'totalWatchSeconds',
+                'todayWatchSeconds',
+              ] as const;
+              for (const numField of NON_NEGATIVE_NUMBER_FIELDS) {
+                if (numField in existingData) {
+                  const val = existingData[numField];
+                  if (typeof val !== 'number' || !Number.isFinite(val) || val < 0) {
+                    repairPayload[numField] = 0;
+                    needsRepair = true;
+                  }
+                }
+              }
+
+              const LIST_FIELDS: Array<{ key: string; max: number }> = [
+                { key: 'streakWatchedDays', max: 400 },
+                { key: 'watchedAnimeIds', max: 500 },
+                { key: 'unlockedAchievements', max: 30 },
+                { key: 'xpStreakMilestones', max: 10 },
+              ];
+              for (const { key, max } of LIST_FIELDS) {
+                if (key in existingData) {
+                  const val = existingData[key];
+                  if (!Array.isArray(val)) {
+                    repairPayload[key] = deleteField();
+                    needsRepair = true;
+                  } else if (val.length > max) {
+                    repairPayload[key] = val.slice(-max);
+                    needsRepair = true;
+                  }
+                }
+              }
+
+              if ('achievementUnlockDates' in existingData) {
+                const mapVal = existingData.achievementUnlockDates;
+                if (!mapVal || typeof mapVal !== 'object' || Array.isArray(mapVal)) {
+                  repairPayload.achievementUnlockDates = deleteField();
+                  needsRepair = true;
+                } else {
+                  const entries = Object.entries(mapVal as Record<string, unknown>);
+                  if (entries.length > 30) {
+                    repairPayload.achievementUnlockDates = Object.fromEntries(entries.slice(0, 30));
+                    needsRepair = true;
+                  }
+                }
+              }
+
+              // Update activity timestamp at most once per 5 minutes per browser session
+              let shouldPing = true;
               try {
-                sessionStorage.setItem(
-                  ACTIVE_PING_STORAGE_KEY,
-                  JSON.stringify({ uid: firebaseUser.uid, day: todayKey, ts: Date.now() })
-                );
+                const lastPingRaw = sessionStorage.getItem(ACTIVE_PING_STORAGE_KEY);
+                if (lastPingRaw) {
+                  const parsed = JSON.parse(lastPingRaw) as { uid?: string; ts?: number; day?: string };
+                  if (
+                    parsed.uid === firebaseUser.uid &&
+                    parsed.day === todayKey &&
+                    typeof parsed.ts === 'number' &&
+                    Date.now() - parsed.ts < 5 * 60 * 1000
+                  ) {
+                    shouldPing = false;
+                  }
+                }
               } catch {
-                // ignore storage errors
+                // ignore sessionStorage access errors
+              }
+
+              if (shouldPing || needsRepair) {
+                const updatePayload: Record<string, unknown> = {
+                  ...repairPayload,
+                  updatedAt: serverTimestamp(),
+                };
+                if (shouldPing) {
+                  updatePayload.lastActiveDay = todayKey;
+                  updatePayload.lastActiveAt = serverTimestamp();
+                  if (authEmail) {
+                    updatePayload.email = authEmail;
+                  }
+                }
+                await updateDoc(userRef, updatePayload);
+                if (shouldPing) {
+                  try {
+                    sessionStorage.setItem(
+                      ACTIVE_PING_STORAGE_KEY,
+                      JSON.stringify({ uid: firebaseUser.uid, day: todayKey, ts: Date.now() })
+                    );
+                  } catch {
+                    // ignore storage errors
+                  }
+                }
               }
             }
+          } catch (err) {
+            logFirestoreError(err, OperationType.WRITE, `users/${firebaseUser.uid}`);
           }
-        } catch (err) {
-          logFirestoreError(err, OperationType.WRITE, `users/${firebaseUser.uid}`);
-        }
+        };
+        profileReadyPromiseRef.current = ensureProfile();
+        await profileReadyPromiseRef.current;
       }
     });
 
@@ -478,6 +837,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
                   : 'sub',
             autoNext: typeof d.autoNext === 'boolean' ? d.autoNext : true,
             theme: userTheme,
+            equippedFrame: typeof d.equippedFrame === 'string' ? (d.equippedFrame as ProfileFrameId) : 'none',
           });
 
           const { unlockedAchievements, achievementUnlockDates } = normalizeAchievementList(
@@ -518,14 +878,36 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             dailyWatchSeconds: mergedDaily,
             unlockedAchievements,
             achievementUnlockDates,
+            equippedFrame: typeof d.equippedFrame === 'string' ? (d.equippedFrame as ProfileFrameId) : 'none',
+            lastCheckinDate: typeof d.lastCheckinDate === 'string' ? d.lastCheckinDate : undefined,
+            checkinStreak: typeof d.checkinStreak === 'number' ? d.checkinStreak : 0,
+            totalCheckins: typeof d.totalCheckins === 'number' ? d.totalCheckins : 0,
+            coins: typeof d.coins === 'number' ? d.coins : 0,
           };
           cloudWatchStatsRef.current = loadedStats;
           setCloudWatchStats(loadedStats);
-          saveStoredWatchStats(loadedStats);
+          saveStoredWatchStats(loadedStats, uid);
 
           const syncedEquipped = normalizeEquippedBadges(d.equippedBadges);
           cloudEquippedBadgesRef.current = syncedEquipped;
           setCloudEquippedBadges(syncedEquipped);
+
+          const serverXp = typeof d.xp === 'number' && d.xp >= 0 ? Math.floor(d.xp) : 0;
+          const serverLoginDay = typeof d.lastLoginXpDay === 'string' ? d.lastLoginXpDay : '';
+          const serverGoalDay = typeof d.lastGoalXpDay === 'string' ? d.lastGoalXpDay : '';
+          const serverMilestones = Array.isArray(d.xpStreakMilestones)
+            ? d.xpStreakMilestones.filter((m): m is number => typeof m === 'number')
+            : [];
+          xpStateRef.current = {
+            xp: Math.max(serverXp, xpStateRef.current.xp),
+            lastLoginXpDay: serverLoginDay || xpStateRef.current.lastLoginXpDay,
+            lastGoalXpDay: serverGoalDay || xpStateRef.current.lastGoalXpDay,
+            awardedMilestones: Array.from(
+              new Set([...serverMilestones, ...xpStateRef.current.awardedMilestones])
+            ),
+            profileLoaded: true,
+          };
+          setCloudXp(xpStateRef.current.xp);
         }
       },
       (error) => {
@@ -649,12 +1031,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
     );
 
+    const unsubXpHist = subscribeXpHistory(uid, (items) => {
+      setXpHistory(items);
+    });
+
     return () => {
       unsubUser();
       unsubActivity();
       unsubWl();
       unsubFav();
       unsubHist();
+      unsubXpHist();
     };
   }, [authReady, user]);
 
@@ -938,6 +1325,81 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return normalizeEquippedBadges(cloudEquippedBadges, watchStats, isAdmin);
   }, [hasVerifiedCloudSession, cloudEquippedBadges, watchStats, isAdmin]);
 
+  const levelInfo = useMemo<XpLevelInfo>(
+    () => computeLevelFromXp(cloudXp, isAdmin),
+    [cloudXp, isAdmin]
+  );
+
+  const triggerVerifiedXpClaim = useCallback(
+    async (
+      params: Omit<Parameters<typeof claimAndPersistVerifiedXp>[0], 'uid' | 'idToken' | 'currentTotalXp'>
+    ) => {
+      if (!user || !user.emailVerified || isAdmin) return null;
+      const safeKey = params.eventKey.replace(/[^a-zA-Z0-9_\-]/g, '_').slice(0, 128);
+      if (claimedXpSessionKeysRef.current.has(safeKey)) return null;
+      claimedXpSessionKeysRef.current.add(safeKey);
+
+      const idToken = await getIdToken(false);
+      if (!idToken) return null;
+
+      const result = await claimAndPersistVerifiedXp({
+        ...params,
+        eventKey: safeKey,
+        uid: user.uid,
+        idToken,
+        currentTotalXp: xpStateRef.current.xp,
+        awardedMilestones: xpStateRef.current.awardedMilestones,
+      });
+
+      if (result?.awarded) {
+        xpStateRef.current.xp = result.nextTotalXp;
+        if (params.actionType === 'daily_login' && params.todayKey) {
+          xpStateRef.current.lastLoginXpDay = params.todayKey;
+        }
+        if (params.actionType === 'daily_goal' && params.todayKey) {
+          xpStateRef.current.lastGoalXpDay = params.todayKey;
+        }
+        if (params.actionType === 'streak_milestone' && params.milestoneDays) {
+          xpStateRef.current.awardedMilestones = Array.from(
+            new Set([...xpStateRef.current.awardedMilestones, params.milestoneDays])
+          );
+        }
+        setCloudXp(result.nextTotalXp);
+        if (result.leveledUp) {
+          setLevelUpEvent({
+            fromLevel: result.prevLevel,
+            toLevel: result.nextLevel,
+            title: result.levelTitle,
+            xpGained: result.xpDelta,
+            reason: result.reason || 'Level Up!',
+          });
+        }
+      }
+      return result;
+    },
+    [user, isAdmin, getIdToken]
+  );
+
+  // Automatic Daily Login XP (+5 XP) once profile finishes initial load
+  useEffect(() => {
+    if (!authReady || !user || !user.emailVerified || isAdmin) return;
+    const todayKey = getTodayUtcKey();
+    const timer = window.setTimeout(() => {
+      if (!xpStateRef.current.profileLoaded) return;
+      if (xpStateRef.current.lastLoginXpDay === todayKey) return;
+      void triggerVerifiedXpClaim({
+        actionType: 'daily_login',
+        eventKey: `login_${todayKey}`,
+        todayKey,
+      });
+    }, 2000);
+    return () => window.clearTimeout(timer);
+  }, [authReady, user, isAdmin, cloudXp, triggerVerifiedXpClaim]);
+
+  const dismissLevelUp = useCallback(() => {
+    setLevelUpEvent(null);
+  }, []);
+
   const isInWatchlist = useCallback(
     (animeId: number) => watchlist.some((item) => item.animeId === animeId),
     [watchlist]
@@ -1061,10 +1523,16 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const safeCover = (item.coverImage || '').slice(0, 500);
       const safeEpId = (item.episodeId?.trim() || 'ep-1').slice(0, 200);
       const safeEpTitle = item.episodeTitle ? item.episodeTitle.slice(0, 240) : undefined;
-      const safeServerName = item.serverName ? item.serverName.slice(0, 80) : undefined;
-      const safeEpNumber = Math.max(0, Number(item.episodeNumber) || 0);
-      const safeProgress = Math.max(0, Math.floor(item.progressSeconds || 0));
-      const safeDuration = Math.max(0, Math.floor(item.durationSeconds || 0));
+      const safeServerName = item.serverName ? item.serverName.slice(0, 80) : 'KuroStream Global';
+      const safeEpNumber = Number.isFinite(Number(item.episodeNumber))
+        ? Math.max(0, Number(item.episodeNumber))
+        : 0;
+      const safeProgress = Number.isFinite(Number(item.progressSeconds))
+        ? Math.max(0, Math.floor(Number(item.progressSeconds)))
+        : 0;
+      const safeDuration = Number.isFinite(Number(item.durationSeconds))
+        ? Math.max(0, Math.floor(Number(item.durationSeconds)))
+        : 0;
 
       const safeAudio =
         item.audioMode === 'dub'
@@ -1078,15 +1546,19 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         prevWrite &&
         prevWrite.episodeId === safeEpId &&
         prevWrite.episodeNumber === safeEpNumber &&
-        prevWrite.audioMode === safeAudio;
+        prevWrite.audioMode === safeAudio &&
+        prevWrite.serverName === safeServerName;
+      const isFirstRealProgress =
+        prevWrite && prevWrite.progressSeconds === 0 && safeProgress > 0;
       const isCompletion = safeDuration > 0 && safeProgress >= safeDuration - 3;
       const deltaSeconds = prevWrite ? Math.abs(safeProgress - prevWrite.progressSeconds) : 999;
 
       if (
         isSameTrack &&
+        !isFirstRealProgress &&
         !isCompletion &&
-        deltaSeconds < 14 &&
-        now - prevWrite.writtenAt < 14500
+        deltaSeconds < 12 &&
+        now - prevWrite.writtenAt < 12000
       ) {
         return;
       }
@@ -1095,6 +1567,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         episodeId: safeEpId,
         episodeNumber: safeEpNumber,
         audioMode: safeAudio,
+        serverName: safeServerName,
         progressSeconds: safeProgress,
         writtenAt: now,
       });
@@ -1108,13 +1581,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           coverImage: safeCover,
           episodeId: safeEpId,
           episodeNumber: safeEpNumber,
+          serverName: safeServerName,
           progressSeconds: safeProgress,
           durationSeconds: safeDuration,
           audioMode: safeAudio,
           updatedAt: serverTimestamp(),
         };
         if (safeEpTitle) payload.episodeTitle = safeEpTitle;
-        if (safeServerName) payload.serverName = safeServerName;
         await setDoc(doc(db, path), payload);
       } catch (err) {
         logFirestoreError(err, OperationType.WRITE, path);
@@ -1200,100 +1673,271 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     async (input: PlaybackRecordInput) => {
       if (!user || !user.emailVerified || !db) return;
 
-      const currentBase: UserWatchStats = {
-        ...cloudWatchStatsRef.current,
-        dailyWatchSeconds: {
-          ...(cloudWatchStatsRef.current.dailyWatchSeconds || {}),
-          ...cloudDailyActivityRef.current,
-        },
-      };
-      const res = recordWatchPlaybackLocally(input, currentBase);
-      if (!res.changed) return;
+      const task = async () => {
+        await profileReadyPromiseRef.current.catch(() => {});
 
-      cloudWatchStatsRef.current = res.stats;
-      cloudDailyActivityRef.current = {
-        ...cloudDailyActivityRef.current,
-        [res.todayKey]: res.todayDaySeconds,
-      };
-      setCloudWatchStats(res.stats);
-      setCloudDailyActivity(cloudDailyActivityRef.current);
-
-      const userPath = `users/${user.uid}`;
-      const monthPath = `users/${user.uid}/watchActivity/${res.monthKey}`;
-
-      const prevSynced = lastSyncedArraysRef.current;
-      const isSameUid = prevSynced?.uid === user.uid;
-      const streakDaysChanged =
-        !isSameUid || prevSynced.streakDaysLen !== res.stats.streakWatchedDays.length;
-      const watchedAnimeChanged =
-        !isSameUid || prevSynced.watchedAnimeLen !== res.stats.watchedAnimeIds.length;
-      const achievementsChanged =
-        !isSameUid || prevSynced.achievementsLen !== res.stats.unlockedAchievements.length;
-
-      try {
-        const updatePayload: Record<string, unknown> = {
-          streakCurrent: res.stats.streakCurrent,
-          streakLongest: res.stats.streakLongest,
-          totalEpisodesCompleted: res.stats.totalEpisodesCompleted,
-          todayEpisodesCompleted: res.stats.todayEpisodesCompleted,
-          todayCompletedDate: res.stats.todayCompletedDate || res.todayKey,
-          totalWatchSeconds: res.stats.totalWatchSeconds,
-          todayWatchSeconds: res.stats.todayWatchSeconds,
-          todayWatchDate: res.stats.todayWatchDate || res.todayKey,
-          updatedAt: serverTimestamp(),
+        const currentBase: UserWatchStats = {
+          ...cloudWatchStatsRef.current,
+          dailyWatchSeconds: {
+            ...(cloudWatchStatsRef.current.dailyWatchSeconds || {}),
+            ...cloudDailyActivityRef.current,
+          },
         };
-        if (streakDaysChanged) {
-          updatePayload.streakWatchedDays = res.stats.streakWatchedDays;
-        }
-        if (watchedAnimeChanged) {
-          updatePayload.watchedAnimeIds = res.stats.watchedAnimeIds;
-        }
-        if (achievementsChanged) {
-          updatePayload.unlockedAchievements = res.stats.unlockedAchievements;
-          updatePayload.achievementUnlockDates = res.stats.achievementUnlockDates;
-        }
-        if (res.stats.streakLastWatchedDate) {
-          updatePayload.streakLastWatchedDate = res.stats.streakLastWatchedDate;
+        const res = recordWatchPlaybackLocally(input, currentBase, user.uid);
+
+        const rawLogId = (input.sessionLogId || '').replace(/[^a-zA-Z0-9_\-]/g, '_').slice(0, 128);
+        const shouldWriteLog = Boolean(rawLogId && (res.safeDelta > 0 || input.completed));
+
+        if (!res.changed && !shouldWriteLog) return;
+
+        if (res.changed) {
+          cloudWatchStatsRef.current = res.stats;
+          cloudDailyActivityRef.current = {
+            ...cloudDailyActivityRef.current,
+            [res.todayKey]: res.todayDaySeconds,
+          };
+          setCloudWatchStats(res.stats);
+          setCloudDailyActivity(cloudDailyActivityRef.current);
         }
 
-        lastSyncedArraysRef.current = {
-          uid: user.uid,
-          streakDaysLen: res.stats.streakWatchedDays.length,
-          watchedAnimeLen: res.stats.watchedAnimeIds.length,
-          achievementsLen: res.stats.unlockedAchievements.length,
-        };
+        const userPath = `users/${user.uid}`;
+        const monthPath = `users/${user.uid}/watchActivity/${res.monthKey}`;
 
-        const monthDays: Record<string, number> = {};
-        for (const [dateKey, secs] of Object.entries(res.stats.dailyWatchSeconds || {})) {
+        const prevSynced = lastSyncedArraysRef.current;
+        const isSameUid = prevSynced?.uid === user.uid;
+        const streakDaysChanged =
+          !isSameUid || prevSynced.streakDaysLen !== res.stats.streakWatchedDays.length;
+        const watchedAnimeChanged =
+          !isSameUid || prevSynced.watchedAnimeLen !== res.stats.watchedAnimeIds.length;
+        const achievementsChanged =
+          !isSameUid || prevSynced.achievementsLen !== res.stats.unlockedAchievements.length;
+
+        const writes: Promise<unknown>[] = [];
+
+        if (res.changed) {
+          const updatePayload: Record<string, unknown> = {
+            streakCurrent: res.stats.streakCurrent,
+            streakLongest: res.stats.streakLongest,
+            totalEpisodesCompleted: res.stats.totalEpisodesCompleted,
+            todayEpisodesCompleted: res.stats.todayEpisodesCompleted,
+            todayCompletedDate: res.stats.todayCompletedDate || res.todayKey,
+            totalWatchSeconds: res.stats.totalWatchSeconds,
+            todayWatchSeconds: res.stats.todayWatchSeconds,
+            todayWatchDate: res.stats.todayWatchDate || res.todayKey,
+            updatedAt: serverTimestamp(),
+          };
+          if (streakDaysChanged) {
+            updatePayload.streakWatchedDays = res.stats.streakWatchedDays;
+          }
+          if (watchedAnimeChanged) {
+            updatePayload.watchedAnimeIds = res.stats.watchedAnimeIds;
+          }
+          if (achievementsChanged) {
+            updatePayload.unlockedAchievements = res.stats.unlockedAchievements;
+            updatePayload.achievementUnlockDates = res.stats.achievementUnlockDates;
+          }
+          if (res.stats.streakLastWatchedDate) {
+            updatePayload.streakLastWatchedDate = res.stats.streakLastWatchedDate;
+          }
+
+          lastSyncedArraysRef.current = {
+            uid: user.uid,
+            streakDaysLen: res.stats.streakWatchedDays.length,
+            watchedAnimeLen: res.stats.watchedAnimeIds.length,
+            achievementsLen: res.stats.unlockedAchievements.length,
+          };
+
+          const monthDays: Record<string, number> = {};
+          for (const [dateKey, secs] of Object.entries(res.stats.dailyWatchSeconds || {})) {
+            if (
+              dateKey.startsWith(`${res.monthKey}-`) &&
+              typeof secs === 'number' &&
+              Number.isFinite(secs) &&
+              secs >= 0
+            ) {
+              monthDays[dateKey] = Math.round(secs);
+            }
+          }
+          monthDays[res.todayKey] = Math.round(res.todayDaySeconds);
+
+          writes.push(
+            updateDoc(doc(db!, userPath), updatePayload).catch(async (err) => {
+              // Self-heal if users/{uid} was missing when playback flushed
+              const code = (err as { code?: string } | null)?.code;
+              if (code === 'not-found') {
+                const safeName = (user.displayName?.trim() || 'Anime Fan').slice(0, 80);
+                const fallbackCreate: Record<string, unknown> = {
+                  uid: user.uid,
+                  displayName: safeName,
+                  preferredAudio: 'sub',
+                  autoNext: true,
+                  equippedBadges: [],
+                  createdAt: serverTimestamp(),
+                  ...updatePayload,
+                };
+                if (user.email && user.email.trim()) {
+                  fallbackCreate.email = user.email.trim().slice(0, 160);
+                }
+                if (user.photoURL) {
+                  fallbackCreate.photoURL = user.photoURL.slice(0, 500);
+                }
+                await setDoc(doc(db!, userPath), fallbackCreate);
+              } else {
+                throw err;
+              }
+            }),
+            setDoc(
+              doc(db!, monthPath),
+              {
+                ownerId: user.uid,
+                monthKey: res.monthKey,
+                days: monthDays,
+                updatedAt: serverTimestamp(),
+              },
+              { merge: true }
+            )
+          );
+        }
+
+        if (shouldWriteLog) {
+          const logPath = `users/${user.uid}/watchLogs/${rawLogId}`;
+          const prevSecs = watchLogSessionSecondsRef.current.get(rawLogId) || 0;
+          const nextWatchedSecs = prevSecs + res.safeDelta;
+          watchLogSessionSecondsRef.current.set(rawLogId, nextWatchedSecs);
+
+          const nextCompleted =
+            Boolean(input.completed) || completedWatchLogsRef.current.has(rawLogId);
+          if (nextCompleted) {
+            completedWatchLogsRef.current.add(rawLogId);
+          }
+
+          const safeAudio: 'sub' | 'dub' | 'hindi' =
+            input.audioMode === 'dub'
+              ? 'dub'
+              : input.audioMode === 'hindi'
+                ? 'hindi'
+                : 'sub';
+
+          const logFields: Record<string, unknown> = {
+            animeTitle: (input.animeTitle?.trim() || `Anime #${input.animeId}`).slice(0, 240),
+            coverImage: (input.coverImage || '').slice(0, 500),
+            episodeId: (input.episodeKey?.trim() || `ep-${input.episodeNumber}`).slice(0, 200),
+            episodeNumber: Math.max(0, Number(input.episodeNumber) || 0),
+            serverName: (input.serverName?.trim() || 'KuroStream Global').slice(0, 80),
+            audioMode: safeAudio,
+            watchedSeconds: nextWatchedSecs,
+            progressSeconds: Math.max(0, Math.round(Number(input.progressSeconds) || 0)),
+            durationSeconds: Math.max(0, Math.round(Number(input.durationSeconds) || 0)),
+            completed: nextCompleted,
+            watchedDate: res.todayKey,
+            updatedAt: serverTimestamp(),
+          };
+          if (input.episodeTitle && input.episodeTitle.trim()) {
+            logFields.episodeTitle = input.episodeTitle.trim().slice(0, 240);
+          }
+
+          const writeWatchLog = async () => {
+            if (!createdWatchLogsRef.current.has(rawLogId)) {
+              await setDoc(doc(db!, logPath), {
+                id: rawLogId,
+                ownerId: user.uid,
+                animeId: Number.isFinite(input.animeId) && input.animeId > 0 ? Math.round(input.animeId) : 1,
+                ...logFields,
+                startedAt: serverTimestamp(),
+              });
+              createdWatchLogsRef.current.add(rawLogId);
+            } else {
+              try {
+                await updateDoc(doc(db!, logPath), logFields);
+              } catch (err) {
+                const code = (err as { code?: string } | null)?.code;
+                if (code === 'not-found') {
+                  await setDoc(doc(db!, logPath), {
+                    id: rawLogId,
+                    ownerId: user.uid,
+                    animeId: Number.isFinite(input.animeId) && input.animeId > 0 ? Math.round(input.animeId) : 1,
+                    ...logFields,
+                    startedAt: serverTimestamp(),
+                  });
+                  createdWatchLogsRef.current.add(rawLogId);
+                } else {
+                  throw err;
+                }
+              }
+            }
+          };
+
+          writes.push(
+            writeWatchLog().catch((err) => {
+              logFirestoreError(err, OperationType.WRITE, logPath);
+            })
+          );
+        }
+
+        try {
+          await Promise.all(writes);
+        } catch (err) {
+          logFirestoreError(err, OperationType.UPDATE, userPath);
+        }
+
+        // Verified XP Rewards Evaluation (non-admin normal users)
+        if (!isAdmin && res.changed) {
+          const prevEpisodesTotal = currentBase.totalEpisodesCompleted || 0;
+          const episodeWasCompletedNow =
+            Boolean(input.completed) && res.stats.totalEpisodesCompleted > prevEpisodesTotal;
+
+          if (episodeWasCompletedNow) {
+            const isFirstEver = prevEpisodesTotal === 0;
+            const epEventKey = `ep_${input.animeKey}_${input.episodeKey || input.episodeNumber}_${res.todayKey}`;
+            const sessionSeconds = rawLogId
+              ? watchLogSessionSecondsRef.current.get(rawLogId) || 0
+              : 0;
+            await triggerVerifiedXpClaim({
+              actionType: isFirstEver ? 'first_episode' : 'episode_complete',
+              eventKey: epEventKey,
+              watchedSeconds: Math.max(sessionSeconds, res.safeDelta),
+              progressSeconds: input.progressSeconds ?? 0,
+              durationSeconds: input.durationSeconds ?? 0,
+              animeTitle: input.animeTitle,
+              episodeNumber: input.episodeNumber,
+              todayKey: res.todayKey,
+            });
+          }
+
           if (
-            dateKey.startsWith(`${res.monthKey}-`) &&
-            typeof secs === 'number' &&
-            Number.isFinite(secs) &&
-            secs >= 0
+            res.todayDaySeconds >= XP_DAILY_GOAL_SECONDS &&
+            xpStateRef.current.lastGoalXpDay !== res.todayKey
           ) {
-            monthDays[dateKey] = Math.round(secs);
+            await triggerVerifiedXpClaim({
+              actionType: 'daily_goal',
+              eventKey: `goal_${res.todayKey}`,
+              todayWatchSeconds: res.todayDaySeconds,
+              todayKey: res.todayKey,
+            });
+          }
+
+          const streakDaysNow = res.stats.streakCurrent || 0;
+          for (const milestoneStr of Object.keys(XP_REWARDS_CONFIG.streak_milestones)) {
+            const milestone = Number(milestoneStr);
+            if (
+              streakDaysNow >= milestone &&
+              !xpStateRef.current.awardedMilestones.includes(milestone)
+            ) {
+              await triggerVerifiedXpClaim({
+                actionType: 'streak_milestone',
+                eventKey: `streak_${milestone}`,
+                streakDays: streakDaysNow,
+                milestoneDays: milestone,
+              });
+            }
           }
         }
-        monthDays[res.todayKey] = Math.round(res.todayDaySeconds);
+      };
 
-        await Promise.all([
-          updateDoc(doc(db, userPath), updatePayload),
-          setDoc(
-            doc(db, monthPath),
-            {
-              ownerId: user.uid,
-              monthKey: res.monthKey,
-              days: monthDays,
-              updatedAt: serverTimestamp(),
-            },
-            { merge: true }
-          ),
-        ]);
-      } catch (err) {
-        logFirestoreError(err, OperationType.UPDATE, userPath);
-      }
+      playbackQueueRef.current = playbackQueueRef.current.then(task, task);
+      await playbackQueueRef.current;
     },
-    [user]
+    [user, isAdmin, triggerVerifiedXpClaim]
   );
 
   const recordWatchCompletion = useCallback(
@@ -1532,6 +2176,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       watchStats,
       equippedBadges,
       equippingBadgeId,
+      levelInfo,
+      xpHistory,
+      levelUpEvent,
+      dismissLevelUp,
       watchlist,
       favorites,
       history,
@@ -1573,6 +2221,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       watchStats,
       equippedBadges,
       equippingBadgeId,
+      levelInfo,
+      xpHistory,
+      levelUpEvent,
+      dismissLevelUp,
       watchlist,
       favorites,
       history,

@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import { AnimeImage } from '@/src/components/AnimeImage';
 import {
+  buildAnimeWorldProxyImageUrl,
   fetchAnimeWorldEpisodes,
   fetchAnimeWorldSeasons,
   type AnimeWorldSeasonsResponse,
@@ -174,6 +175,10 @@ export const AnimeWorldSeriesPage: React.FC = () => {
         <div className="absolute inset-0">
           <AnimeImage
             src={series.banner || series.poster}
+            fallbackSrc={buildAnimeWorldProxyImageUrl(
+              series.banner || series.poster,
+              series.banner ? series.proxyBanner : series.proxyPoster
+            )}
             alt={series.title}
             variant="banner"
             priority
@@ -202,6 +207,7 @@ export const AnimeWorldSeriesPage: React.FC = () => {
             <div className="mx-auto w-44 sm:w-52 shrink-0 overflow-hidden rounded-3xl border border-white/[0.14] bg-[#10121c] shadow-2xl md:mx-0">
               <AnimeImage
                 src={series.poster}
+                fallbackSrc={buildAnimeWorldProxyImageUrl(series.poster, series.proxyPoster)}
                 alt={series.title}
                 priority
                 className="aspect-[2/3] w-full object-cover"
@@ -387,6 +393,10 @@ export const AnimeWorldSeriesPage: React.FC = () => {
                     <div className="relative h-20 w-32 shrink-0 overflow-hidden rounded-xl bg-[#151726]">
                       <AnimeImage
                         src={ep.image || series.poster}
+                        fallbackSrc={buildAnimeWorldProxyImageUrl(
+                          ep.image || series.poster,
+                          ep.proxyImage || series.proxyPoster
+                        )}
                         alt={ep.title}
                         className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
                       />

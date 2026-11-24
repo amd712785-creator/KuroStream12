@@ -90,7 +90,9 @@ export interface AnimeWorldSeasonsResponse {
     seriesId: string;
     title: string;
     poster: string | null;
+    proxyPoster?: string | null;
     banner?: string | null;
+    proxyBanner?: string | null;
     year: string | null;
     rating?: string | null;
     totalSeasons: string;
@@ -215,16 +217,44 @@ async function withAwCachedDedup<T>(
   return task;
 }
 
+export function buildAnimeWorldProxyImageUrl(
+  rawUrl?: string | null,
+  explicitProxyPath?: string | null
+): string | null {
+  if (explicitProxyPath && explicitProxyPath.trim()) {
+    return resolveApiUrl(explicitProxyPath.trim());
+  }
+  if (!rawUrl || !rawUrl.trim()) return null;
+  const cleaned = rawUrl.trim().startsWith('//') ? `https:${rawUrl.trim()}` : rawUrl.trim();
+  if (!/^https?:\/\//i.test(cleaned)) return null;
+  try {
+    const host = new URL(cleaned).hostname.toLowerCase();
+    const isAwImgHost =
+      host === 'image.tmdb.org' ||
+      host.endsWith('.tmdb.org') ||
+      host === 'animesky.app' ||
+      host.endsWith('.animesky.app') ||
+      host === 'animesalt.cx' ||
+      host.endsWith('.animesalt.cx') ||
+      /^i[0-3]\.wp\.com$/i.test(host) ||
+      /^as-cdn\d+\.top$/i.test(host);
+    if (!isAwImgHost) return null;
+    return resolveApiUrl(`${AW_BASE}/image.php?url=${encodeURIComponent(cleaned)}`);
+  } catch {
+    return null;
+  }
+}
+
 async function fetchAwWithTimeout(
   endpointUrl: string,
-  timeoutMs = 15000,
+  timeoutMs = 18000,
   signal?: AbortSignal
 ): Promise<{
   resolvedUrl: string;
   res: Response;
 }> {
   const resolvedUrl = resolveApiUrl(endpointUrl);
-  const res = await authorizedApiFetch(resolvedUrl, { timeoutMs, signal });
+  const res = await authorizedApiFetch(resolvedUrl, { timeoutMs, retries: 1, signal });
   return { resolvedUrl, res };
 }
 
@@ -449,7 +479,14 @@ export function parseAnimeWorldStreamToResult(
   const pushSource = (src: StreamSource) => {
     if (!isPlayableStreamUrl(src.url) || seenUrls.has(src.url)) return;
     seenUrls.add(src.url);
-    candidateSources.push(src);
+    const lowerUrl = src.url.toLowerCase();
+    const isDirectM3u8 =
+      lowerUrl.includes('.m3u8') && !lowerUrl.includes('/video/') && !lowerUrl.includes('/embed');
+    candidateSources.push(
+      isDirectM3u8
+        ? { ...src, type: 'hls', isM3U8: true }
+        : src
+    );
   };
 
   // Preserve primary streamLink first if present, then additional mirrors
@@ -930,7 +967,15 @@ export async function resolveAnimeWorldStreamForAnime(options: {
           ]
         : [];
 
-  const playableSources = candidateSources.filter((src) => isPlayableStreamUrl(src.url));
+  const playableSources = candidateSources
+    .filter((src) => isPlayableStreamUrl(src.url))
+    .map((src) => {
+      const lowerUrl = src.url.toLowerCase();
+      if (lowerUrl.includes('.m3u8') && !lowerUrl.includes('/video/') && !lowerUrl.includes('/embed')) {
+        return { ...src, type: 'hls' as const, isM3U8: true };
+      }
+      return src;
+    });
 
   if (playableSources.length === 0) {
     return {

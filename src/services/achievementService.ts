@@ -171,6 +171,10 @@ export const DEFAULT_WATCH_STATS: UserWatchStats = {
   dailyWatchSeconds: {},
   unlockedAchievements: [],
   achievementUnlockDates: {},
+  equippedFrame: 'none',
+  checkinStreak: 0,
+  totalCheckins: 0,
+  coins: 0,
 };
 
 export function formatLocalDateKey(date: Date = new Date()): string {
@@ -231,10 +235,14 @@ export function normalizeAchievementList(
   };
 }
 
-export function getStoredWatchStats(): UserWatchStats {
+function getScopedStorageKey(baseKey: string, uid?: string): string {
+  return uid ? `${baseKey}:${uid}` : baseKey;
+}
+
+export function getStoredWatchStats(uid?: string): UserWatchStats {
   if (typeof window === 'undefined') return DEFAULT_WATCH_STATS;
   try {
-    const raw = localStorage.getItem(WATCH_STATS_STORAGE_KEY);
+    const raw = localStorage.getItem(getScopedStorageKey(WATCH_STATS_STORAGE_KEY, uid));
     if (!raw) return DEFAULT_WATCH_STATS;
     const parsed = JSON.parse(raw) as Partial<UserWatchStats>;
     const today = getTodayDateKey();
@@ -293,19 +301,19 @@ export function getStoredWatchStats(): UserWatchStats {
   }
 }
 
-export function saveStoredWatchStats(stats: UserWatchStats): void {
+export function saveStoredWatchStats(stats: UserWatchStats, uid?: string): void {
   if (typeof window === 'undefined') return;
   try {
-    localStorage.setItem(WATCH_STATS_STORAGE_KEY, JSON.stringify(stats));
+    localStorage.setItem(getScopedStorageKey(WATCH_STATS_STORAGE_KEY, uid), JSON.stringify(stats));
   } catch {
     // ignore local storage errors
   }
 }
 
-function getStoredCompletedEpisodeKeys(): Set<string> {
+function getStoredCompletedEpisodeKeys(uid?: string): Set<string> {
   if (typeof window === 'undefined') return new Set();
   try {
-    const raw = localStorage.getItem(COMPLETED_EPS_STORAGE_KEY);
+    const raw = localStorage.getItem(getScopedStorageKey(COMPLETED_EPS_STORAGE_KEY, uid));
     if (!raw) return new Set();
     const parsed = JSON.parse(raw);
     return new Set(Array.isArray(parsed) ? parsed : []);
@@ -314,11 +322,11 @@ function getStoredCompletedEpisodeKeys(): Set<string> {
   }
 }
 
-function saveCompletedEpisodeKeys(keys: Set<string>): void {
+function saveCompletedEpisodeKeys(keys: Set<string>, uid?: string): void {
   if (typeof window === 'undefined') return;
   try {
     const arr = Array.from(keys).slice(-500);
-    localStorage.setItem(COMPLETED_EPS_STORAGE_KEY, JSON.stringify(arr));
+    localStorage.setItem(getScopedStorageKey(COMPLETED_EPS_STORAGE_KEY, uid), JSON.stringify(arr));
   } catch {
     // ignore
   }
@@ -478,6 +486,14 @@ export interface PlaybackRecordInput {
   episodeKey?: string;
   secondsWatched: number;
   completed?: boolean;
+  sessionLogId?: string;
+  animeTitle?: string;
+  coverImage?: string;
+  episodeTitle?: string;
+  serverName?: string;
+  audioMode?: 'sub' | 'dub' | 'hindi';
+  progressSeconds?: number;
+  durationSeconds?: number;
 }
 
 export interface RecordPlaybackResult {
@@ -486,14 +502,16 @@ export interface RecordPlaybackResult {
   monthKey: string;
   todayKey: string;
   todayDaySeconds: number;
+  safeDelta: number;
   changed: boolean;
 }
 
 export function recordWatchPlaybackLocally(
   input: PlaybackRecordInput,
-  currentStats?: UserWatchStats
+  currentStats?: UserWatchStats,
+  uid?: string
 ): RecordPlaybackResult {
-  const base = currentStats ? { ...currentStats } : { ...getStoredWatchStats() };
+  const base = currentStats ? { ...currentStats } : { ...getStoredWatchStats(uid) };
   const today = getTodayDateKey();
   const monthKey = getMonthKeyFromDateKey(today);
 
@@ -532,10 +550,10 @@ export function recordWatchPlaybackLocally(
 
   if (input.completed) {
     const epToken = `${normalizedAnimeKey || input.animeId}:${input.episodeKey || input.episodeNumber}:${today}`;
-    const completedKeys = getStoredCompletedEpisodeKeys();
+    const completedKeys = getStoredCompletedEpisodeKeys(uid);
     if (!completedKeys.has(epToken)) {
       completedKeys.add(epToken);
-      saveCompletedEpisodeKeys(completedKeys);
+      saveCompletedEpisodeKeys(completedKeys, uid);
 
       stats.totalEpisodesCompleted = (stats.totalEpisodesCompleted || 0) + 1;
       if (stats.todayCompletedDate === today) {
@@ -560,7 +578,7 @@ export function recordWatchPlaybackLocally(
   }
 
   if (changed) {
-    saveStoredWatchStats(stats);
+    saveStoredWatchStats(stats, uid);
   }
 
   return {
@@ -569,6 +587,7 @@ export function recordWatchPlaybackLocally(
     monthKey,
     todayKey: today,
     todayDaySeconds: todayTotalSecs,
+    safeDelta,
     changed,
   };
 }

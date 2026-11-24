@@ -41,6 +41,8 @@ export const CatalogPage: React.FC<CatalogPageProps> = ({
     initialLang === 'hindi' || initialLang === 'original' ? initialLang : 'ALL'
   );
   const [sort, setSort] = useState(initialSort);
+  const [seasonYear, setSeasonYear] = useState<string>(searchParams.get('year') || 'ALL');
+  const [minScore, setMinScore] = useState<string>(searchParams.get('minScore') || 'ALL');
   const [page, setPage] = useState(initialPage);
 
   const [items, setItems] = useState<AnimeSummary[]>([]);
@@ -61,6 +63,8 @@ export const CatalogPage: React.FC<CatalogPageProps> = ({
     setGenre(searchParams.get('genre') || 'ALL');
     setFormat(presetFormat || searchParams.get('format') || 'ALL');
     setStatus(searchParams.get('status') || 'ALL');
+    setSeasonYear(searchParams.get('year') || 'ALL');
+    setMinScore(searchParams.get('minScore') || 'ALL');
     setLanguage(
       langParam === 'hindi' || langParam === 'original' ? langParam : 'ALL'
     );
@@ -85,10 +89,12 @@ export const CatalogPage: React.FC<CatalogPageProps> = ({
       try {
         const res = await searchAnime({
           query: debouncedQuery,
-          genre,
+          genre: genre === 'ALL' ? undefined : genre,
           format: presetFormat || format,
           status,
           sort,
+          seasonYear: seasonYear !== 'ALL' ? Number(seasonYear) : undefined,
+          minimumScore: minScore !== 'ALL' ? Number(minScore) : undefined,
           idIn: language === 'hindi' ? VERIFIED_HINDI_DUBBED_ID_LIST : undefined,
           page,
           perPage: 24,
@@ -113,7 +119,7 @@ export const CatalogPage: React.FC<CatalogPageProps> = ({
       active = false;
       controller.abort();
     };
-  }, [debouncedQuery, genre, format, presetFormat, status, language, sort, page, reloadNonce]);
+  }, [debouncedQuery, genre, format, presetFormat, status, seasonYear, minScore, language, sort, page, reloadNonce]);
 
   const handleLoadMore = useCallback(async () => {
     if (loadingMore || !hasNextPage) return;
@@ -125,10 +131,12 @@ export const CatalogPage: React.FC<CatalogPageProps> = ({
     try {
       const res = await searchAnime({
         query: debouncedQuery,
-        genre,
+        genre: genre === 'ALL' ? undefined : genre,
         format: presetFormat || format,
         status,
         sort,
+        seasonYear: seasonYear !== 'ALL' ? Number(seasonYear) : undefined,
+        minimumScore: minScore !== 'ALL' ? Number(minScore) : undefined,
         idIn: language === 'hindi' ? VERIFIED_HINDI_DUBBED_ID_LIST : undefined,
         page: nextPage,
         perPage: 24,
@@ -164,6 +172,8 @@ export const CatalogPage: React.FC<CatalogPageProps> = ({
     presetFormat,
     format,
     status,
+    seasonYear,
+    minScore,
     sort,
     language,
   ]);
@@ -190,6 +200,8 @@ export const CatalogPage: React.FC<CatalogPageProps> = ({
     setGenre('ALL');
     setFormat(presetFormat || 'ALL');
     setStatus('ALL');
+    setSeasonYear('ALL');
+    setMinScore('ALL');
     setLanguage('ALL');
     setSort('TRENDING_DESC');
     setPage(1);
@@ -208,7 +220,6 @@ export const CatalogPage: React.FC<CatalogPageProps> = ({
         </div>
 
         <div className="flex flex-wrap items-center gap-2.5">
-          {/* Quick Verified Hindi Dubbed Toggle */}
           <div className="kuro-segment-track inline-flex rounded-xl p-1 gap-1">
             <button
               type="button"
@@ -247,10 +258,10 @@ export const CatalogPage: React.FC<CatalogPageProps> = ({
         </div>
       </div>
 
-      {/* Glass Filter Bar */}
-      <div className="kuro-glass rounded-3xl p-4 sm:p-5">
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-6">
-          <div className="relative lg:col-span-2">
+      {/* Glass Advanced Filter Bar */}
+      <div className="kuro-glass rounded-3xl p-4 sm:p-6 space-y-4">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          <div className="relative">
             <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
             <input
               type="search"
@@ -261,7 +272,6 @@ export const CatalogPage: React.FC<CatalogPageProps> = ({
                 updateUrlParam({ q: e.target.value || null, page: null });
               }}
               placeholder="Search anime title..."
-              aria-label="Filter by title"
               className="h-11 w-full rounded-xl border border-white/[0.1] bg-[#07080d]/85 pl-10 pr-3 text-sm text-slate-100 placeholder:text-slate-500 focus:border-violet-500 focus:outline-none"
             />
           </div>
@@ -273,33 +283,47 @@ export const CatalogPage: React.FC<CatalogPageProps> = ({
               setPage(1);
               updateUrlParam({ genre: e.target.value, page: null });
             }}
-            aria-label="Filter by genre"
             className="h-11 rounded-xl border border-white/[0.1] bg-[#07080d]/85 px-3 text-sm text-slate-200 focus:border-violet-500 focus:outline-none"
           >
             <option value="ALL">All Genres</option>
             {ANIME_GENRES.map((g) => (
-              <option key={g} value={g}>
-                {g}
-              </option>
+              <option key={g} value={g}>{g}</option>
             ))}
           </select>
 
           <select
-            value={language}
+            value={seasonYear}
             onChange={(e) => {
-              const val = e.target.value as LanguageFilter;
-              setLanguage(val);
+              setSeasonYear(e.target.value);
               setPage(1);
-              updateUrlParam({ lang: val === 'ALL' ? null : val, page: null });
+              updateUrlParam({ year: e.target.value, page: null });
             }}
-            aria-label="Filter by audio language"
             className="h-11 rounded-xl border border-white/[0.1] bg-[#07080d]/85 px-3 text-sm text-slate-200 focus:border-violet-500 focus:outline-none"
           >
-            <option value="ALL">All Languages</option>
-            <option value="hindi">Hindi Dubbed (Verified)</option>
-            <option value="original">Japanese / English</option>
+            <option value="ALL">All Release Years</option>
+            {Array.from({ length: 15 }).map((_, i) => {
+              const yr = 2026 - i;
+              return <option key={yr} value={yr}>{yr}</option>;
+            })}
           </select>
 
+          <select
+            value={minScore}
+            onChange={(e) => {
+              setMinScore(e.target.value);
+              setPage(1);
+              updateUrlParam({ minScore: e.target.value, page: null });
+            }}
+            className="h-11 rounded-xl border border-white/[0.1] bg-[#07080d]/85 px-3 text-sm text-slate-200 focus:border-violet-500 focus:outline-none"
+          >
+            <option value="ALL">Any Rating</option>
+            <option value="80">80%+ (Great)</option>
+            <option value="70">70%+ (Good)</option>
+            <option value="60">60%+ (Decent)</option>
+          </select>
+        </div>
+
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4 pt-2 border-t border-white/[0.06]">
           {!presetFormat && (
             <select
               value={format}
@@ -308,10 +332,9 @@ export const CatalogPage: React.FC<CatalogPageProps> = ({
                 setPage(1);
                 updateUrlParam({ format: e.target.value, page: null });
               }}
-              aria-label="Filter by type"
               className="h-11 rounded-xl border border-white/[0.1] bg-[#07080d]/85 px-3 text-sm text-slate-200 focus:border-violet-500 focus:outline-none"
             >
-              <option value="ALL">All Formats</option>
+              <option value="ALL">All Formats (TV, Movie, etc.)</option>
               <option value="TV">TV Series</option>
               <option value="MOVIE">Movies</option>
               <option value="OVA">OVA</option>
@@ -320,51 +343,91 @@ export const CatalogPage: React.FC<CatalogPageProps> = ({
             </select>
           )}
 
+          <select
+            value={status}
+            onChange={(e) => {
+              setStatus(e.target.value);
+              setPage(1);
+              updateUrlParam({ status: e.target.value, page: null });
+            }}
+            className="h-11 rounded-xl border border-white/[0.1] bg-[#07080d]/85 px-3 text-sm text-slate-200 focus:border-violet-500 focus:outline-none"
+          >
+            <option value="ALL">All Status</option>
+            <option value="RELEASING">Ongoing / Airing</option>
+            <option value="FINISHED">Completed</option>
+            <option value="NOT_YET_RELEASED">Upcoming</option>
+          </select>
+
+          <select
+            value={sort}
+            onChange={(e) => {
+              setSort(e.target.value);
+              setPage(1);
+              updateUrlParam({ sort: e.target.value, page: null });
+            }}
+            className="h-11 rounded-xl border border-white/[0.1] bg-[#07080d]/85 px-3 text-sm text-slate-200 focus:border-violet-500 focus:outline-none"
+          >
+            <option value="TRENDING_DESC">Most Popular & Trending</option>
+            <option value="POPULARITY_DESC">Most Popular</option>
+            <option value="SCORE_DESC">Highest Rated</option>
+            <option value="START_DATE_DESC">Latest Release</option>
+            <option value="TITLE_ROMAJI">A–Z Alphabetical</option>
+          </select>
+
           <div className="flex items-center gap-2">
-            <select
-              value={status}
-              onChange={(e) => {
-                setStatus(e.target.value);
-                setPage(1);
-                updateUrlParam({ status: e.target.value, page: null });
-              }}
-              aria-label="Filter by status"
-              className="h-11 min-w-0 flex-1 rounded-xl border border-white/[0.1] bg-[#07080d]/85 px-3 text-sm text-slate-200 focus:border-violet-500 focus:outline-none"
-            >
-              <option value="ALL">All Status</option>
-              <option value="RELEASING">Airing</option>
-              <option value="FINISHED">Completed</option>
-              <option value="NOT_YET_RELEASED">Upcoming</option>
-            </select>
-
-            <select
-              value={sort}
-              onChange={(e) => {
-                setSort(e.target.value);
-                setPage(1);
-                updateUrlParam({ sort: e.target.value, page: null });
-              }}
-              aria-label="Sort results"
-              className="h-11 min-w-0 flex-1 rounded-xl border border-white/[0.1] bg-[#07080d]/85 px-3 text-sm text-slate-200 focus:border-violet-500 focus:outline-none"
-            >
-              <option value="TRENDING_DESC">Trending</option>
-              <option value="POPULARITY_DESC">Popular</option>
-              <option value="SCORE_DESC">Top Rated</option>
-              <option value="START_DATE_DESC">Newest</option>
-              {debouncedQuery && <option value="SEARCH_MATCH">Best Match</option>}
-            </select>
-
             <button
               type="button"
               onClick={resetFilters}
-              title="Reset filters"
-              aria-label="Reset filters"
-              className="kuro-btn-glass flex h-11 w-11 shrink-0 items-center justify-center rounded-xl"
+              className="kuro-btn-glass h-11 w-full rounded-xl px-4 text-xs font-bold text-slate-300 hover:text-white flex items-center justify-center gap-2"
             >
               <X className="h-4 w-4" />
+              <span>Clear Filters</span>
             </button>
           </div>
         </div>
+
+        {/* Active Filter Chips */}
+        {(genre !== 'ALL' || seasonYear !== 'ALL' || minScore !== 'ALL' || status !== 'ALL' || format !== 'ALL' || queryInput) && (
+          <div className="flex flex-wrap items-center gap-2 pt-2">
+            <span className="text-xs text-slate-400 font-medium">Active Filters:</span>
+            {genre !== 'ALL' && (
+              <span className="inline-flex items-center gap-1.5 px-3 py-1 bg-purple-900/40 border border-purple-500/30 text-purple-200 text-xs rounded-full">
+                Genre: {genre}
+                <X className="w-3 h-3 cursor-pointer" onClick={() => { setGenre('ALL'); updateUrlParam({ genre: null }); }} />
+              </span>
+            )}
+            {seasonYear !== 'ALL' && (
+              <span className="inline-flex items-center gap-1.5 px-3 py-1 bg-purple-900/40 border border-purple-500/30 text-purple-200 text-xs rounded-full">
+                Year: {seasonYear}
+                <X className="w-3 h-3 cursor-pointer" onClick={() => { setSeasonYear('ALL'); updateUrlParam({ year: null }); }} />
+              </span>
+            )}
+            {minScore !== 'ALL' && (
+              <span className="inline-flex items-center gap-1.5 px-3 py-1 bg-purple-900/40 border border-purple-500/30 text-purple-200 text-xs rounded-full">
+                Score: {minScore}%+
+                <X className="w-3 h-3 cursor-pointer" onClick={() => { setMinScore('ALL'); updateUrlParam({ minScore: null }); }} />
+              </span>
+            )}
+            {status !== 'ALL' && (
+              <span className="inline-flex items-center gap-1.5 px-3 py-1 bg-purple-900/40 border border-purple-500/30 text-purple-200 text-xs rounded-full">
+                Status: {status}
+                <X className="w-3 h-3 cursor-pointer" onClick={() => { setStatus('ALL'); updateUrlParam({ status: null }); }} />
+              </span>
+            )}
+            {format !== 'ALL' && (
+              <span className="inline-flex items-center gap-1.5 px-3 py-1 bg-purple-900/40 border border-purple-500/30 text-purple-200 text-xs rounded-full">
+                Format: {format}
+                <X className="w-3 h-3 cursor-pointer" onClick={() => { setFormat('ALL'); updateUrlParam({ format: null }); }} />
+              </span>
+            )}
+            {queryInput && (
+              <span className="inline-flex items-center gap-1.5 px-3 py-1 bg-purple-900/40 border border-purple-500/30 text-purple-200 text-xs rounded-full">
+                Query: "{queryInput}"
+                <X className="w-3 h-3 cursor-pointer" onClick={() => { setQueryInput(''); setDebouncedQuery(''); updateUrlParam({ q: null }); }} />
+              </span>
+            )}
+          </div>
+        )}
       </div>
 
       {error ? (

@@ -1,3 +1,5 @@
+import type { ProfileFrameId } from '@/src/types/frames';
+
 export type MediaFormat = 'TV' | 'TV_SHORT' | 'MOVIE' | 'SPECIAL' | 'OVA' | 'ONA' | 'MUSIC' | string;
 export type MediaStatus = 'FINISHED' | 'RELEASING' | 'NOT_YET_RELEASED' | 'CANCELLED' | 'HIATUS' | string;
 
@@ -165,6 +167,7 @@ export interface StreamFetchError {
 export interface AnimeWorldItem {
   title: string;
   image: string | null;
+  proxyImage?: string | null;
   year: string | null;
   rating: string | null;
   type: 'series' | 'movie';
@@ -187,6 +190,7 @@ export interface AnimeWorldEpisode {
   episodeNumber: string;
   airDate: string | null;
   image: string | null;
+  proxyImage?: string | null;
   overview: string | null;
 }
 
@@ -331,6 +335,26 @@ export interface WatchHistoryItem {
   updatedAt: number;
 }
 
+export interface WatchLogEntry {
+  id: string;
+  ownerId: string;
+  animeId: number;
+  animeTitle: string;
+  coverImage: string;
+  episodeId: string;
+  episodeNumber: number;
+  episodeTitle?: string;
+  serverName: string;
+  audioMode: 'sub' | 'dub' | 'hindi';
+  watchedSeconds: number;
+  progressSeconds: number;
+  durationSeconds: number;
+  completed: boolean;
+  watchedDate: string;
+  startedAt: number;
+  updatedAt: number;
+}
+
 export type ThemeId =
   | 'midnight-purple'
   | 'deep-black'
@@ -414,6 +438,11 @@ export interface UserWatchStats {
   unlockedAchievements: string[];
   achievementUnlockDates: Record<string, string>;
   equippedBadges?: AchievementId[];
+  equippedFrame?: ProfileFrameId;
+  lastCheckinDate?: string;
+  checkinStreak?: number;
+  totalCheckins?: number;
+  coins?: number;
 }
 
 export interface EquipBadgeResult {
@@ -430,6 +459,7 @@ export interface UserPreferences {
   preferredAudio: 'sub' | 'dub' | 'hindi';
   autoNext: boolean;
   theme?: ThemeId;
+  equippedFrame?: ProfileFrameId;
 }
 
 export interface AnimeCharacterAvatar {
@@ -493,10 +523,13 @@ export interface AdminServerStats {
   usersActiveToday: number;
   registeredActiveToday: number;
   guestActiveToday: number;
+  wau?: number;
+  mau?: number;
   totalWebsiteVisits: number;
   visitsToday: number;
   totalUniqueVisitors: number;
   dailySeries: DailyTrafficPoint[];
+  dailySeries90?: DailyTrafficPoint[];
   updatedAt: string;
 }
 
@@ -506,4 +539,159 @@ export interface RegisteredUsersStats {
   registeredActiveToday: number;
   registeredLast7Days: number;
 }
+
+// ==========================================
+// NOTIFICATION CENTER TYPES
+// ==========================================
+export type NotificationCategory =
+  | 'new_episode'
+  | 'new_release'
+  | 'app_update'
+  | 'admin_announcement'
+  | 'maintenance'
+  | 'service_alert';
+
+export type NotificationTargetType = 'all' | 'selected';
+
+export interface GlobalNotificationRecord {
+  id: string;
+  category: NotificationCategory;
+  title: string;
+  message: string;
+  targetType: NotificationTargetType;
+  targetUserIds: string[];
+  actionUrl?: string;
+  animeId?: number;
+  enabled: boolean;
+  startAt?: string;
+  expiresAt?: string;
+  createdBy: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface NotificationCategorySettings {
+  id: 'global';
+  enabledCategories: Record<NotificationCategory, boolean>;
+  updatedBy: string;
+  updatedAt: number;
+}
+
+export interface UserPersonalNotification {
+  id: string;
+  ownerId: string;
+  category: NotificationCategory;
+  title: string;
+  message: string;
+  read: boolean;
+  actionUrl?: string;
+  animeId?: number;
+  episodeNumber?: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface UserNotificationStateRecord {
+  id: string;
+  ownerId: string;
+  notificationId: string;
+  read: boolean;
+  deleted: boolean;
+  updatedAt: number;
+}
+
+export interface UnifiedNotificationItem {
+  id: string;
+  source: 'global' | 'personal';
+  category: NotificationCategory;
+  title: string;
+  message: string;
+  read: boolean;
+  actionUrl?: string;
+  animeId?: number;
+  episodeNumber?: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+// ==========================================
+// ANIME RELEASE CALENDAR TYPES
+// ==========================================
+export type CalendarEpisodeStatus = 'upcoming' | 'released' | 'delayed';
+
+export interface CalendarScheduleOverride {
+  id: string;
+  animeId?: number;
+  airingScheduleId?: number;
+  title: string;
+  posterUrl?: string;
+  episodeNumber: number;
+  releaseAt: number;
+  status: CalendarEpisodeStatus;
+  removed: boolean;
+  note?: string;
+  updatedBy: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface MergedCalendarEvent {
+  key: string;
+  airingScheduleId?: number;
+  overrideId?: string;
+  animeId?: number;
+  title: string;
+  posterUrl?: string;
+  episodeNumber: number;
+  releaseAtMs: number;
+  status: CalendarEpisodeStatus;
+  note?: string;
+  isManual: boolean;
+  isOverridden: boolean;
+}
+
+// ==========================================
+// USER LEVEL & XP TYPES
+// ==========================================
+export type XpActionType =
+  | 'first_episode'
+  | 'episode_complete'
+  | 'daily_goal'
+  | 'daily_login'
+  | 'streak_milestone';
+
+export interface XpHistoryItem {
+  id: string;
+  ownerId: string;
+  eventKey: string;
+  actionType: XpActionType;
+  xpDelta: number;
+  reason: string;
+  animeTitle?: string;
+  episodeNumber?: number;
+  levelAfter: number;
+  createdAt: number;
+}
+
+export interface XpLevelInfo {
+  level: number;
+  title: string;
+  totalXp: number;
+  currentLevelFloorXp: number;
+  nextLevelXp: number;
+  xpIntoLevel: number;
+  xpNeededForNext: number;
+  progressPercent: number;
+  isMaxRank: boolean;
+  isUnlimitedAdmin?: boolean;
+}
+
+export interface LevelUpEventPayload {
+  fromLevel: number;
+  toLevel: number;
+  title: string;
+  xpGained: number;
+  reason: string;
+}
+
 

@@ -1,4 +1,5 @@
-import { getBackendApiOrigin } from '@/src/config/env';
+import { CapacitorHttp } from '@capacitor/core';
+import { getBackendApiOrigins, isNativeCapacitorRuntime } from '@/src/config/env';
 import { auth } from '@/src/lib/firebase';
 
 export const SESSION_EXPIRED_EVENT = 'kurostream:session-expired';
@@ -22,12 +23,88 @@ export function notifySessionExpired(
 export function isBackendApiUrl(url: string): boolean {
   if (!url) return false;
   if (url.startsWith('/api/')) return true;
-  const backendOrigin = getBackendApiOrigin();
-  if (backendOrigin && url.startsWith(`${backendOrigin}/api/`)) return true;
+  for (const origin of getBackendApiOrigins()) {
+    if (url.startsWith(`${origin}/api/`)) return true;
+  }
   if (typeof window !== 'undefined' && window.location?.origin) {
     if (url.startsWith(`${window.location.origin}/api/`)) return true;
   }
   return false;
+}
+
+function buildBackendFailoverUrls(primaryUrl: string): string[] {
+  const urls = [primaryUrl];
+  const origins = getBackendApiOrigins();
+  if (origins.length <= 1) return urls;
+  for (const origin of origins) {
+    if (primaryUrl.startsWith(`${origin}/api/`)) {
+      const suffix = primaryUrl.slice(origin.length);
+      for (const altOrigin of origins) {
+        if (altOrigin !== origin) {
+          const altUrl = `${altOrigin}${suffix}`;
+          if (!urls.includes(altUrl)) urls.push(altUrl);
+        }
+      }
+      break;
+    }
+  }
+  return urls;
+}
+
+async function runNativeCapacitorRequest(
+  targetUrl: string,
+  method: string,
+  headersRecord: Record<string, string>,
+  body: RequestInit['body'],
+  timeoutMs: number
+): Promise<Response> {
+  const upperMethod = (method || 'GET').toUpperCase();
+  const payloadData =
+    upperMethod === 'GET' || upperMethod === 'HEAD'
+      ? undefined
+      : typeof body === 'string'
+        ? body
+        : undefined;
+
+  const nativeRes = await CapacitorHttp.request({
+    url: targetUrl,
+    method: upperMethod,
+    headers: headersRecord,
+    data: payloadData,
+    connectTimeout: timeoutMs,
+    readTimeout: timeoutMs,
+    responseType: 'text',
+  });
+
+  const status = typeof nativeRes.status === 'number' && nativeRes.status > 0 ? nativeRes.status : 502;
+  const responseHeaders = new Headers();
+  if (nativeRes.headers && typeof nativeRes.headers === 'object') {
+    for (const [k, v] of Object.entries(nativeRes.headers)) {
+      const lowerKey = k.toLowerCase();
+      if (lowerKey === 'content-encoding' || lowerKey === 'content-length') continue;
+      if (typeof v === 'string') {
+        responseHeaders.set(k, v);
+      }
+    }
+  }
+
+  if (status === 204 || status === 304) {
+    return new Response(null, { status, headers: responseHeaders });
+  }
+
+  let bodyText: string;
+  if (typeof nativeRes.data === 'string') {
+    bodyText = nativeRes.data;
+  } else if (nativeRes.data === undefined || nativeRes.data === null) {
+    bodyText = '';
+  } else {
+    bodyText = JSON.stringify(nativeRes.data);
+    if (!responseHeaders.has('Content-Type')) {
+      responseHeaders.set('Content-Type', 'application/json; charset=utf-8');
+    }
+  }
+
+  return new Response(bodyText, { status, headers: responseHeaders });
 }
 
 export async function getFreshFirebaseIdToken(forceRefresh = false): Promise<string | null> {
@@ -78,9 +155,9 @@ export async function getFreshFirebaseIdToken(forceRefresh = false): Promise<str
 
 export async function authorizedApiFetch(
   url: string,
-  options: RequestInit & { timeoutMs?: number } = {}
+  options: RequestInit & { timeoutMs?: number; retries?: number } = {}
 ): Promise<Response> {
-  const { timeoutMs = 15000, headers: callerHeaders, ...restInit } = options;
+  const { timeoutMs = 15000, retries = 0, headers: callerHeaders, ...restInit } = options;
 
   const token = await getFreshFirebaseIdToken(false);
   if (!token) {
@@ -98,8 +175,13 @@ export async function authorizedApiFetch(
   }
 
   const callerSignal = restInit.signal;
+  const method = (restInit.method || 'GET').toUpperCase();
+  const isSafeIdempotent = method === 'GET' || method === 'HEAD';
+  const maxAttempts = isSafeIdempotent ? Math.max(1, 1 + retries) : 1;
+  const candidateUrls = buildBackendFailoverUrls(url);
+  const isNative = isNativeCapacitorRuntime();
 
-  const execute = async (bearerToken: string): Promise<Response> => {
+  const executeSingleTarget = async (targetUrl: string, bearerToken: string): Promise<Response> => {
     const headers = new Headers(callerHeaders || {});
     headers.set('Authorization', `Bearer ${bearerToken}`);
     if (!headers.has('Accept')) {
@@ -126,13 +208,33 @@ export async function authorizedApiFetch(
     }, timeoutMs);
 
     try {
-      return await fetch(url, {
+      return await fetch(targetUrl, {
         ...restInit,
         headers,
         signal: controller.signal,
       });
     } catch (err) {
-      if (timedOut && !callerSignal?.aborted) {
+      if (callerSignal?.aborted) {
+        throw err;
+      }
+      if (isNative) {
+        try {
+          const headerObj: Record<string, string> = {};
+          headers.forEach((v, k) => {
+            headerObj[k] = v;
+          });
+          return await runNativeCapacitorRequest(
+            targetUrl,
+            method,
+            headerObj,
+            restInit.body,
+            timeoutMs
+          );
+        } catch {
+          // fall through to throw timeout/network error
+        }
+      }
+      if (timedOut) {
         throw new Error(`Request timed out after ${Math.round(timeoutMs / 1000)}s.`);
       }
       throw err;
@@ -144,12 +246,44 @@ export async function authorizedApiFetch(
     }
   };
 
-  let res = await execute(token);
+  const executeWithFailover = async (bearerToken: string): Promise<Response> => {
+    let lastError: unknown;
+    let lastResponse: Response | null = null;
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      for (const targetUrl of candidateUrls) {
+        if (callerSignal?.aborted) {
+          throw new DOMException('Aborted', 'AbortError');
+        }
+        try {
+          const res = await executeSingleTarget(targetUrl, bearerToken);
+          lastResponse = res;
+          if (res.status < 500 && res.status !== 429) {
+            return res;
+          }
+        } catch (err) {
+          lastError = err;
+          if (err instanceof DOMException && err.name === 'AbortError' && callerSignal?.aborted) {
+            throw err;
+          }
+        }
+      }
+
+      if (attempt + 1 < maxAttempts) {
+        await new Promise((r) => window.setTimeout(r, 350));
+      }
+    }
+
+    if (lastResponse) return lastResponse;
+    throw lastError instanceof Error ? lastError : new Error('Network request failed.');
+  };
+
+  let res = await executeWithFailover(token);
 
   if (res.status === 401) {
     const refreshedToken = await getFreshFirebaseIdToken(true);
     if (refreshedToken) {
-      res = await execute(refreshedToken);
+      res = await executeWithFailover(refreshedToken);
     }
     if (res.status === 401) {
       notifySessionExpired('Your session has expired. Please sign in again.');

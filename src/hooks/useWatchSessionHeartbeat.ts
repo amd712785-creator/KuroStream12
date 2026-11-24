@@ -1,6 +1,11 @@
 import { useEffect, useRef, useCallback } from 'react';
 import { useAuth } from '@/src/context/AuthContext';
-import { updateActiveWatchSession, clearActiveWatchSession } from '@/src/services/watchAnalyticsService';
+import {
+  updateActiveWatchSession,
+  clearActiveWatchSession,
+  normalizeServerDisplayName,
+  type ActiveSessionStatus,
+} from '@/src/services/watchAnalyticsService';
 
 interface WatchHeartbeatParams {
   animeId: number;
@@ -10,52 +15,78 @@ interface WatchHeartbeatParams {
   serverName: string;
 }
 
+export interface HeartbeatOptions {
+  status?: ActiveSessionStatus | 'ended';
+  sessionWatchedSeconds?: number;
+}
+
 export function useWatchSessionHeartbeat(params: WatchHeartbeatParams) {
-  const { user } = useAuth();
+  const { user, preferences } = useAuth();
   const lastHeartbeatMsRef = useRef(0);
+  const lastStatusRef = useRef<ActiveSessionStatus | 'ended' | null>(null);
   const paramsRef = useRef(params);
   paramsRef.current = params;
+  const userNameRef = useRef(preferences.displayName);
+  userNameRef.current = preferences.displayName;
+  const userAvatarRef = useRef(preferences.photoURL);
+  userAvatarRef.current = preferences.photoURL;
 
   const handleHeartbeat = useCallback(
-    (curTime: number, durTime: number, isPlaying: boolean) => {
+    (curTime: number, durTime: number, isPlaying: boolean, options?: HeartbeatOptions) => {
       if (!user || !user.emailVerified) return;
-      const now = Date.now();
 
-      if (!isPlaying) {
+      const resolvedStatus: ActiveSessionStatus | 'ended' =
+        options?.status || (isPlaying ? 'playing' : 'paused');
+
+      if (resolvedStatus === 'ended') {
         lastHeartbeatMsRef.current = 0;
+        lastStatusRef.current = 'ended';
         void clearActiveWatchSession(user.uid);
         return;
       }
 
-      // Throttle heartbeat writes to once every 14 seconds unless initial send
-      if (lastHeartbeatMsRef.current > 0 && now - lastHeartbeatMsRef.current < 14000) {
+      const now = Date.now();
+      const statusChanged = lastStatusRef.current !== resolvedStatus;
+
+      // Immediate write on status change (e.g. playing -> paused or paused -> playing),
+      // otherwise throttle periodic heartbeats to every 14 seconds.
+      if (!statusChanged && lastHeartbeatMsRef.current > 0 && now - lastHeartbeatMsRef.current < 14000) {
         return;
       }
+
       lastHeartbeatMsRef.current = now;
+      lastStatusRef.current = resolvedStatus;
+
+      const safeTitle = (paramsRef.current.animeTitle || '').trim();
+      const displayAnimeTitle =
+        safeTitle && safeTitle !== 'Loading...' ? safeTitle : `Anime #${paramsRef.current.animeId || 1}`;
 
       void updateActiveWatchSession({
         id: user.uid,
         userId: user.uid,
-        userName: user.displayName || 'Anime Fan',
-        userEmail: user.email || '',
-        userAvatar: user.photoURL || '',
+        userName: userNameRef.current || user.displayName || 'Anime Fan',
+        userEmail: user.email || undefined,
+        userAvatar: userAvatarRef.current || user.photoURL || undefined,
         animeId: paramsRef.current.animeId,
-        animeTitle: paramsRef.current.animeTitle,
+        animeTitle: displayAnimeTitle,
         episodeNumber: paramsRef.current.episodeNumber,
-        episodeTitle: paramsRef.current.episodeTitle,
-        serverName: paramsRef.current.serverName,
-        progressSeconds: Math.round(curTime),
-        durationSeconds: Math.round(durTime),
+        episodeTitle: paramsRef.current.episodeTitle || undefined,
+        serverName: normalizeServerDisplayName(paramsRef.current.serverName),
+        status: resolvedStatus,
+        watchedSeconds: Math.max(0, Math.round(options?.sessionWatchedSeconds || 0)),
+        progressSeconds: Math.max(0, Math.round(curTime || 0)),
+        durationSeconds: Math.max(0, Math.round(durTime || 0)),
       });
     },
     [user]
   );
 
   useEffect(() => {
+    const uid = user?.uid;
+    if (!uid) return;
+
     const handleUnload = () => {
-      if (user) {
-        void clearActiveWatchSession(user.uid);
-      }
+      void clearActiveWatchSession(uid);
     };
     window.addEventListener('beforeunload', handleUnload);
     window.addEventListener('pagehide', handleUnload);
@@ -63,11 +94,9 @@ export function useWatchSessionHeartbeat(params: WatchHeartbeatParams) {
     return () => {
       window.removeEventListener('beforeunload', handleUnload);
       window.removeEventListener('pagehide', handleUnload);
-      if (user) {
-        void clearActiveWatchSession(user.uid);
-      }
+      void clearActiveWatchSession(uid);
     };
-  }, [user]);
+  }, [user?.uid]);
 
   return { handleHeartbeat };
 }

@@ -27,7 +27,9 @@ import {
   setConsumetApiOverride,
   setStreamingApiOverride,
 } from '@/src/config/env';
+import { getFreshFirebaseIdToken, isBackendApiUrl } from '@/src/services/authorizedFetch';
 import { extractErrorMessage } from '@/src/utils/errorUtils';
+import type { HeartbeatOptions } from '@/src/hooks/useWatchSessionHeartbeat';
 import type {
   ParsedStreamResult,
   SkipInterval,
@@ -66,7 +68,8 @@ interface VideoPlayerProps {
   onPlaybackHeartbeat?: (
     currentTime: number,
     duration: number,
-    isPlaying: boolean
+    isPlaying: boolean,
+    options?: HeartbeatOptions
   ) => void;
   onRefreshStream?: () => Promise<boolean>;
   onRetry: () => void;
@@ -150,6 +153,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const lastSavedWallMsRef = useRef(0);
   const lastUiTimeUpdateRef = useRef(-1);
   const accumulatedWatchSecRef = useRef(0);
+  const fractionWatchSecRef = useRef(0);
+  const isBufferingRef = useRef(false);
   const episodeCompletedRef = useRef(false);
   const episodeActiveSecsRef = useRef(0);
   const effectiveLogicalKey = logicalEpisodeKey || episodeKey || '';
@@ -205,19 +210,24 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const activeOutro = skipOutro || streamData?.outro;
   const activeRecap = skipRecap || streamData?.recap;
 
-  const flushPlaybackTime = useCallback((markComplete = false) => {
-    const delta = accumulatedWatchSecRef.current;
-    const shouldComplete = markComplete && !episodeCompletedRef.current;
-    if (delta <= 0 && !shouldComplete) return;
+  const flushPlaybackTime = useCallback(
+    (markComplete = false, overrideTime?: number, overrideDuration?: number) => {
+      const delta = accumulatedWatchSecRef.current;
+      const shouldComplete = markComplete && !episodeCompletedRef.current;
+      if (delta <= 0 && !shouldComplete) return;
 
-    accumulatedWatchSecRef.current = 0;
-    if (shouldComplete) {
-      episodeCompletedRef.current = true;
-    }
+      accumulatedWatchSecRef.current = 0;
+      if (shouldComplete) {
+        episodeCompletedRef.current = true;
+      }
 
-    const v = videoRef.current;
-    onPlaybackTimeRef.current?.(delta, v?.currentTime || 0, v?.duration || 0, shouldComplete);
-  }, []);
+      const v = videoRef.current;
+      const curTime = overrideTime ?? v?.currentTime ?? episodeActiveSecsRef.current;
+      const durTime = overrideDuration ?? v?.duration ?? 0;
+      onPlaybackTimeRef.current?.(delta, curTime, durTime, shouldComplete);
+    },
+    []
+  );
 
   useEffect(() => {
     const prevLogicalKey = prevLogicalKeyRef.current;
@@ -233,6 +243,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     setSelectedSubtitleIndex(0);
     setMediaError(null);
     setIsBuffering(false);
+    isBufferingRef.current = false;
     setAutoNextCountdown(null);
     setUseDirectFallback(false);
     setHindiAudioWarning(null);
@@ -253,6 +264,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       lastSavedVideoTimeRef.current = -10;
       lastSavedWallMsRef.current = 0;
       accumulatedWatchSecRef.current = 0;
+      fractionWatchSecRef.current = 0;
       episodeCompletedRef.current = false;
       episodeActiveSecsRef.current = 0;
       liveSnapshotRef.current = null;
@@ -262,6 +274,10 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
     return () => {
       flushPlaybackTime(false);
+      onPlaybackHeartbeatRef.current?.(0, 0, false, {
+        status: 'ended',
+        sessionWatchedSeconds: episodeActiveSecsRef.current,
+      });
     };
   }, [episodeKey, effectiveLogicalKey, flushPlaybackTime]);
 
@@ -299,35 +315,61 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     }
   }, [playbackRate]);
 
-  // Measure real active playback time (immune to refreshes, paused videos, or hidden background tabs)
+  // Measure real active playback time (immune to refreshes, paused/buffering videos, or hidden background tabs)
   useEffect(() => {
     if (loading || streamError || mediaError || !activeSourceUrl) return;
 
+    let lastTickMs = Date.now();
+    let lastEmbedProgressFlushSec = 0;
+
     const tick = () => {
+      const nowMs = Date.now();
+      const rawElapsedSec = Math.min(2.5, Math.max(0, (nowMs - lastTickMs) / 1000));
+      lastTickMs = nowMs;
+
       if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
         return;
       }
 
       if (activeSourceType === 'embed') {
         if (iframeLoading) return;
-        accumulatedWatchSecRef.current += 1;
-        episodeActiveSecsRef.current += 1;
+        fractionWatchSecRef.current += rawElapsedSec;
+        const wholeSecs = Math.floor(fractionWatchSecRef.current);
+        if (wholeSecs >= 1) {
+          fractionWatchSecRef.current -= wholeSecs;
+          accumulatedWatchSecRef.current += wholeSecs;
+          episodeActiveSecsRef.current += wholeSecs;
+        }
+
         // For external embed players without video DOM access, count completion after 12 real watched mins
         const shouldCompleteEmbed =
           !episodeCompletedRef.current && episodeActiveSecsRef.current >= 12 * 60;
-        if (shouldCompleteEmbed || accumulatedWatchSecRef.current >= 30) {
-          flushPlaybackTime(shouldCompleteEmbed);
+        if (shouldCompleteEmbed || accumulatedWatchSecRef.current >= 15) {
+          flushPlaybackTime(shouldCompleteEmbed, episodeActiveSecsRef.current, 0);
         }
+        if (episodeActiveSecsRef.current - lastEmbedProgressFlushSec >= 15) {
+          lastEmbedProgressFlushSec = episodeActiveSecsRef.current;
+          onProgressRef.current?.(episodeActiveSecsRef.current, 0);
+        }
+        onPlaybackHeartbeatRef.current?.(episodeActiveSecsRef.current, 0, true, {
+          status: 'playing',
+          sessionWatchedSeconds: episodeActiveSecsRef.current,
+        });
         return;
       }
 
       const v = videoRef.current;
-      if (!v || v.paused || v.ended || v.readyState < 2) {
+      if (!v || v.paused || v.ended || isBufferingRef.current || v.readyState < 2) {
         return;
       }
 
-      accumulatedWatchSecRef.current += 1;
-      episodeActiveSecsRef.current += 1;
+      fractionWatchSecRef.current += rawElapsedSec;
+      const wholeSecs = Math.floor(fractionWatchSecRef.current);
+      if (wholeSecs >= 1) {
+        fractionWatchSecRef.current -= wholeSecs;
+        accumulatedWatchSecRef.current += wholeSecs;
+        episodeActiveSecsRef.current += wholeSecs;
+      }
 
       const dur = v.duration || 0;
       const reachedEndThreshold =
@@ -336,29 +378,61 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         v.currentTime / dur >= 0.85 &&
         episodeActiveSecsRef.current >= 20;
 
-      if (reachedEndThreshold || accumulatedWatchSecRef.current >= 30) {
-        flushPlaybackTime(reachedEndThreshold);
+      if (reachedEndThreshold || accumulatedWatchSecRef.current >= 15) {
+        flushPlaybackTime(reachedEndThreshold, v.currentTime, dur);
       }
 
-      if (episodeActiveSecsRef.current % 15 === 0 && !v.paused && !v.ended) {
-        onPlaybackHeartbeatRef.current?.(v.currentTime, dur, true);
-      }
+      onPlaybackHeartbeatRef.current?.(v.currentTime, dur, true, {
+        status: 'playing',
+        sessionWatchedSeconds: episodeActiveSecsRef.current,
+      });
     };
 
     const intervalId = window.setInterval(tick, 1000);
+
+    const handleSafeFlushOnHideOrExit = (isExiting: boolean) => {
+      const v = videoRef.current;
+      if (v && v.currentTime > 0) {
+        onProgressRef.current?.(v.currentTime, v.duration || 0);
+      }
+      flushPlaybackTime(false);
+      onPlaybackHeartbeatRef.current?.(
+        v?.currentTime || episodeActiveSecsRef.current,
+        v?.duration || 0,
+        false,
+        {
+          status: isExiting ? 'ended' : 'paused',
+          sessionWatchedSeconds: episodeActiveSecsRef.current,
+        }
+      );
+    };
+
     const handleVisibility = () => {
       if (document.visibilityState === 'hidden') {
-        flushPlaybackTime(false);
-        const v = videoRef.current;
-        onPlaybackHeartbeatRef.current?.(v?.currentTime || 0, v?.duration || 0, false);
+        handleSafeFlushOnHideOrExit(false);
+      } else {
+        lastTickMs = Date.now();
       }
     };
+
+    const handlePageHide = () => {
+      handleSafeFlushOnHideOrExit(true);
+    };
+
     document.addEventListener('visibilitychange', handleVisibility);
+    window.addEventListener('beforeunload', handlePageHide);
+    window.addEventListener('pagehide', handlePageHide);
 
     return () => {
       window.clearInterval(intervalId);
       document.removeEventListener('visibilitychange', handleVisibility);
-      onPlaybackHeartbeatRef.current?.(0, 0, false);
+      window.removeEventListener('beforeunload', handlePageHide);
+      window.removeEventListener('pagehide', handlePageHide);
+      flushPlaybackTime(false);
+      onPlaybackHeartbeatRef.current?.(0, 0, false, {
+        status: 'ended',
+        sessionWatchedSeconds: episodeActiveSecsRef.current,
+      });
     };
   }, [
     loading,
@@ -417,6 +491,26 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           )
         : resolvedDirectUrl;
 
+      const needsProxyAuth = shouldUseProxy || isAlreadyProxied || isBackendApiUrl(playbackUrl);
+      const bearerToken = needsProxyAuth ? await getFreshFirebaseIdToken(false) : null;
+      if (cancelled) return;
+
+      if (needsProxyAuth && bearerToken) {
+        try {
+          await fetch(resolveApiUrl('/api/anime/stream-session'), {
+            method: 'POST',
+            credentials: 'include',
+            headers: {
+              Authorization: `Bearer ${bearerToken}`,
+              Accept: 'application/json',
+            },
+          });
+        } catch {
+          // Best-effort cookie fallback for Safari native HLS / MP4 playback
+        }
+        if (cancelled) return;
+      }
+
       console.info('[KuroStream Video] Initializing playback', {
         type: activeSourceType,
         mode: shouldUseProxy || isAlreadyProxied ? 'proxy' : 'direct',
@@ -450,6 +544,24 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
       video.addEventListener('loadedmetadata', handleLoadedMetadata);
 
+      const findMatchingAudioTrack = (
+        tracks: Array<{ lang?: string; name?: string }>,
+        mode?: 'sub' | 'dub' | 'hindi'
+      ): number => {
+        if (!mode || tracks.length === 0) return -1;
+        return tracks.findIndex((t) => {
+          const lang = (t.lang || '').toLowerCase();
+          const name = (t.name || '').toLowerCase();
+          if (mode === 'hindi') {
+            return lang.startsWith('hi') || name.includes('hindi') || name.includes('hin');
+          }
+          if (mode === 'dub') {
+            return lang.startsWith('en') || name.includes('english') || name.includes('eng');
+          }
+          return lang.startsWith('ja') || lang.startsWith('jp') || name.includes('japanese') || name.includes('jpn');
+        });
+      };
+
       if (activeSourceType === 'hls') {
         if (Hls.isSupported()) {
           const isNativeWebView = isNativeCapacitorRuntime();
@@ -468,6 +580,12 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
             levelLoadingMaxRetry: 3,
             fragLoadingTimeOut: 25000,
             fragLoadingMaxRetry: 4,
+            xhrSetup: (xhr, reqUrl) => {
+              if (bearerToken && isBackendApiUrl(reqUrl)) {
+                xhr.withCredentials = true;
+                xhr.setRequestHeader('Authorization', `Bearer ${bearerToken}`);
+              }
+            },
           });
           hlsRef.current = hls;
           hls.loadSource(playbackUrl);
@@ -482,23 +600,19 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               }))
             );
 
-            if (audioModeRef.current === 'hindi' && tracks.length > 0) {
-              const hindiIdx = tracks.findIndex(
-                (t) =>
-                  (t.lang && t.lang.toLowerCase().startsWith('hi')) ||
-                  (t.name &&
-                    (t.name.toLowerCase().includes('hindi') ||
-                      t.name.toLowerCase().includes('hin')))
-              );
-              if (hindiIdx >= 0) {
-                hls.audioTrack = hindiIdx;
-                setSelectedAudioTrackIndex(hindiIdx);
+            if (tracks.length > 0) {
+              const matchedIdx = findMatchingAudioTrack(tracks, audioModeRef.current);
+              if (matchedIdx >= 0) {
+                hls.audioTrack = matchedIdx;
+                setSelectedAudioTrackIndex(matchedIdx);
                 setHindiAudioWarning(null);
-              } else {
+              } else if (audioModeRef.current === 'hindi') {
                 setHindiAudioWarning('Hindi audio track not found in stream. Playing default audio.');
+                setSelectedAudioTrackIndex(hls.audioTrack >= 0 ? hls.audioTrack : 0);
+              } else {
+                setHindiAudioWarning(null);
+                setSelectedAudioTrackIndex(hls.audioTrack >= 0 ? hls.audioTrack : 0);
               }
-            } else if (tracks.length > 0) {
-              setSelectedAudioTrackIndex(hls.audioTrack >= 0 ? hls.audioTrack : 0);
             }
           });
           hls.on(Hls.Events.ERROR, async (_, data) => {
@@ -555,6 +669,15 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               return;
             }
 
+            if (
+              selectedSourceIndex === 0 &&
+              sources.length > 1 &&
+              sources[1]?.type === 'embed'
+            ) {
+              setSelectedSourceIndex(1);
+              return;
+            }
+
             setIsBuffering(false);
             setMediaError(
               `HLS playback failed (${data.details}). Try switching to another server or tapping Retry.`
@@ -606,20 +729,26 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   useEffect(() => {
     const hls = hlsRef.current;
     if (!hls || audioTracks.length === 0) return;
-    if (audioMode === 'hindi') {
-      const hindiIdx = audioTracks.findIndex(
-        (t) =>
-          (t.lang && t.lang.toLowerCase().startsWith('hi')) ||
-          (t.name &&
-            (t.name.toLowerCase().includes('hindi') || t.name.toLowerCase().includes('hin')))
-      );
-      if (hindiIdx >= 0) {
-        hls.audioTrack = hindiIdx;
-        setSelectedAudioTrackIndex(hindiIdx);
-        setHindiAudioWarning(null);
-      } else {
-        setHindiAudioWarning('Hindi audio track not found in stream. Playing default audio.');
+    const matchedIdx = audioTracks.findIndex((t) => {
+      const lang = (t.lang || '').toLowerCase();
+      const name = (t.name || '').toLowerCase();
+      if (audioMode === 'hindi') {
+        return lang.startsWith('hi') || name.includes('hindi') || name.includes('hin');
       }
+      if (audioMode === 'dub') {
+        return lang.startsWith('en') || name.includes('english') || name.includes('eng');
+      }
+      if (audioMode === 'sub') {
+        return lang.startsWith('ja') || lang.startsWith('jp') || name.includes('japanese') || name.includes('jpn');
+      }
+      return false;
+    });
+    if (matchedIdx >= 0) {
+      hls.audioTrack = matchedIdx;
+      setSelectedAudioTrackIndex(matchedIdx);
+      setHindiAudioWarning(null);
+    } else if (audioMode === 'hindi') {
+      setHindiAudioWarning('Hindi audio track not found in stream. Playing default audio.');
     } else {
       setHindiAudioWarning(null);
     }
@@ -807,6 +936,11 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     if (!video) return;
     const nowTime = video.currentTime;
     const totalDur = video.duration || 0;
+
+    if (!video.paused && isBufferingRef.current) {
+      isBufferingRef.current = false;
+      setIsBuffering(false);
+    }
 
     if (effectiveLogicalKey && nowTime > 1) {
       liveSnapshotRef.current = {
@@ -1003,6 +1137,11 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               onLoad={() => {
                 setIframeLoading(false);
                 setIframeSlowWarning(false);
+                onProgressRef.current?.(episodeActiveSecsRef.current, 0);
+                onPlaybackHeartbeatRef.current?.(episodeActiveSecsRef.current, 0, true, {
+                  status: 'playing',
+                  sessionWatchedSeconds: episodeActiveSecsRef.current,
+                });
                 console.info('[KuroStream Video] Embed iframe loaded', { url: activeSource.url });
               }}
               onError={() => {
@@ -1033,44 +1172,107 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               preload="auto"
               onClick={togglePlay}
               onPlay={() => {
+                isBufferingRef.current = false;
                 setIsPlaying(true);
                 if (videoRef.current) {
-                  onPlaybackHeartbeatRef.current?.(videoRef.current.currentTime, videoRef.current.duration || 0, true);
+                  const cur = videoRef.current.currentTime;
+                  const dur = videoRef.current.duration || 0;
+                  if (lastSavedVideoTimeRef.current < 0 && cur >= 0) {
+                    flushProgress(cur, dur);
+                  }
+                  onPlaybackHeartbeatRef.current?.(cur, dur, true, {
+                    status: 'playing',
+                    sessionWatchedSeconds: episodeActiveSecsRef.current,
+                  });
                 }
               }}
               onPlaying={() => {
+                isBufferingRef.current = false;
                 setIsPlaying(true);
                 setIsBuffering(false);
                 if (videoRef.current) {
-                  onPlaybackHeartbeatRef.current?.(videoRef.current.currentTime, videoRef.current.duration || 0, true);
+                  onPlaybackHeartbeatRef.current?.(
+                    videoRef.current.currentTime,
+                    videoRef.current.duration || 0,
+                    true,
+                    {
+                      status: 'playing',
+                      sessionWatchedSeconds: episodeActiveSecsRef.current,
+                    }
+                  );
                 }
               }}
               onPause={() => {
+                isBufferingRef.current = false;
                 setIsPlaying(false);
                 if (videoRef.current && videoRef.current.currentTime > 0) {
                   flushProgress(videoRef.current.currentTime, videoRef.current.duration || 0);
                 }
                 flushPlaybackTime(false);
-                onPlaybackHeartbeatRef.current?.(videoRef.current?.currentTime || 0, videoRef.current?.duration || 0, false);
+                onPlaybackHeartbeatRef.current?.(
+                  videoRef.current?.currentTime || 0,
+                  videoRef.current?.duration || 0,
+                  false,
+                  {
+                    status: 'paused',
+                    sessionWatchedSeconds: episodeActiveSecsRef.current,
+                  }
+                );
               }}
               onWaiting={() => {
+                isBufferingRef.current = true;
                 setIsBuffering(true);
-                onPlaybackHeartbeatRef.current?.(videoRef.current?.currentTime || 0, videoRef.current?.duration || 0, false);
+                onPlaybackHeartbeatRef.current?.(
+                  videoRef.current?.currentTime || 0,
+                  videoRef.current?.duration || 0,
+                  false,
+                  {
+                    status: 'buffering',
+                    sessionWatchedSeconds: episodeActiveSecsRef.current,
+                  }
+                );
               }}
-              onStalled={() => setIsBuffering(true)}
-              onSeeking={() => setIsBuffering(true)}
-              onSeeked={() => setIsBuffering(false)}
-              onLoadedData={() => setIsBuffering(false)}
-              onCanPlay={() => setIsBuffering(false)}
+              onStalled={() => {
+                isBufferingRef.current = true;
+                setIsBuffering(true);
+              }}
+              onSeeking={() => {
+                isBufferingRef.current = true;
+                setIsBuffering(true);
+              }}
+              onSeeked={() => {
+                isBufferingRef.current = false;
+                setIsBuffering(false);
+                if (videoRef.current && videoRef.current.currentTime > 0) {
+                  flushProgress(videoRef.current.currentTime, videoRef.current.duration || 0);
+                }
+              }}
+              onLoadedData={() => {
+                isBufferingRef.current = false;
+                setIsBuffering(false);
+              }}
+              onCanPlay={() => {
+                isBufferingRef.current = false;
+                setIsBuffering(false);
+              }}
               onTimeUpdate={handleTimeUpdate}
               onEnded={() => {
+                isBufferingRef.current = false;
                 setIsPlaying(false);
                 setIsBuffering(false);
                 if (videoRef.current) {
                   flushProgress(videoRef.current.duration || 0, videoRef.current.duration || 0);
                 }
                 flushPlaybackTime(episodeActiveSecsRef.current >= 15);
-                onPlaybackHeartbeatRef.current?.(videoRef.current?.duration || 0, videoRef.current?.duration || 0, false);
+                onPlaybackHeartbeatRef.current?.(
+                  videoRef.current?.duration || 0,
+                  videoRef.current?.duration || 0,
+                  false,
+                  {
+                    status: 'ended',
+                    sessionWatchedSeconds: episodeActiveSecsRef.current,
+                  }
+                );
                 if (autoNext && hasNextEpisode) {
                   setAutoNextCountdown(5);
                 }

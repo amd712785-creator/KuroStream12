@@ -29,6 +29,7 @@ import {
   type HomeSectionsData,
 } from '@/src/services/anilistApi';
 import {
+  buildAnimeWorldProxyImageUrl,
   fetchAnimeWorldHome,
   fetchAnimeWorldLatestEpisodes,
   fetchAnimeWorldSeries,
@@ -86,6 +87,7 @@ const AnimeWorldHeroSpotlight: React.FC<{
       <div className="relative h-[400px] sm:h-[480px] lg:h-[520px] w-full">
         <AnimeImage
           src={current.image}
+          fallbackSrc={buildAnimeWorldProxyImageUrl(current.image, current.proxyImage)}
           alt={current.title}
           variant="banner"
           priority
@@ -333,14 +335,22 @@ export const HomePage: React.FC = () => {
     setAwError(null);
     try {
       const seriesPage2Promise = fetchAnimeWorldSeries(2).catch(() => null);
-      const [homeRes, seriesPage1Res] = await Promise.all([
+      const [homeSettled, seriesPage1Settled] = await Promise.allSettled([
         fetchAnimeWorldHome(),
-        fetchAnimeWorldSeries(1).catch(() => null),
+        fetchAnimeWorldSeries(1),
       ]);
       if (isStillActive && !isStillActive()) return;
 
-      const latestSeries = homeRes.latest_series || [];
-      const latestMovies = homeRes.latest_movies || [];
+      const homeRes = homeSettled.status === 'fulfilled' ? homeSettled.value : null;
+      const seriesPage1Res = seriesPage1Settled.status === 'fulfilled' ? seriesPage1Settled.value : null;
+      if (!homeRes && !seriesPage1Res) {
+        throw homeSettled.status === 'rejected'
+          ? homeSettled.reason
+          : new Error('Unable to load AnimeWorld India catalog.');
+      }
+
+      const latestSeries = homeRes?.latest_series || [];
+      const latestMovies = homeRes?.latest_movies || [];
 
       const page1Catalog: AnimeWorldItem[] = [];
       const seenSeries = new Set<string>();

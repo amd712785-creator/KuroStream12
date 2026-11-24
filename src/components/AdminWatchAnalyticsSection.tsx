@@ -1,31 +1,21 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  Activity,
   AlertCircle,
-  BarChart3,
   Calendar,
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
   Clock,
   Download,
-  ExternalLink,
-  Eye,
   Film,
-  Filter,
   Flame,
-  Globe,
-  Headphones,
-  Layers,
   Loader2,
-  Play,
+  Pause,
   Radio,
   RefreshCw,
   Search,
   Server,
-  Sparkles,
   Tv,
-  User,
   Users,
   X,
 } from 'lucide-react';
@@ -33,44 +23,73 @@ import {
   fetchGlobalWatchAnalytics,
   subscribeActiveSessions,
   exportAnalyticsCsv,
+  normalizeServerDisplayName,
+  toMillis,
   type ActiveSession,
   type GlobalWatchAnalytics,
   type UserAnalyticsSummary,
   type UserWatchHistoryEntry,
 } from '@/src/services/watchAnalyticsService';
+import { getTodayDateKey } from '@/src/services/achievementService';
 
 interface AdminWatchAnalyticsSectionProps {
   onRefreshParent?: () => void;
 }
 
+function getDateKeyOffset(daysAgo: number): string {
+  const d = new Date();
+  d.setDate(d.getDate() - daysAgo);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+function getEntryDateKey(entry: UserWatchHistoryEntry): string {
+  if (entry.watchedDate && /^\d{4}-\d{2}-\d{2}$/.test(entry.watchedDate)) {
+    return entry.watchedDate;
+  }
+  const ms = toMillis(entry.updatedAt);
+  if (!ms) return '';
+  const d = new Date(ms);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
 function formatDuration(seconds: number): string {
-  if (!seconds || seconds <= 0) return '0 min';
-  const hrs = Math.floor(seconds / 3600);
-  const mins = Math.floor((seconds % 3600) / 60);
+  if (!seconds || seconds <= 0) return '0m';
+  const rounded = Math.round(seconds);
+  if (rounded < 60) return `${rounded}s`;
+  const hrs = Math.floor(rounded / 3600);
+  const mins = Math.floor((rounded % 3600) / 60);
+  const remSecs = rounded % 60;
   if (hrs > 0) {
     return `${hrs}h ${mins}m`;
   }
-  return `${mins} min`;
+  if (mins < 10 && remSecs > 0) {
+    return `${mins}m ${remSecs}s`;
+  }
+  return `${mins}m`;
 }
 
 function formatClock(seconds: number): string {
   if (!seconds || seconds <= 0) return '0:00';
   const total = Math.floor(seconds);
-  const m = Math.floor(total / 60);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
   const s = total % 60;
+  if (h > 0) {
+    return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+  }
   return `${m}:${String(s).padStart(2, '0')}`;
 }
 
-function formatTimestamp(val: any): string {
-  if (!val) return 'N/A';
+function formatTimestamp(val: unknown): string {
+  const ms = toMillis(val);
+  if (!ms) return 'N/A';
   try {
-    let ms = 0;
-    if (typeof val === 'number') ms = val;
-    else if (typeof val.toMillis === 'function') ms = val.toMillis();
-    else if (val.seconds) ms = val.seconds * 1000;
-    else if (typeof val === 'string') ms = new Date(val).getTime();
-
-    if (!ms || isNaN(ms)) return 'N/A';
     return new Date(ms).toLocaleString(undefined, {
       month: 'short',
       day: 'numeric',
@@ -83,27 +102,17 @@ function formatTimestamp(val: any): string {
   }
 }
 
-function formatRelativeTime(val: any): string {
-  if (!val) return 'Inactive';
-  try {
-    let ms = 0;
-    if (typeof val === 'number') ms = val;
-    else if (typeof val.toMillis === 'function') ms = val.toMillis();
-    else if (val.seconds) ms = val.seconds * 1000;
-    else if (typeof val === 'string') ms = new Date(val).getTime();
-
-    if (!ms || isNaN(ms)) return 'Inactive';
-    const diffSec = Math.floor((Date.now() - ms) / 1000);
-    if (diffSec < 15) return 'Just now';
-    if (diffSec < 60) return `${diffSec}s ago`;
-    const diffMin = Math.floor(diffSec / 60);
-    if (diffMin < 60) return `${diffMin}m ago`;
-    const diffHr = Math.floor(diffMin / 60);
-    if (diffHr < 24) return `${diffHr}h ago`;
-    return `${Math.floor(diffHr / 24)}d ago`;
-  } catch {
-    return 'Inactive';
-  }
+function formatRelativeTime(val: unknown): string {
+  const ms = toMillis(val);
+  if (!ms) return 'Inactive';
+  const diffSec = Math.max(0, Math.floor((Date.now() - ms) / 1000));
+  if (diffSec < 15) return 'Just now';
+  if (diffSec < 60) return `${diffSec}s ago`;
+  const diffMin = Math.floor(diffSec / 60);
+  if (diffMin < 60) return `${diffMin}m ago`;
+  const diffHr = Math.floor(diffMin / 60);
+  if (diffHr < 24) return `${diffHr}h ago`;
+  return `${Math.floor(diffHr / 24)}d ago`;
 }
 
 export const AdminWatchAnalyticsSection: React.FC<AdminWatchAnalyticsSectionProps> = ({
@@ -111,6 +120,7 @@ export const AdminWatchAnalyticsSection: React.FC<AdminWatchAnalyticsSectionProp
 }) => {
   const [analytics, setAnalytics] = useState<GlobalWatchAnalytics | null>(null);
   const [activeSessions, setActiveSessions] = useState<ActiveSession[]>([]);
+  const [activeSessionsError, setActiveSessionsError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [lastRefreshedAt, setLastRefreshedAt] = useState<Date>(new Date());
@@ -119,6 +129,8 @@ export const AdminWatchAnalyticsSection: React.FC<AdminWatchAnalyticsSectionProp
   const [searchQuery, setSearchQuery] = useState('');
   const [serverFilter, setServerFilter] = useState('All');
   const [animeFilter, setAnimeFilter] = useState('');
+  const [dateRangeFilter, setDateRangeFilter] = useState<'all' | 'today' | '7d' | '30d' | 'custom'>('all');
+  const [customDateFilter, setCustomDateFilter] = useState('');
   const [sortBy, setSortBy] = useState<'recent' | 'watchTime' | 'episodes' | 'name'>('recent');
 
   // Pagination state
@@ -128,7 +140,6 @@ export const AdminWatchAnalyticsSection: React.FC<AdminWatchAnalyticsSectionProp
   // Individual User Details Modal
   const [selectedUser, setSelectedUser] = useState<UserAnalyticsSummary | null>(null);
 
-  // Load static/aggregated analytics
   const loadData = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -136,6 +147,9 @@ export const AdminWatchAnalyticsSection: React.FC<AdminWatchAnalyticsSectionProp
       const data = await fetchGlobalWatchAnalytics();
       setAnalytics(data);
       setLastRefreshedAt(new Date());
+      setSelectedUser((prev) =>
+        prev ? data.users.find((u) => u.uid === prev.uid) || prev : null
+      );
       if (onRefreshParent) onRefreshParent();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load user watch analytics.');
@@ -146,7 +160,6 @@ export const AdminWatchAnalyticsSection: React.FC<AdminWatchAnalyticsSectionProp
 
   useEffect(() => {
     void loadData();
-    // Auto-refresh aggregated analytics every 60 seconds
     const interval = window.setInterval(() => {
       void loadData();
     }, 60000);
@@ -155,18 +168,48 @@ export const AdminWatchAnalyticsSection: React.FC<AdminWatchAnalyticsSectionProp
 
   // Real-time listener for Currently Watching Active Sessions
   useEffect(() => {
-    const unsub = subscribeActiveSessions((sessions) => {
-      setActiveSessions(sessions);
-    });
+    const unsub = subscribeActiveSessions(
+      (sessions) => {
+        setActiveSessionsError(null);
+        setActiveSessions(sessions);
+      },
+      (errMessage) => {
+        setActiveSessionsError(errMessage);
+      }
+    );
     return () => unsub();
   }, []);
+
+  const serverOptions = useMemo(() => {
+    const defaults = [
+      'AnimeWorld India',
+      'KuroStream Global',
+      'vidstreaming',
+      'megacloud',
+      'streamsb',
+      'munchyroll',
+    ];
+    const map = new Map<string, string>();
+    for (const s of defaults) {
+      map.set(s.toLowerCase(), s);
+    }
+    for (const s of analytics?.popularServers || []) {
+      const trimmed = s.serverName.trim();
+      if (trimmed) {
+        map.set(trimmed.toLowerCase(), trimmed);
+      }
+    }
+    return Array.from(map.values());
+  }, [analytics?.popularServers]);
 
   // Filter and sort user list
   const filteredUsers = useMemo(() => {
     if (!analytics?.users) return [];
     let list = [...analytics.users];
+    const todayKey = getTodayDateKey();
+    const weekStartKey = getDateKeyOffset(6);
+    const monthStartKey = getDateKeyOffset(29);
 
-    // Search query filter (name or email)
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase().trim();
       list = list.filter(
@@ -177,7 +220,6 @@ export const AdminWatchAnalyticsSection: React.FC<AdminWatchAnalyticsSectionProp
       );
     }
 
-    // Anime title filter
     if (animeFilter.trim()) {
       const af = animeFilter.toLowerCase().trim();
       list = list.filter((u) =>
@@ -185,21 +227,55 @@ export const AdminWatchAnalyticsSection: React.FC<AdminWatchAnalyticsSectionProp
       );
     }
 
-    // Streaming server filter
     if (serverFilter !== 'All') {
+      const targetServer = serverFilter.toLowerCase();
       list = list.filter((u) =>
         u.history.some((h) => {
-          const s = h.serverName || (h.audioMode === 'hindi' ? 'AnimeWorld India' : 'KuroStream Global');
-          return s.toLowerCase().includes(serverFilter.toLowerCase());
+          const s = normalizeServerDisplayName(h.serverName, h.audioMode);
+          return s.toLowerCase().includes(targetServer);
         })
       );
     }
 
-    // Sorting
+    if (dateRangeFilter === 'today') {
+      list = list.filter(
+        (u) =>
+          u.todayWatchSeconds > 0 ||
+          Boolean(u.dailyActivity[todayKey]) ||
+          u.history.some((h) => getEntryDateKey(h) === todayKey)
+      );
+    } else if (dateRangeFilter === '7d') {
+      list = list.filter(
+        (u) =>
+          u.weeklyWatchSeconds > 0 ||
+          Object.keys(u.dailyActivity).some((d) => d >= weekStartKey && d <= todayKey) ||
+          u.history.some((h) => {
+            const dk = getEntryDateKey(h);
+            return dk >= weekStartKey && dk <= todayKey;
+          })
+      );
+    } else if (dateRangeFilter === '30d') {
+      list = list.filter(
+        (u) =>
+          u.monthlyWatchSeconds > 0 ||
+          Object.keys(u.dailyActivity).some((d) => d >= monthStartKey && d <= todayKey) ||
+          u.history.some((h) => {
+            const dk = getEntryDateKey(h);
+            return dk >= monthStartKey && dk <= todayKey;
+          })
+      );
+    } else if (dateRangeFilter === 'custom' && customDateFilter) {
+      list = list.filter(
+        (u) =>
+          Boolean(u.dailyActivity[customDateFilter]) ||
+          u.history.some((h) => getEntryDateKey(h) === customDateFilter)
+      );
+    }
+
     list.sort((a, b) => {
       if (sortBy === 'recent') {
-        const aTime = a.history[0]?.updatedAt ? new Date(formatTimestamp(a.history[0].updatedAt)).getTime() : 0;
-        const bTime = b.history[0]?.updatedAt ? new Date(formatTimestamp(b.history[0].updatedAt)).getTime() : 0;
+        const aTime = toMillis(a.history[0]?.updatedAt || a.lastActiveAt);
+        const bTime = toMillis(b.history[0]?.updatedAt || b.lastActiveAt);
         return bTime - aTime;
       }
       if (sortBy === 'watchTime') {
@@ -215,20 +291,26 @@ export const AdminWatchAnalyticsSection: React.FC<AdminWatchAnalyticsSectionProp
     });
 
     return list;
-  }, [analytics?.users, searchQuery, animeFilter, serverFilter, sortBy]);
+  }, [
+    analytics?.users,
+    searchQuery,
+    animeFilter,
+    serverFilter,
+    dateRangeFilter,
+    customDateFilter,
+    sortBy,
+  ]);
 
-  // Paginated slice
   const totalPages = Math.max(1, Math.ceil(filteredUsers.length / pageSize));
   const paginatedUsers = useMemo(() => {
     const start = (currentPage - 1) * pageSize;
     return filteredUsers.slice(start, start + pageSize);
   }, [filteredUsers, currentPage, pageSize]);
 
-  // Calculate live session distinction
   const now = Date.now();
-  const liveActiveNowCount = activeSessions.filter((s) => {
-    const ms = s.updatedAt?.toMillis ? s.updatedAt.toMillis() : s.updatedAt ? new Date(s.updatedAt).getTime() : 0;
-    return ms > 0 && now - ms <= 45000;
+  const livePlayingCount = activeSessions.filter((s) => {
+    const ms = toMillis(s.updatedAt);
+    return (ms === 0 || now - ms <= 45000) && s.status !== 'paused';
   }).length;
 
   return (
@@ -245,7 +327,7 @@ export const AdminWatchAnalyticsSection: React.FC<AdminWatchAnalyticsSectionProp
               User Watch Analytics &amp; Live Presence
             </h2>
             <p className="mt-0.5 text-xs sm:text-sm text-slate-400">
-              Complete playback watch history, real-time currently watching sessions, and consumption statistics.
+              Real-time playback heartbeats, chronological episode durations, and registered user watch statistics.
             </p>
           </div>
 
@@ -264,9 +346,9 @@ export const AdminWatchAnalyticsSection: React.FC<AdminWatchAnalyticsSectionProp
             </button>
             <button
               type="button"
-              onClick={() => analytics?.users && exportAnalyticsCsv(analytics.users)}
-              disabled={!analytics?.users || analytics.users.length === 0}
-              className="kuro-btn-primary inline-flex min-h-[38px] items-center gap-1.5 rounded-xl px-3.5 py-1.5 text-xs font-semibold text-white shadow-[0_0_15px_rgba(168,85,247,0.35)]"
+              onClick={() => exportAnalyticsCsv(filteredUsers)}
+              disabled={filteredUsers.length === 0}
+              className="kuro-btn-primary inline-flex min-h-[38px] items-center gap-1.5 rounded-xl px-3.5 py-1.5 text-xs font-semibold text-white shadow-[0_0_15px_rgba(168,85,247,0.35)] disabled:opacity-40"
             >
               <Download className="h-3.5 w-3.5" />
               <span>Export CSV</span>
@@ -285,7 +367,7 @@ export const AdminWatchAnalyticsSection: React.FC<AdminWatchAnalyticsSectionProp
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4 pt-1">
           <div className="rounded-2xl border border-white/[0.08] bg-[#090b14]/90 p-4">
             <div className="flex items-center justify-between">
-              <span className="text-xs font-medium text-slate-400">Total User Watch Time</span>
+              <span className="text-xs font-medium text-slate-400">Total Watch Time</span>
               <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-violet-500/20 text-violet-300">
                 <Clock className="h-4 w-4" />
               </span>
@@ -293,8 +375,10 @@ export const AdminWatchAnalyticsSection: React.FC<AdminWatchAnalyticsSectionProp
             <div className="mt-2 text-2xl font-extrabold text-white tabular-nums">
               {formatDuration(analytics?.totalWatchTimeSeconds || 0)}
             </div>
-            <p className="mt-1 text-[11px] text-slate-500">
-              Aggregated across all registered users
+            <p className="mt-1.5 text-[11px] text-slate-400 tabular-nums">
+              Today {formatDuration(analytics?.todayWatchTimeSeconds || 0)} · 7d{' '}
+              {formatDuration(analytics?.weeklyWatchTimeSeconds || 0)} · 30d{' '}
+              {formatDuration(analytics?.monthlyWatchTimeSeconds || 0)}
             </p>
           </div>
 
@@ -308,8 +392,8 @@ export const AdminWatchAnalyticsSection: React.FC<AdminWatchAnalyticsSectionProp
             <div className="mt-2 text-2xl font-extrabold text-white tabular-nums">
               {analytics?.totalEpisodesWatched || 0}
             </div>
-            <p className="mt-1 text-[11px] text-slate-500">
-              Completed or in-progress streams
+            <p className="mt-1.5 text-[11px] text-slate-500 tabular-nums">
+              {analytics?.totalWatchSessions || 0} logged watch sessions
             </p>
           </div>
 
@@ -324,15 +408,15 @@ export const AdminWatchAnalyticsSection: React.FC<AdminWatchAnalyticsSectionProp
               <span className="text-2xl font-extrabold text-white tabular-nums">
                 {activeSessions.length}
               </span>
-              {liveActiveNowCount > 0 && (
+              {livePlayingCount > 0 && (
                 <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/20 px-2 py-0.5 text-[10px] font-bold text-emerald-300">
                   <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-ping" />
-                  {liveActiveNowCount} active now
+                  {livePlayingCount} active now
                 </span>
               )}
             </div>
-            <p className="mt-1 text-[11px] text-slate-500">
-              Live heartbeat telemetry
+            <p className="mt-1.5 text-[11px] text-slate-500">
+              Live playback heartbeat sessions
             </p>
           </div>
 
@@ -346,50 +430,86 @@ export const AdminWatchAnalyticsSection: React.FC<AdminWatchAnalyticsSectionProp
             <div className="mt-2 text-2xl font-extrabold text-white tabular-nums">
               {analytics?.users.length || 0}
             </div>
-            <p className="mt-1 text-[11px] text-slate-500">
-              With Firestore profile &amp; activity
+            <p className="mt-1.5 text-[11px] text-slate-500">
+              Verified Firestore user accounts
             </p>
           </div>
         </div>
       </div>
 
       {/* ========================================================
-          SECTION 2: CURRENTLY WATCHING (LIVE SESSIONS)
+          SECTION 2: CURRENTLY WATCHING (LIVE) & RECENTLY WATCHED
           ======================================================== */}
-      <section className="kuro-glass rounded-3xl p-5 sm:p-6 border border-white/[0.08] space-y-4">
-        <div className="flex items-center justify-between">
+      <section className="kuro-glass rounded-3xl p-5 sm:p-6 border border-white/[0.08] space-y-5">
+        <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2.5">
             <span className="relative flex h-3 w-3">
               <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
               <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-500" />
             </span>
             <h3 className="text-base sm:text-lg font-bold text-white tracking-tight">
-              Live Watching Activity ({activeSessions.length})
+              Currently Watching — Live Sessions ({activeSessions.length})
             </h3>
           </div>
           <span className="text-xs text-slate-400">
-            Real playback heartbeat updates
+            Real-time playback heartbeats (live vs paused vs recent)
           </span>
         </div>
 
+        {activeSessionsError && (
+          <div className="flex items-center gap-2 rounded-2xl border border-rose-500/40 bg-rose-950/30 px-4 py-3 text-xs text-rose-200">
+            <AlertCircle className="h-4 w-4 shrink-0 text-rose-400" />
+            <span>Active sessions listener error: {activeSessionsError}</span>
+          </div>
+        )}
+
         {activeSessions.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-10 rounded-2xl border border-dashed border-white/[0.1] bg-[#080a12]/60 text-center">
-            <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-white/[0.04] text-slate-400">
-              <Radio className="h-6 w-6" />
+          <div className="flex flex-col items-center justify-center py-8 rounded-2xl border border-dashed border-white/[0.1] bg-[#080a12]/60 text-center px-4">
+            <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-white/[0.04] text-slate-400">
+              <Radio className="h-5 w-5" />
             </div>
-            <p className="mt-3 text-sm font-semibold text-slate-300">No active watching sessions</p>
-            <p className="mt-1 text-xs text-slate-500 max-w-sm">
-              When authenticated users stream anime in KuroStream, their live playback position, current episode, and server will appear here instantly.
+            <p className="mt-2.5 text-sm font-semibold text-slate-300">No active live streams right now</p>
+            <p className="mt-1 text-xs text-slate-500 max-w-md">
+              When authenticated users press Play in KuroStream or AnimeWorld India, their live playback state, episode, watched duration, and server appear here automatically.
             </p>
           </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5">
             {activeSessions.map((session) => {
-              const sessionMs = session.updatedAt?.toMillis ? session.updatedAt.toMillis() : session.updatedAt ? new Date(session.updatedAt).getTime() : 0;
-              const isStreamingNow = sessionMs > 0 && now - sessionMs <= 45000;
+              const sessionMs = toMillis(session.updatedAt);
+              const isStale = sessionMs > 0 && now - sessionMs > 45000;
+              const status = session.status || 'playing';
               const progressSec = session.progressSeconds || 0;
               const durationSec = session.durationSeconds || 0;
               const pct = durationSec > 0 ? Math.min(100, Math.round((progressSec / durationSec) * 100)) : 0;
+
+              let statusBadge = (
+                <span className="inline-flex items-center gap-1 rounded-full border border-emerald-500/40 bg-emerald-500/20 px-2 py-0.5 text-[10px] font-bold text-emerald-300">
+                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-ping" />
+                  <span>Streaming Now</span>
+                </span>
+              );
+              if (isStale) {
+                statusBadge = (
+                  <span className="inline-flex items-center gap-1 rounded-full border border-slate-500/40 bg-slate-500/15 px-2 py-0.5 text-[10px] font-bold text-slate-300">
+                    <span>Idle</span>
+                  </span>
+                );
+              } else if (status === 'buffering') {
+                statusBadge = (
+                  <span className="inline-flex items-center gap-1 rounded-full border border-amber-500/40 bg-amber-500/15 px-2 py-0.5 text-[10px] font-bold text-amber-300">
+                    <Loader2 className="h-2.5 w-2.5 animate-spin" />
+                    <span>Buffering</span>
+                  </span>
+                );
+              } else if (status === 'paused') {
+                statusBadge = (
+                  <span className="inline-flex items-center gap-1 rounded-full border border-sky-500/40 bg-sky-500/15 px-2 py-0.5 text-[10px] font-bold text-sky-300">
+                    <Pause className="h-2.5 w-2.5" />
+                    <span>Paused</span>
+                  </span>
+                );
+              }
 
               return (
                 <div
@@ -410,16 +530,14 @@ export const AdminWatchAnalyticsSection: React.FC<AdminWatchAnalyticsSectionProp
                             {session.userName?.charAt(0).toUpperCase() || 'U'}
                           </div>
                         )}
-                        {isStreamingNow && (
+                        {!isStale && status === 'playing' && (
                           <span className="absolute bottom-0 right-0 h-2.5 w-2.5 rounded-full bg-emerald-500 ring-2 ring-[#090b14]" />
                         )}
                       </div>
                       <div className="min-w-0">
-                        <div className="flex items-center gap-1.5">
-                          <span className="text-xs font-bold text-white truncate">
-                            {session.userName}
-                          </span>
-                        </div>
+                        <span className="text-xs font-bold text-white truncate block">
+                          {session.userName}
+                        </span>
                         {session.userEmail && (
                           <span className="text-[11px] text-slate-400 truncate block">
                             {session.userEmail}
@@ -428,58 +546,44 @@ export const AdminWatchAnalyticsSection: React.FC<AdminWatchAnalyticsSectionProp
                       </div>
                     </div>
 
-                    <span
-                      className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-bold ${
-                        isStreamingNow
-                          ? 'border border-emerald-500/40 bg-emerald-500/20 text-emerald-300'
-                          : 'border border-amber-500/40 bg-amber-500/10 text-amber-300'
-                      }`}
-                    >
-                      {isStreamingNow ? (
-                        <>
-                          <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-ping" />
-                          <span>Streaming Now</span>
-                        </>
-                      ) : (
-                        <span>Idle / Paused</span>
-                      )}
-                    </span>
+                    {statusBadge}
                   </div>
 
                   <div className="rounded-xl border border-white/[0.05] bg-white/[0.02] p-2.5 space-y-1.5">
                     <div className="text-xs font-semibold text-violet-200 truncate">
                       {session.animeTitle}
                     </div>
-                    <div className="flex items-center justify-between text-[11px] text-slate-400">
-                      <span>
+                    <div className="flex items-center justify-between gap-2 text-[11px] text-slate-400">
+                      <span className="truncate">
                         Episode {session.episodeNumber}
                         {session.episodeTitle ? ` · ${session.episodeTitle}` : ''}
                       </span>
-                      <span className="rounded bg-violet-950/60 border border-violet-500/30 px-1.5 py-0.5 text-[10px] font-medium text-violet-300">
-                        {session.serverName || 'KuroStream'}
+                      <span className="shrink-0 rounded bg-violet-950/60 border border-violet-500/30 px-1.5 py-0.5 text-[10px] font-medium text-violet-300">
+                        {normalizeServerDisplayName(session.serverName)}
                       </span>
                     </div>
 
+                    <div className="flex items-center justify-between text-[10px] text-emerald-300/90 tabular-nums">
+                      <span>Session playback: {formatDuration(session.watchedSeconds || 0)}</span>
+                      {durationSec > 0 && (
+                        <span className="text-slate-400">
+                          {formatClock(progressSec)} / {formatClock(durationSec)} ({pct}%)
+                        </span>
+                      )}
+                    </div>
+
                     {durationSec > 0 && (
-                      <div className="space-y-1 pt-1">
-                        <div className="h-1.5 w-full overflow-hidden rounded-full bg-white/[0.08]">
-                          <div
-                            className="h-full rounded-full bg-gradient-to-r from-violet-500 to-fuchsia-500"
-                            style={{ width: `${pct}%` }}
-                          />
-                        </div>
-                        <div className="flex items-center justify-between text-[10px] text-slate-400 tabular-nums">
-                          <span>
-                            {formatClock(progressSec)} / {formatClock(durationSec)}
-                          </span>
-                          <span>{pct}% watched</span>
-                        </div>
+                      <div className="h-1.5 w-full overflow-hidden rounded-full bg-white/[0.08]">
+                        <div
+                          className="h-full rounded-full bg-gradient-to-r from-violet-500 to-fuchsia-500"
+                          style={{ width: `${pct}%` }}
+                        />
                       </div>
                     )}
                   </div>
 
                   <div className="flex items-center justify-between text-[10px] text-slate-500 pt-0.5">
-                    <span>Heartbeat: {formatRelativeTime(session.updatedAt)}</span>
+                    <span>Last activity: {formatRelativeTime(session.updatedAt)}</span>
                     <button
                       type="button"
                       onClick={() => {
@@ -488,7 +592,7 @@ export const AdminWatchAnalyticsSection: React.FC<AdminWatchAnalyticsSectionProp
                       }}
                       className="text-violet-400 hover:text-violet-300 font-semibold"
                     >
-                      View Profile &rarr;
+                      Inspect User &rarr;
                     </button>
                   </div>
                 </div>
@@ -496,6 +600,73 @@ export const AdminWatchAnalyticsSection: React.FC<AdminWatchAnalyticsSectionProp
             })}
           </div>
         )}
+
+        {/* Recently Watched Sessions (Distinct from Active Live Heartbeats) */}
+        <div className="pt-2 border-t border-white/[0.07] space-y-3">
+          <div className="flex items-center justify-between">
+            <h4 className="text-xs font-bold uppercase tracking-wider text-slate-400">
+              Recently Watched Sessions
+            </h4>
+            <span className="text-[11px] text-slate-500">
+              Latest completed &amp; paused episode logs
+            </span>
+          </div>
+
+          {!analytics?.recentWatchSessions || analytics.recentWatchSessions.length === 0 ? (
+            <p className="text-xs text-slate-500">No recent watch sessions recorded yet.</p>
+          ) : (
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
+              {analytics.recentWatchSessions.slice(0, 6).map((item, idx) => {
+                const watchedSec = item.watchedSeconds || item.progressSeconds || 0;
+                return (
+                  <button
+                    key={`${item.userId}-${item.id || item.episodeId}-${idx}`}
+                    type="button"
+                    onClick={() => {
+                      const target = analytics.users.find((u) => u.uid === item.userId);
+                      if (target) setSelectedUser(target);
+                    }}
+                    className="flex items-center justify-between gap-2.5 rounded-xl border border-white/[0.06] bg-[#090b14]/80 p-2.5 text-left transition-colors hover:border-violet-500/40"
+                  >
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <div className="h-8 w-8 rounded-lg overflow-hidden bg-violet-600/20 shrink-0">
+                        {item.userAvatar ? (
+                          <img src={item.userAvatar} alt={item.userName} className="h-full w-full object-cover" />
+                        ) : (
+                          <div className="flex h-full w-full items-center justify-center text-xs font-bold text-violet-300">
+                            {item.userName.charAt(0).toUpperCase()}
+                          </div>
+                        )}
+                      </div>
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-xs font-bold text-white truncate">{item.userName}</span>
+                          <span className="rounded bg-white/[0.06] px-1.5 py-0.2 text-[9px] font-semibold text-slate-400">
+                            Recent
+                          </span>
+                        </div>
+                        <span className="text-[11px] text-violet-300 truncate block">
+                          {item.title} · Ep {item.episodeNumber}
+                        </span>
+                        <span className="text-[10px] text-slate-500 truncate block">
+                          {normalizeServerDisplayName(item.serverName, item.audioMode)} · {formatRelativeTime(item.updatedAt)}
+                        </span>
+                      </div>
+                    </div>
+                    <div className="text-right shrink-0">
+                      <span className="block text-[11px] font-bold text-emerald-300 tabular-nums">
+                        {formatDuration(watchedSec)}
+                      </span>
+                      {item.completed && (
+                        <span className="text-[9px] font-semibold text-violet-300">Completed</span>
+                      )}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
       </section>
 
       {/* ========================================================
@@ -529,12 +700,19 @@ export const AdminWatchAnalyticsSection: React.FC<AdminWatchAnalyticsSectionProp
                     >
                       #{idx + 1}
                     </span>
-                    <span className="text-xs font-semibold text-slate-200 truncate">
-                      {anime.title}
-                    </span>
+                    <div className="min-w-0">
+                      <span className="text-xs font-semibold text-slate-200 truncate block">
+                        {anime.title}
+                      </span>
+                      {anime.totalSeconds > 0 && (
+                        <span className="text-[10px] text-slate-500 tabular-nums">
+                          {formatDuration(anime.totalSeconds)} watched
+                        </span>
+                      )}
+                    </div>
                   </div>
                   <span className="rounded-lg bg-violet-500/10 px-2 py-0.5 text-xs font-bold text-violet-300 tabular-nums shrink-0 ml-2">
-                    {anime.count} views
+                    {anime.count} {anime.count === 1 ? 'session' : 'sessions'}
                   </span>
                 </div>
               ))}
@@ -548,7 +726,7 @@ export const AdminWatchAnalyticsSection: React.FC<AdminWatchAnalyticsSectionProp
         <div className="rounded-2xl border border-white/[0.08] bg-[#090b14]/90 p-4 sm:p-5 space-y-3">
           <div className="flex items-center gap-2">
             <Server className="h-4 w-4 text-cyan-400" />
-            <h3 className="text-sm font-bold text-white">Streaming Server Distribution</h3>
+            <h3 className="text-sm font-bold text-white">Popular Streaming Servers</h3>
           </div>
           {analytics?.popularServers && analytics.popularServers.length > 0 ? (
             <div className="space-y-3 pt-1">
@@ -557,10 +735,10 @@ export const AdminWatchAnalyticsSection: React.FC<AdminWatchAnalyticsSectionProp
                 const pct = Math.round((server.count / totalServerHits) * 100);
                 return (
                   <div key={server.serverName} className="space-y-1.5">
-                    <div className="flex items-center justify-between text-xs">
-                      <span className="font-semibold text-slate-200">{server.serverName}</span>
-                      <span className="font-bold text-white tabular-nums">
-                        {server.count} ({pct}%)
+                    <div className="flex items-center justify-between text-xs gap-2">
+                      <span className="font-semibold text-slate-200 truncate">{server.serverName}</span>
+                      <span className="font-bold text-white tabular-nums shrink-0">
+                        {server.count} ({pct}%) · {formatDuration(server.totalSeconds)}
                       </span>
                     </div>
                     <div className="h-2 w-full overflow-hidden rounded-full bg-white/[0.06]">
@@ -574,7 +752,7 @@ export const AdminWatchAnalyticsSection: React.FC<AdminWatchAnalyticsSectionProp
               })}
             </div>
           ) : (
-            <p className="text-xs text-slate-500">No server records yet.</p>
+            <p className="text-xs text-slate-500">No streaming server telemetry recorded yet.</p>
           )}
         </div>
 
@@ -582,7 +760,7 @@ export const AdminWatchAnalyticsSection: React.FC<AdminWatchAnalyticsSectionProp
         <div className="rounded-2xl border border-white/[0.08] bg-[#090b14]/90 p-4 sm:p-5 space-y-3">
           <div className="flex items-center gap-2">
             <Flame className="h-4 w-4 text-amber-400" />
-            <h3 className="text-sm font-bold text-white">Top Active Watchers</h3>
+            <h3 className="text-sm font-bold text-white">Most Active Watchers</h3>
           </div>
           {analytics?.mostActiveUsers && analytics.mostActiveUsers.length > 0 ? (
             <div className="space-y-2">
@@ -608,18 +786,18 @@ export const AdminWatchAnalyticsSection: React.FC<AdminWatchAnalyticsSectionProp
                         {user.displayName}
                       </span>
                       <span className="text-[10px] text-slate-400 block truncate">
-                        {user.totalEpisodesCompleted} eps completed
+                        {user.totalEpisodesCompleted} eps · Today {formatDuration(user.todayWatchSeconds)}
                       </span>
                     </div>
                   </div>
-                  <span className="text-xs font-extrabold text-amber-300 tabular-nums ml-2">
+                  <span className="text-xs font-extrabold text-amber-300 tabular-nums ml-2 shrink-0">
                     {formatDuration(user.totalWatchSeconds)}
                   </span>
                 </div>
               ))}
             </div>
           ) : (
-            <p className="text-xs text-slate-500">No user records yet.</p>
+            <p className="text-xs text-slate-500">No active watch records yet.</p>
           )}
         </div>
       </div>
@@ -634,7 +812,7 @@ export const AdminWatchAnalyticsSection: React.FC<AdminWatchAnalyticsSectionProp
               Registered Users &amp; Watch History
             </h3>
             <p className="mt-0.5 text-xs text-slate-400">
-              Showing {filteredUsers.length} registered accounts. Click any user to inspect their full activity history.
+              Showing {filteredUsers.length} registered accounts. Click any user to open their detailed watch history page.
             </p>
           </div>
 
@@ -656,7 +834,7 @@ export const AdminWatchAnalyticsSection: React.FC<AdminWatchAnalyticsSectionProp
         </div>
 
         {/* Filter & Search Bar */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5 pt-1">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2.5 pt-1">
           <div className="relative">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-slate-400" />
             <input
@@ -666,7 +844,7 @@ export const AdminWatchAnalyticsSection: React.FC<AdminWatchAnalyticsSectionProp
                 setSearchQuery(e.target.value);
                 setCurrentPage(1);
               }}
-              placeholder="Search user name or email..."
+              placeholder="Search name or email..."
               className="w-full rounded-xl border border-white/[0.08] bg-[#070912] pl-9 pr-3 py-2 text-xs text-white placeholder-slate-500 focus:border-violet-500 focus:outline-none"
             />
           </div>
@@ -685,7 +863,7 @@ export const AdminWatchAnalyticsSection: React.FC<AdminWatchAnalyticsSectionProp
             />
           </div>
 
-          <div className="relative">
+          <div>
             <select
               value={serverFilter}
               onChange={(e) => {
@@ -695,12 +873,43 @@ export const AdminWatchAnalyticsSection: React.FC<AdminWatchAnalyticsSectionProp
               className="w-full rounded-xl border border-white/[0.08] bg-[#070912] px-3 py-2 text-xs text-white focus:border-violet-500 focus:outline-none"
             >
               <option value="All">All Streaming Servers</option>
-              <option value="AnimeWorld India">AnimeWorld India</option>
-              <option value="KuroStream Global">KuroStream Global</option>
+              {serverOptions.map((srv) => (
+                <option key={srv} value={srv}>
+                  {srv}
+                </option>
+              ))}
             </select>
           </div>
 
-          <div className="relative">
+          <div className="flex gap-1.5">
+            <select
+              value={dateRangeFilter}
+              onChange={(e) => {
+                setDateRangeFilter(e.target.value as any);
+                setCurrentPage(1);
+              }}
+              className="w-full rounded-xl border border-white/[0.08] bg-[#070912] px-3 py-2 text-xs text-white focus:border-violet-500 focus:outline-none"
+            >
+              <option value="all">All Dates</option>
+              <option value="today">Today</option>
+              <option value="7d">Last 7 Days</option>
+              <option value="30d">Last 30 Days</option>
+              <option value="custom">Specific Date</option>
+            </select>
+            {dateRangeFilter === 'custom' && (
+              <input
+                type="date"
+                value={customDateFilter}
+                onChange={(e) => {
+                  setCustomDateFilter(e.target.value);
+                  setCurrentPage(1);
+                }}
+                className="rounded-xl border border-white/[0.08] bg-[#070912] px-2 py-2 text-xs text-white focus:border-violet-500 focus:outline-none"
+              />
+            )}
+          </div>
+
+          <div>
             <select
               value={sortBy}
               onChange={(e) => {
@@ -741,7 +950,9 @@ export const AdminWatchAnalyticsSection: React.FC<AdminWatchAnalyticsSectionProp
               ) : (
                 paginatedUsers.map((user) => {
                   const lastHistory = user.history[0];
-                  const server = lastHistory?.serverName || (lastHistory?.audioMode === 'hindi' ? 'AnimeWorld India' : lastHistory ? 'KuroStream Global' : '—');
+                  const server = lastHistory
+                    ? normalizeServerDisplayName(lastHistory.serverName, lastHistory.audioMode)
+                    : '—';
 
                   return (
                     <tr
@@ -760,12 +971,12 @@ export const AdminWatchAnalyticsSection: React.FC<AdminWatchAnalyticsSectionProp
                               </div>
                             )}
                           </div>
-                          <div className="min-w-0 max-w-[150px] sm:max-w-[200px]">
+                          <div className="min-w-0 max-w-[160px] sm:max-w-[210px]">
                             <span className="font-bold text-white truncate block">
                               {user.displayName}
                             </span>
                             <span className="text-[11px] text-slate-400 truncate block">
-                              {user.email || 'No email registered'}
+                              {user.email || 'Email not synced'}
                             </span>
                           </div>
                         </div>
@@ -773,7 +984,7 @@ export const AdminWatchAnalyticsSection: React.FC<AdminWatchAnalyticsSectionProp
 
                       <td className="py-3 px-4">
                         {lastHistory ? (
-                          <div className="min-w-0 max-w-[180px] sm:max-w-[240px]">
+                          <div className="min-w-0 max-w-[190px] sm:max-w-[250px]">
                             <span className="font-semibold text-slate-200 truncate block">
                               {lastHistory.title}
                             </span>
@@ -794,15 +1005,27 @@ export const AdminWatchAnalyticsSection: React.FC<AdminWatchAnalyticsSectionProp
                       </td>
 
                       <td className="py-3 px-4 text-slate-300 tabular-nums">
-                        {lastHistory ? formatTimestamp(lastHistory.updatedAt) : 'Never'}
+                        {lastHistory
+                          ? formatTimestamp(lastHistory.updatedAt)
+                          : user.lastActiveAt
+                            ? formatTimestamp(user.lastActiveAt)
+                            : 'Never'}
                       </td>
 
                       <td className="py-3 px-4 font-bold text-white tabular-nums">
-                        {formatDuration(user.totalWatchSeconds)}
+                        <span>{formatDuration(user.totalWatchSeconds)}</span>
+                        {user.todayWatchSeconds > 0 && (
+                          <span className="block text-[10px] font-normal text-emerald-300">
+                            Today: {formatDuration(user.todayWatchSeconds)}
+                          </span>
+                        )}
                       </td>
 
                       <td className="py-3 px-4 font-semibold text-slate-200 tabular-nums">
                         {user.totalEpisodesCompleted}
+                        <span className="block text-[10px] font-normal text-slate-400">
+                          {user.history.length} logs
+                        </span>
                       </td>
 
                       <td className="py-3 px-4 text-right">
@@ -883,6 +1106,7 @@ export const AdminWatchAnalyticsSection: React.FC<AdminWatchAnalyticsSectionProp
             <button
               type="button"
               onClick={() => setSelectedUser(null)}
+              aria-label="Close details"
               className="kuro-btn-glass absolute right-4 top-4 flex h-9 w-9 items-center justify-center rounded-xl text-slate-400 hover:text-white"
             >
               <X className="h-4 w-4" />
@@ -916,30 +1140,42 @@ export const AdminWatchAnalyticsSection: React.FC<AdminWatchAnalyticsSectionProp
               </div>
             </div>
 
-            {/* 4 User Stats Cards */}
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            {/* Watch Time Breakdown: Daily / Weekly / Monthly / Lifetime + Episodes & Streaks */}
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5">
               <div className="rounded-2xl border border-white/[0.06] bg-white/[0.02] p-3 text-center">
-                <span className="text-[11px] text-slate-400 block">Total Watch Time</span>
-                <span className="text-lg font-black text-white tabular-nums block mt-1">
+                <span className="text-[11px] text-slate-400 block">Today</span>
+                <span className="text-base font-black text-emerald-300 tabular-nums block mt-1">
+                  {formatDuration(selectedUser.todayWatchSeconds)}
+                </span>
+              </div>
+              <div className="rounded-2xl border border-white/[0.06] bg-white/[0.02] p-3 text-center">
+                <span className="text-[11px] text-slate-400 block">Weekly (7d)</span>
+                <span className="text-base font-black text-cyan-300 tabular-nums block mt-1">
+                  {formatDuration(selectedUser.weeklyWatchSeconds)}
+                </span>
+              </div>
+              <div className="rounded-2xl border border-white/[0.06] bg-white/[0.02] p-3 text-center">
+                <span className="text-[11px] text-slate-400 block">Monthly (30d)</span>
+                <span className="text-base font-black text-fuchsia-300 tabular-nums block mt-1">
+                  {formatDuration(selectedUser.monthlyWatchSeconds)}
+                </span>
+              </div>
+              <div className="rounded-2xl border border-white/[0.06] bg-white/[0.02] p-3 text-center">
+                <span className="text-[11px] text-slate-400 block">Lifetime</span>
+                <span className="text-base font-black text-white tabular-nums block mt-1">
                   {formatDuration(selectedUser.totalWatchSeconds)}
                 </span>
               </div>
               <div className="rounded-2xl border border-white/[0.06] bg-white/[0.02] p-3 text-center">
-                <span className="text-[11px] text-slate-400 block">Episodes Watched</span>
-                <span className="text-lg font-black text-violet-300 tabular-nums block mt-1">
+                <span className="text-[11px] text-slate-400 block">Episodes</span>
+                <span className="text-base font-black text-violet-300 tabular-nums block mt-1">
                   {selectedUser.totalEpisodesCompleted}
                 </span>
               </div>
               <div className="rounded-2xl border border-white/[0.06] bg-white/[0.02] p-3 text-center">
-                <span className="text-[11px] text-slate-400 block">Current Streak</span>
-                <span className="text-lg font-black text-amber-400 tabular-nums block mt-1">
-                  🔥 {selectedUser.streakCurrent} days
-                </span>
-              </div>
-              <div className="rounded-2xl border border-white/[0.06] bg-white/[0.02] p-3 text-center">
-                <span className="text-[11px] text-slate-400 block">Longest Streak</span>
-                <span className="text-lg font-black text-fuchsia-400 tabular-nums block mt-1">
-                  👑 {selectedUser.streakLongest} days
+                <span className="text-[11px] text-slate-400 block">Streak / Best</span>
+                <span className="text-base font-black text-amber-400 tabular-nums block mt-1">
+                  {selectedUser.streakCurrent}d / {selectedUser.streakLongest}d
                 </span>
               </div>
             </div>
@@ -948,7 +1184,10 @@ export const AdminWatchAnalyticsSection: React.FC<AdminWatchAnalyticsSectionProp
             {selectedUser.dailyActivity && Object.keys(selectedUser.dailyActivity).length > 0 && (
               <div className="rounded-2xl border border-white/[0.08] bg-[#070912] p-4 space-y-2.5">
                 <div className="flex items-center justify-between text-xs">
-                  <span className="font-bold text-slate-300">Daily Watch Activity Log</span>
+                  <span className="inline-flex items-center gap-1.5 font-bold text-slate-300">
+                    <Calendar className="h-3.5 w-3.5 text-violet-400" />
+                    <span>Daily Watch Time Log</span>
+                  </span>
                   <span className="text-slate-500">
                     {Object.keys(selectedUser.dailyActivity).length} active days recorded
                   </span>
@@ -972,7 +1211,7 @@ export const AdminWatchAnalyticsSection: React.FC<AdminWatchAnalyticsSectionProp
             <div className="space-y-3">
               <div className="flex items-center justify-between">
                 <h4 className="text-sm font-bold text-white">
-                  Chronological Watch History ({selectedUser.history.length})
+                  Chronological Watch History &amp; Episode Durations ({selectedUser.history.length})
                 </h4>
               </div>
 
@@ -983,14 +1222,15 @@ export const AdminWatchAnalyticsSection: React.FC<AdminWatchAnalyticsSectionProp
               ) : (
                 <div className="space-y-2.5 max-h-80 overflow-y-auto pr-1">
                   {selectedUser.history.map((item, idx) => {
-                    const server = item.serverName || (item.audioMode === 'hindi' ? 'AnimeWorld India' : 'KuroStream Global');
+                    const server = normalizeServerDisplayName(item.serverName, item.audioMode);
                     const progressSec = item.progressSeconds || 0;
                     const durationSec = item.durationSeconds || 0;
+                    const watchedSec = item.watchedSeconds || progressSec || 0;
                     const pct = durationSec > 0 ? Math.min(100, Math.round((progressSec / durationSec) * 100)) : 0;
 
                     return (
                       <div
-                        key={`${item.animeId}-${item.episodeId}-${idx}`}
+                        key={`${item.id || item.animeId}-${item.episodeId}-${idx}`}
                         className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-2xl border border-white/[0.06] bg-[#090b14] p-3 hover:border-violet-500/30 transition-all"
                       >
                         <div className="flex items-center gap-3 min-w-0">
@@ -1011,8 +1251,8 @@ export const AdminWatchAnalyticsSection: React.FC<AdminWatchAnalyticsSectionProp
                               Episode {item.episodeNumber}
                               {item.episodeTitle ? ` · ${item.episodeTitle}` : ''}
                             </span>
-                            <div className="flex flex-wrap items-center gap-2 pt-0.5">
-                              <span className="rounded bg-white/[0.05] px-1.5 py-0.5 text-[10px] text-slate-400">
+                            <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+                              <span className="rounded bg-white/[0.05] px-1.5 py-0.5 text-[10px] text-slate-300">
                                 {server}
                               </span>
                               {item.audioMode && (
@@ -1020,17 +1260,26 @@ export const AdminWatchAnalyticsSection: React.FC<AdminWatchAnalyticsSectionProp
                                   {item.audioMode}
                                 </span>
                               )}
+                              {item.completed && (
+                                <span className="inline-flex items-center gap-0.5 rounded bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-300">
+                                  <CheckCircle2 className="h-2.5 w-2.5" />
+                                  Completed
+                                </span>
+                              )}
                             </div>
                           </div>
                         </div>
 
                         <div className="sm:text-right shrink-0 space-y-1">
+                          <span className="text-[11px] font-bold text-emerald-300 block tabular-nums">
+                            Watched: {formatDuration(watchedSec)}
+                          </span>
                           <span className="text-[11px] text-slate-400 block tabular-nums">
                             {formatTimestamp(item.updatedAt)}
                           </span>
                           {durationSec > 0 && (
-                            <span className="text-[11px] text-slate-300 block font-medium tabular-nums">
-                              {formatClock(progressSec)} / {formatClock(durationSec)} ({pct}%)
+                            <span className="text-[10px] text-slate-400 block tabular-nums">
+                              Pos: {formatClock(progressSec)} / {formatClock(durationSec)} ({pct}%)
                             </span>
                           )}
                         </div>

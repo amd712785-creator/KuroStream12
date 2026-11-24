@@ -7,7 +7,9 @@ import { Footer } from '@/src/components/Footer';
 import { MobileBottomNav } from '@/src/components/MobileBottomNav';
 import { Navbar } from '@/src/components/Navbar';
 import { StartupSplashIntro } from '@/src/components/StartupSplashIntro';
+import { LevelUpModal } from '@/src/components/UserLevelXpSection';
 import { AuthProvider, useAuth } from '@/src/context/AuthContext';
+import { NotificationProvider } from '@/src/context/NotificationContext';
 import { ServerProvider } from '@/src/context/ServerContext';
 import { HomePage } from '@/src/pages/HomePage';
 import {
@@ -45,6 +47,12 @@ const ServerCatalogPage = lazy(() =>
 );
 const SettingsPage = lazy(() =>
   import('@/src/pages/SettingsPage').then((m) => ({ default: m.SettingsPage }))
+);
+const NotificationsPage = lazy(() =>
+  import('@/src/pages/NotificationsPage').then((m) => ({ default: m.NotificationsPage }))
+);
+const CommunityPage = lazy(() =>
+  import('@/src/pages/CommunityPage').then((m) => ({ default: m.CommunityPage }))
 );
 const WatchPage = lazy(() =>
   import('@/src/pages/WatchPage').then((m) => ({ default: m.WatchPage }))
@@ -171,6 +179,8 @@ function AnimatedRoutes() {
             <Route path="/animeworld-india/watch/:kind/:contentId" element={<AnimeWorldWatchPage />} />
             <Route path="/profile" element={<ProfilePage />} />
             <Route path="/profile/edit" element={<ProfileEditPage />} />
+            <Route path="/community" element={<CommunityPage />} />
+            <Route path="/notifications" element={<NotificationsPage />} />
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
@@ -229,6 +239,7 @@ function AppShell() {
       <MobileBottomNav />
       <AuthModal />
       <AppUpdateModal />
+      <LevelUpModal />
       <Suspense fallback={null}>
         <PopupBannerModal />
       </Suspense>
@@ -242,10 +253,12 @@ export default function App() {
     <ErrorBoundary fallbackTitle="KuroStream encountered an unexpected error">
       <BrowserRouter>
         <AuthProvider>
-          <ServerProvider>
-            <PresenceTracker />
-            <AppShell />
-          </ServerProvider>
+          <NotificationProvider>
+            <ServerProvider>
+              <PresenceTracker />
+              <AppShell />
+            </ServerProvider>
+          </NotificationProvider>
         </AuthProvider>
       </BrowserRouter>
     </ErrorBoundary>

@@ -34,6 +34,9 @@ import { AnimeImage } from '@/src/components/AnimeImage';
 import { OptimizedBannerImage } from '@/src/components/OptimizedBannerImage';
 import { StreakCalendarSection } from '@/src/components/StreakCalendarSection';
 import { handleTelegramSupportClick } from '@/src/components/TelegramSupportButton';
+import { DailyCheckinSection } from '@/src/components/DailyCheckinSection';
+import { ProfileFramesSection } from '@/src/components/ProfileFramesSection';
+import { UserLevelBadge, UserLevelXpSection } from '@/src/components/UserLevelXpSection';
 import { useAuth } from '@/src/context/AuthContext';
 
 const AdminDashboardSection = lazy(() =>
@@ -91,6 +94,8 @@ import {
 
 type ProfileSection =
   | 'overview'
+  | 'checkin'
+  | 'frames'
   | 'streak'
   | 'achievements'
   | 'continue'
@@ -245,10 +250,13 @@ export const ProfilePage: React.FC = () => {
               </span>
             </button>
 
-            <div className="min-w-0 space-y-1">
-              <h1 className="text-xl sm:text-2xl font-black text-white truncate">
-                {preferences.displayName}
-              </h1>
+            <div className="min-w-0 space-y-1.5">
+              <div className="flex flex-wrap items-center gap-2.5">
+                <h1 className="text-xl sm:text-2xl font-black text-white truncate">
+                  {preferences.displayName}
+                </h1>
+                <UserLevelBadge />
+              </div>
               <p className="text-xs sm:text-sm text-slate-400 truncate">
                 {user ? user.email : 'Guest Session (Sign in to sync across devices)'}
               </p>
@@ -342,6 +350,9 @@ export const ProfilePage: React.FC = () => {
       {/* Overview Dashboard */}
       {activeTab === 'overview' && (
         <div className="space-y-8">
+          {/* USER LEVEL & XP SHOWCASE */}
+          <UserLevelXpSection />
+
           {/* MY BADGES SHOWCASE */}
           <section className="kuro-glass relative overflow-hidden rounded-3xl border border-violet-500/30 p-5 sm:p-6 shadow-[0_0_40px_-14px_rgba(139,92,246,0.35)]">
             <div
@@ -521,6 +532,30 @@ export const ProfilePage: React.FC = () => {
             </div>
           </section>
 
+          {/* DAILY REWARDS & PROFILE FRAMES */}
+          <section className="space-y-4">
+            <h2 className="text-xs font-bold uppercase tracking-wider text-purple-400 px-1">
+              Daily Rewards &amp; Customization
+            </h2>
+            <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2">
+              <ProfileCard
+                icon={Sparkles}
+                title="Daily Check-in"
+                count="7-Day Streak"
+                description="Claim daily XP, coin bonuses and check-in rewards"
+                onClick={() => selectTab('checkin')}
+                isAmber
+              />
+              <ProfileCard
+                icon={Award}
+                title="Profile Frames"
+                count="8 Styles"
+                description="Equip neon, gold, demon, and galaxy avatar glow rings"
+                onClick={() => selectTab('frames')}
+              />
+            </div>
+          </section>
+
           {/* APP & STREAMING SETTINGS */}
           <section className="space-y-4">
             <h2 className="text-xs font-bold uppercase tracking-wider text-violet-400 px-1">
@@ -604,6 +639,20 @@ export const ProfilePage: React.FC = () => {
 
       {/* SUB-SECTION VIEWS */}
       {activeTab === 'streak' && <StreakCalendarSection stats={watchStats} isAdmin={isAdmin} />}
+      {activeTab === 'checkin' && (
+        <DailyCheckinSection userData={watchStats as unknown as Record<string, unknown>} onCheckinSuccess={() => {}} />
+      )}
+      {activeTab === 'frames' && (
+        <ProfileFramesSection
+          currentFrame={preferences.equippedFrame || 'none'}
+          userXp={watchStats.totalWatchSeconds || 0}
+          userLevel={1}
+          totalEpisodes={watchStats.totalEpisodesCompleted || 0}
+          streakCurrent={getEffectiveCurrentStreak(watchStats)}
+          watchedAnimeCount={watchStats.watchedAnimeIds?.length || 0}
+          onFrameChanged={(f) => updatePreferences({ equippedFrame: f })}
+        />
+      )}
       {activeTab === 'achievements' && (
         <AchievementsSection
           stats={watchStats}

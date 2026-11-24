@@ -324,9 +324,12 @@ export async function getAnimeDetails(id: number): Promise<AnimeDetail> {
 export interface SearchFilters {
   query?: string;
   genre?: string;
+  genres?: string[];
   format?: string;
   status?: string;
   sort?: string;
+  seasonYear?: number;
+  minimumScore?: number;
   idIn?: number[];
   page?: number;
   perPage?: number;
@@ -345,9 +348,12 @@ export async function searchAnime(filters: SearchFilters): Promise<SearchPageRes
     query SearchAnime(
       $search: String,
       $genre: String,
+      $genreIn: [String],
       $format: MediaFormat,
       $status: MediaStatus,
       $sort: [MediaSort],
+      $seasonYear: Int,
+      $minimumScore: Int,
       $idIn: [Int],
       $page: Int,
       $perPage: Int
@@ -363,9 +369,12 @@ export async function searchAnime(filters: SearchFilters): Promise<SearchPageRes
           isAdult: false,
           search: $search,
           genre: $genre,
+          genre_in: $genreIn,
           format: $format,
           status: $status,
           sort: $sort,
+          seasonYear: $seasonYear,
+          averageScore_greater: $minimumScore,
           id_in: $idIn
         ) {
           ${SUMMARY_FIELDS}
@@ -382,8 +391,11 @@ export async function searchAnime(filters: SearchFilters): Promise<SearchPageRes
 
   if (filters.query && filters.query.trim()) variables.search = filters.query.trim();
   if (filters.genre && filters.genre !== 'ALL') variables.genre = filters.genre;
+  if (filters.genres && filters.genres.length > 0) variables.genreIn = filters.genres;
   if (filters.format && filters.format !== 'ALL') variables.format = filters.format;
   if (filters.status && filters.status !== 'ALL') variables.status = filters.status;
+  if (filters.seasonYear) variables.seasonYear = filters.seasonYear;
+  if (filters.minimumScore) variables.minimumScore = filters.minimumScore;
   if (filters.idIn && filters.idIn.length > 0) variables.idIn = filters.idIn;
 
   const data = await gqlFetch<{
