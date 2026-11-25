@@ -367,13 +367,37 @@ export async function fetchGlobalWatchAnalytics(): Promise<GlobalWatchAnalytics>
             for (const [dateStr, secs] of Object.entries(days)) {
               if (typeof secs === 'number' && Number.isFinite(secs) && secs > 0) {
                 const rounded = Math.round(secs);
-                dailyActivity[dateStr] = rounded;
+                dailyActivity[dateStr] = Math.max(dailyActivity[dateStr] || 0, rounded);
               }
             }
           }
         });
 
+        // Also aggregate watchedSeconds per date from watchLogs so date-range charts stay accurate
+        // even if a watchActivity monthly document was not written yet
+        const logsDailyTotals: Record<string, number> = {};
+        for (const entry of combinedHistory) {
+          if (entry.watchedDate && /^\d{4}-\d{2}-\d{2}$/.test(entry.watchedDate) && (entry.watchedSeconds || 0) > 0) {
+            logsDailyTotals[entry.watchedDate] =
+              (logsDailyTotals[entry.watchedDate] || 0) + Math.round(entry.watchedSeconds || 0);
+          }
+        }
+        for (const [dateStr, logSecs] of Object.entries(logsDailyTotals)) {
+          if (logSecs > (dailyActivity[dateStr] || 0)) {
+            dailyActivity[dateStr] = logSecs;
+          }
+        }
+
         let userTodaySecs = dailyActivity[todayKey] || 0;
+        const docTodaySecs =
+          userData.todayWatchDate === todayKey && Number(userData.todayWatchSeconds || 0) > 0
+            ? Math.round(Number(userData.todayWatchSeconds))
+            : 0;
+        if (docTodaySecs > userTodaySecs) {
+          userTodaySecs = docTodaySecs;
+          dailyActivity[todayKey] = docTodaySecs;
+        }
+
         let userWeeklySecs = 0;
         let userMonthlySecs = 0;
         let sumDailySecs = 0;
@@ -386,11 +410,6 @@ export async function fetchGlobalWatchAnalytics(): Promise<GlobalWatchAnalytics>
           if (dateStr >= monthStartKey && dateStr <= todayKey) {
             userMonthlySecs += secs;
           }
-        }
-
-        // Fall back to userDoc's todayWatchSeconds if watchActivity hasn't been written yet
-        if (userTodaySecs === 0 && userData.todayWatchDate === todayKey && Number(userData.todayWatchSeconds || 0) > 0) {
-          userTodaySecs = Math.round(Number(userData.todayWatchSeconds));
         }
 
         const totalLogsWatchSecs = combinedHistory.reduce(

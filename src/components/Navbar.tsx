@@ -142,9 +142,9 @@ export const Navbar: React.FC = () => {
         >
           <div className="relative flex h-8 w-8 sm:h-9 sm:w-9 shrink-0 items-center justify-center rounded-2xl overflow-hidden border border-violet-400/40 bg-[#12101f] kuro-brand-logo group-hover:scale-105 transition-transform duration-300">
             <img
-              src="/assets/aistudio/file_00000000d64c8211a7a01231691e7256_8b4ae7b0.png"
+              src={ASSETS.officialLogo}
               alt="KuroStream Logo"
-              className="h-full w-full object-cover"
+              className="h-full w-full object-cover object-center"
             />
           </div>
           <span className="font-display text-lg max-[359px]:text-base sm:text-2xl font-black tracking-[-0.02em] leading-none kuro-brand-text">

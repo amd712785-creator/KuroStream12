@@ -22,7 +22,9 @@ import {
   Zap,
 } from 'lucide-react';
 import { BADGE_ARTWORK_MAP } from '@/src/assets/badgeArtwork';
+import { ASSETS } from '@/src/config/env';
 import { useAuth } from '@/src/context/AuthContext';
+import { formatFirestoreUiError } from '@/src/lib/firebase';
 import {
   ACHIEVEMENT_BADGES,
   formatWatchDuration,
@@ -96,7 +98,7 @@ function entryDateKey(entry: { watchedDate?: string; updatedAt: unknown }): stri
 }
 
 export const AdminAdvancedAnalyticsSection: React.FC = () => {
-  const { getIdToken } = useAuth();
+  const { user, authReady, isAdmin, getIdToken } = useAuth();
 
   const [preset, setPreset] = useState<DateRangePreset>('30d');
   const [customStart, setCustomStart] = useState<string>(() => offsetDateKey(13));
@@ -119,6 +121,10 @@ export const AdminAdvancedAnalyticsSection: React.FC = () => {
 
   const loadAll = useCallback(
     async (isManual = false) => {
+      if (!authReady || !isAdmin || !user || !user.emailVerified) {
+        setLoading(false);
+        return;
+      }
       if (isManual) setRefreshing(true);
       setError(null);
       try {
@@ -135,19 +141,26 @@ export const AdminAdvancedAnalyticsSection: React.FC = () => {
         if (watchRes.status === 'rejected') {
           throw watchRes.reason;
         }
+        if (regRes.status === 'rejected') {
+          throw regRes.reason;
+        }
       } catch (err) {
-        setError(err instanceof Error ? err.message : 'Unable to load advanced analytics.');
+        setError(formatFirestoreUiError(err, 'Unable to load advanced analytics.'));
       } finally {
         setLoading(false);
         setRefreshing(false);
       }
     },
-    [getIdToken]
+    [authReady, isAdmin, user, getIdToken]
   );
 
   useEffect(() => {
+    if (!authReady || !isAdmin || !user || !user.emailVerified) return;
     void loadAll();
-    const unsub = subscribeActiveSessions((sessions) => setActiveSessions(sessions));
+    const unsub = subscribeActiveSessions(
+      (sessions) => setActiveSessions(sessions),
+      (errMessage) => setError((prev) => prev || formatFirestoreUiError(errMessage, 'Live sessions error.'))
+    );
     const timer = window.setInterval(() => {
       if (document.visibilityState === 'visible') {
         void loadAll();
@@ -157,7 +170,7 @@ export const AdminAdvancedAnalyticsSection: React.FC = () => {
       unsub();
       window.clearInterval(timer);
     };
-  }, [loadAll]);
+  }, [authReady, isAdmin, user, loadAll]);
 
   const dateRange = useMemo(() => {
     const today = getTodayDateKey();
@@ -165,8 +178,9 @@ export const AdminAdvancedAnalyticsSection: React.FC = () => {
     if (preset === '7d') return { startKey: offsetDateKey(6), endKey: today, label: 'Last 7 Days' };
     if (preset === '30d') return { startKey: offsetDateKey(29), endKey: today, label: 'Last 30 Days' };
     if (preset === '90d') return { startKey: offsetDateKey(89), endKey: today, label: 'Last 90 Days' };
-    const safeStart = customStart && customStart <= today ? customStart : offsetDateKey(6);
-    const safeEnd = customEnd && customEnd >= safeStart ? customEnd : today;
+    const rawStart = customStart && customStart <= today ? customStart : offsetDateKey(6);
+    const rawEnd = customEnd && customEnd <= today ? customEnd : today;
+    const [safeStart, safeEnd] = rawStart <= rawEnd ? [rawStart, rawEnd] : [rawEnd, rawStart];
     return {
       startKey: safeStart,
       endKey: safeEnd,
@@ -247,7 +261,7 @@ export const AdminAdvancedAnalyticsSection: React.FC = () => {
       // Watch history entries filtered by range
       for (const h of u.history) {
         const eKey = entryDateKey(h);
-        if (eKey && (eKey < dateRange.startKey || eKey > dateRange.endKey)) {
+        if (!eKey || eKey < dateRange.startKey || eKey > dateRange.endKey) {
           continue;
         }
         rangeEpisodesCount += 1;
@@ -307,6 +321,18 @@ export const AdminAdvancedAnalyticsSection: React.FC = () => {
     const wauCount = Math.max(serverStats?.wau || 0, wauSet.size, regStats?.registeredLast7Days || 0);
     const mauCount = Math.max(serverStats?.mau || 0, mauSet.size, regStats?.totalActiveRegisteredUsers || 0);
 
+    let totalPlatformXp = 0;
+    let totalUserLevels = 0;
+    let xpUsersCount = 0;
+    for (const u of users) {
+      const userXp = u.xp || 0;
+      totalPlatformXp += userXp;
+      if (userXp > 0) xpUsersCount += 1;
+      totalUserLevels += computeLevelFromXp(userXp, false).level;
+    }
+    const averageLevel =
+      users.length > 0 ? Math.round((totalUserLevels / users.length) * 10) / 10 : 1;
+
     return {
       totalRegisteredUsers: Math.max(users.length, regStats?.totalRegisteredUsers || 0),
       totalActiveInRange: activeUsersSet.size,
@@ -321,6 +347,9 @@ export const AdminAdvancedAnalyticsSection: React.FC = () => {
       monthlyWatchSeconds: watchAnalytics?.monthlyWatchTimeSeconds || 0,
       rangeEpisodesCount,
       lifetimeEpisodesCount: watchAnalytics?.totalEpisodesWatched || 0,
+      totalPlatformXp,
+      averageLevel,
+      xpUsersCount,
       mostPopularAnime: topAnime[0] || watchAnalytics?.mostWatchedAnime[0] || null,
       mostUsedServer: serverUsage[0] || watchAnalytics?.popularServers[0] || null,
       dailySeries,
@@ -693,10 +722,16 @@ export const AdminAdvancedAnalyticsSection: React.FC = () => {
       <section className="kuro-glass rounded-3xl border border-white/[0.08] p-5 space-y-4">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
-            <h3 className="text-base font-bold text-white">
-              Registered User Directory ({filteredUsers.length})
-            </h3>
-            <p className="text-xs text-slate-400">
+            <div className="flex flex-wrap items-center gap-2">
+              <h3 className="text-base font-bold text-white">
+                Registered User Directory ({filteredUsers.length})
+              </h3>
+              <span className="inline-flex items-center gap-1 rounded-xl border border-violet-500/30 bg-violet-500/10 px-2.5 py-0.5 text-[11px] font-bold text-violet-300 tabular-nums">
+                <Zap className="h-3 w-3" />
+                {computed.totalPlatformXp.toLocaleString()} Total XP · Avg Lv {computed.averageLevel} ({computed.xpUsersCount} ranked)
+              </span>
+            </div>
+            <p className="mt-0.5 text-xs text-slate-400">
               Click any user row to inspect watch history, daily/weekly/monthly stats, XP level, and earned badges
             </p>
           </div>
@@ -764,9 +799,9 @@ export const AdminAdvancedAnalyticsSection: React.FC = () => {
                       <td className="py-3 pr-3">
                         <div className="flex items-center gap-2.5">
                           <img
-                            src={u.photoURL || '/assets/aistudio/file_00000000d64c8211a7a01231691e7256_8b4ae7b0.png'}
+                            src={u.photoURL || ASSETS.officialLogo}
                             alt={u.displayName}
-                            className="h-8 w-8 rounded-full object-cover border border-white/15 shrink-0"
+                            className="h-8 w-8 rounded-full object-cover object-center border border-white/15 shrink-0"
                           />
                           <div className="min-w-0">
                             <p className="truncate max-w-[160px] font-semibold text-white">
@@ -1088,9 +1123,9 @@ const UserDetailsModal: React.FC<{
         <div className="flex items-start justify-between gap-3 border-b border-white/[0.08] pb-4">
           <div className="flex items-center gap-3.5 min-w-0">
             <img
-              src={user.photoURL || '/assets/aistudio/file_00000000d64c8211a7a01231691e7256_8b4ae7b0.png'}
+              src={user.photoURL || ASSETS.officialLogo}
               alt={user.displayName}
-              className="h-14 w-14 rounded-2xl object-cover border border-violet-400/40 shrink-0"
+              className="h-14 w-14 rounded-2xl object-cover object-center border border-violet-400/40 shrink-0"
             />
             <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-2">

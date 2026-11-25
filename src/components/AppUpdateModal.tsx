@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { AlertCircle, ArrowDown, CheckCircle2, Download, ExternalLink, Loader2, RefreshCw, ShieldCheck, Sparkles, X } from 'lucide-react';
+import { ASSETS } from '@/src/config/env';
 import { subscribeAppUpdateConfig, type AppUpdateConfig, CURRENT_CLIENT_VERSION_CODE } from '@/src/services/updateService';
 
 interface AppUpdateModalProps {
@@ -135,9 +136,9 @@ export const AppUpdateModal: React.FC<AppUpdateModalProps> = ({
               <Sparkles className="h-3.5 w-3.5" />
             </span>
             <img
-              src="/assets/aistudio/file_00000000d64c8211a7a01231691e7256_8b4ae7b0.png"
+              src={ASSETS.officialLogo}
               alt="KuroStream Logo"
-              className="h-12 w-12 rounded-2xl object-cover"
+              className="h-14 w-14 rounded-2xl object-cover object-center"
             />
           </div>
 

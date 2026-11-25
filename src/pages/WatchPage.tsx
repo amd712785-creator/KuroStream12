@@ -10,6 +10,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Download,
+  Globe,
   Keyboard,
   Languages,
   Loader2,
@@ -135,6 +136,8 @@ export const WatchPage: React.FC = () => {
   const [audioMode, setAudioMode] = useState<'sub' | 'dub' | 'hindi'>(preferences.preferredAudio);
   const [autoNext, setAutoNext] = useState<boolean>(preferences.autoNext);
 
+  // Keep KuroStream Global (vidstreaming) prioritized on WatchPage for SUB/DUB playback;
+  // AnimeWorld India is used only when user prefers Hindi or activates fallback playback.
   useEffect(() => {
     if (audioMode === 'hindi') {
       setServers(HINDI_FALLBACK_SERVERS);
@@ -144,11 +147,19 @@ export const WatchPage: React.FC = () => {
         const filtered = prev.filter((s) => !s.name.toLowerCase().includes('animeworld'));
         return filtered.length > 0 ? filtered : SUB_DUB_FALLBACK_SERVERS;
       });
-      if (selectedServer.toLowerCase().includes('animeworld')) {
-        setSelectedServer('vidstreaming');
-      }
+      setSelectedServer((prev) =>
+        prev.toLowerCase().includes('animeworld') ? 'vidstreaming' : prev
+      );
     }
   }, [audioMode]);
+
+  useEffect(() => {
+    if (audioMode !== 'hindi') {
+      setSelectedServer((prev) =>
+        prev.toLowerCase().includes('animeworld') ? 'vidstreaming' : prev
+      );
+    }
+  }, [animeId]);
 
   const [streamData, setStreamData] = useState<ParsedStreamResult | null>(null);
   const [streamError, setStreamError] = useState<StreamFetchError | null>(null);
@@ -305,15 +316,18 @@ export const WatchPage: React.FC = () => {
     const epIdToUse = effectiveEpisodeId || decodedEpisodeId;
     if (!epIdToUse || epIdToUse === 'EPISODE_ID') return;
 
+    const isAnimeWorldFallback =
+      audioMode !== 'hindi' && selectedServer.toLowerCase() === 'animeworld-india';
+    const useAnimeWorld = audioMode === 'hindi' || isAnimeWorldFallback;
+
     // Allow SUB playback to start immediately using URL episodeId while anime metadata/episodes load in parallel;
-    // wait for metadata only for DUB (needs dubId) or Hindi (needs anime titles for AnimeWorld search).
-    const requiresMetadataBeforeStream = audioMode !== 'sub';
+    // wait for metadata only for DUB (needs dubId) or AnimeWorld India (needs anime titles for matching).
+    const requiresMetadataBeforeStream = audioMode !== 'sub' || useAnimeWorld;
     if (requiresMetadataBeforeStream && !hasAnimeMeta && loadingEpisodes && !animeLoadError) {
       setLoadingStream(true);
       return;
     }
 
-    const useAnimeWorld = audioMode === 'hindi';
     if (useAnimeWorld && !hasAnimeMeta) {
       if (animeLoadError) {
         setStreamData(null);
@@ -339,12 +353,14 @@ export const WatchPage: React.FC = () => {
         format: animeFormat,
         seasonYear: animeSeasonYear,
         episodeNumber: resolvedEpNumber,
-        preferHindi: true,
-        preferLang: 'hindi',
+        preferHindi: audioMode === 'hindi',
+        preferLang: audioMode,
       });
 
       if (streamRequestIdRef.current !== requestId) return;
-      setServers(HINDI_FALLBACK_SERVERS);
+      if (audioMode === 'hindi') {
+        setServers(HINDI_FALLBACK_SERVERS);
+      }
 
       if (awRes.data) {
         setStreamData(awRes.data);
@@ -355,7 +371,7 @@ export const WatchPage: React.FC = () => {
           awRes.error || {
             statusCode: 404,
             endpointUrl: resolveApiUrl('/api/anime-world-india/v1/stream.php'),
-            message: 'AnimeWorld India returned no playable source for this episode.',
+            message: `Episode ${resolvedEpNumber} is currently unavailable on AnimeWorld India.`,
           }
         );
       }
@@ -423,7 +439,9 @@ export const WatchPage: React.FC = () => {
     const epIdToUse = effectiveEpisodeId || decodedEpisodeId;
     if (!epIdToUse || epIdToUse === 'EPISODE_ID') return false;
 
-    if (audioMode === 'hindi') {
+    const isAnimeWorldFallback =
+      audioMode !== 'hindi' && selectedServer.toLowerCase() === 'animeworld-india';
+    if (audioMode === 'hindi' || isAnimeWorldFallback) {
       if (!hasAnimeMeta) return false;
       const awRes = await resolveAnimeWorldStreamForAnime({
         title: animeTitle,
@@ -431,8 +449,8 @@ export const WatchPage: React.FC = () => {
         format: animeFormat,
         seasonYear: animeSeasonYear,
         episodeNumber: resolvedEpNumber,
-        preferHindi: true,
-        preferLang: 'hindi',
+        preferHindi: audioMode === 'hindi',
+        preferLang: audioMode,
       });
       if (awRes.data) {
         setStreamData(awRes.data);
@@ -716,6 +734,20 @@ export const WatchPage: React.FC = () => {
     [selectedServer, updatePreferences]
   );
 
+  const isUsingAnimeWorldFallback =
+    audioMode !== 'hindi' && isAnimeWorldSelected;
+  const canTryHindiOnAnimeWorld =
+    isUsingAnimeWorldFallback &&
+    Boolean(streamError?.message?.toLowerCase().includes('hindi'));
+
+  const handleSwitchToAnimeWorldFallback = useCallback(() => {
+    setSelectedServer('animeworld-india');
+  }, []);
+
+  const handleSwitchBackToGlobal = useCallback(() => {
+    setSelectedServer('vidstreaming');
+  }, []);
+
   const selectedTrackStatus = audioAvailability ? audioAvailability[audioMode] : undefined;
 
   return (
@@ -810,7 +842,47 @@ export const WatchPage: React.FC = () => {
             onDownload={handleDownloadCurrentEpisode}
             downloadStatusLabel={downloadButtonLabel}
             isDownloading={currentDownload?.status === 'downloading'}
+            canSwitchToAnimeWorld={audioMode !== 'hindi' && !isAnimeWorldSelected}
+            onSwitchToAnimeWorld={handleSwitchToAnimeWorldFallback}
+            isAnimeWorldFallback={isUsingAnimeWorldFallback}
+            onSwitchBackToGlobal={handleSwitchBackToGlobal}
+            canTryHindiOnAnimeWorld={canTryHindiOnAnimeWorld}
+            onTryHindiOnAnimeWorld={() => handleSelectAudioMode('hindi')}
           />
+
+          {isUsingAnimeWorldFallback && (
+            <div
+              role="status"
+              className="kuro-glass flex flex-col gap-2.5 rounded-2xl border border-amber-400/40 bg-amber-500/10 px-4 py-3 text-xs text-amber-100 sm:flex-row sm:items-center sm:justify-between"
+            >
+              <div className="flex items-start sm:items-center gap-2.5 min-w-0">
+                <Server className="h-4 w-4 shrink-0 text-amber-300 mt-0.5 sm:mt-0" />
+                <p className="leading-relaxed">
+                  {loadingStream ? (
+                    <span>
+                      Switching playback to <strong className="text-white">AnimeWorld India (Fallback Server)</strong> for Episode {epNumber}...
+                    </span>
+                  ) : streamError ? (
+                    <span>
+                      <strong className="text-white">AnimeWorld India Fallback:</strong> Episode {epNumber} could not be loaded in {audioMode.toUpperCase()} mode on AnimeWorld India.
+                    </span>
+                  ) : (
+                    <span>
+                      <strong className="text-white">Fallback Server Active:</strong> Streaming Episode {epNumber} via <strong className="text-amber-200">AnimeWorld India</strong>. KuroStream Global remains your primary server.
+                    </span>
+                  )}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={handleSwitchBackToGlobal}
+                className="kuro-btn-primary inline-flex min-h-[38px] shrink-0 items-center justify-center gap-1.5 rounded-xl px-3.5 py-1.5 text-xs font-semibold whitespace-nowrap"
+              >
+                <Globe className="h-3.5 w-3.5" />
+                <span>Back to KuroStream Global</span>
+              </button>
+            </div>
+          )}
 
           {/* Facebook Community Section Banner */}
           <div className="kuro-fb-banner relative overflow-hidden rounded-2xl px-4 py-3.5 sm:px-5 sm:py-4">
@@ -1100,7 +1172,11 @@ export const WatchPage: React.FC = () => {
               <div className="flex flex-wrap items-center gap-2">
                 <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-300 mr-1">
                   <Server className="h-3.5 w-3.5 text-violet-400" />
-                  <span>Servers:</span>
+                  <span>
+                    {audioMode === 'hindi'
+                      ? 'Servers (AnimeWorld India):'
+                      : 'KuroStream Global (Primary Server · Recommended):'}
+                  </span>
                 </span>
                 {(audioMode === 'hindi'
                   ? HINDI_FALLBACK_SERVERS
@@ -1124,6 +1200,21 @@ export const WatchPage: React.FC = () => {
                     </button>
                   );
                 })}
+
+                {audioMode !== 'hindi' && (
+                  <button
+                    type="button"
+                    onClick={handleSwitchToAnimeWorldFallback}
+                    className={`inline-flex min-h-[38px] items-center gap-1.5 rounded-xl px-3.5 py-1.5 text-xs font-semibold whitespace-nowrap ${
+                      isAnimeWorldSelected
+                        ? 'border border-amber-400/55 bg-amber-500/25 text-amber-100 shadow-[0_4px_14px_-3px_rgba(245,158,11,0.35)]'
+                        : 'kuro-btn-glass border-amber-400/25 text-amber-200 hover:border-amber-400/50'
+                    }`}
+                  >
+                    <Server className="h-3.5 w-3.5 text-amber-300" />
+                    <span>AnimeWorld India (Fallback)</span>
+                  </button>
+                )}
 
                 {audioMode !== 'hindi' && extraAdaptedExtensions.map((ext) => {
                   const extServerKey = (ext.adapterServer || ext.name).toLowerCase();

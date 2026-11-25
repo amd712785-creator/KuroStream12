@@ -19,6 +19,8 @@ import {
   Users,
   X,
 } from 'lucide-react';
+import { useAuth } from '@/src/context/AuthContext';
+import { formatFirestoreUiError } from '@/src/lib/firebase';
 import {
   fetchGlobalWatchAnalytics,
   subscribeActiveSessions,
@@ -118,6 +120,7 @@ function formatRelativeTime(val: unknown): string {
 export const AdminWatchAnalyticsSection: React.FC<AdminWatchAnalyticsSectionProps> = ({
   onRefreshParent,
 }) => {
+  const { user, authReady, isAdmin } = useAuth();
   const [analytics, setAnalytics] = useState<GlobalWatchAnalytics | null>(null);
   const [activeSessions, setActiveSessions] = useState<ActiveSession[]>([]);
   const [activeSessionsError, setActiveSessionsError] = useState<string | null>(null);
@@ -141,6 +144,10 @@ export const AdminWatchAnalyticsSection: React.FC<AdminWatchAnalyticsSectionProp
   const [selectedUser, setSelectedUser] = useState<UserAnalyticsSummary | null>(null);
 
   const loadData = useCallback(async () => {
+    if (!authReady || !isAdmin || !user || !user.emailVerified) {
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     setError(null);
     try {
@@ -152,33 +159,35 @@ export const AdminWatchAnalyticsSection: React.FC<AdminWatchAnalyticsSectionProp
       );
       if (onRefreshParent) onRefreshParent();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load user watch analytics.');
+      setError(formatFirestoreUiError(err, 'Failed to load user watch analytics.'));
     } finally {
       setLoading(false);
     }
-  }, [onRefreshParent]);
+  }, [authReady, isAdmin, user, onRefreshParent]);
 
   useEffect(() => {
+    if (!authReady || !isAdmin || !user || !user.emailVerified) return;
     void loadData();
     const interval = window.setInterval(() => {
       void loadData();
     }, 60000);
     return () => window.clearInterval(interval);
-  }, [loadData]);
+  }, [authReady, isAdmin, user, loadData]);
 
   // Real-time listener for Currently Watching Active Sessions
   useEffect(() => {
+    if (!authReady || !isAdmin || !user || !user.emailVerified) return;
     const unsub = subscribeActiveSessions(
       (sessions) => {
         setActiveSessionsError(null);
         setActiveSessions(sessions);
       },
       (errMessage) => {
-        setActiveSessionsError(errMessage);
+        setActiveSessionsError(formatFirestoreUiError(errMessage, 'Unable to stream live sessions.'));
       }
     );
     return () => unsub();
-  }, []);
+  }, [authReady, isAdmin, user]);
 
   const serverOptions = useMemo(() => {
     const defaults = [
@@ -844,7 +853,7 @@ export const AdminWatchAnalyticsSection: React.FC<AdminWatchAnalyticsSectionProp
                 setSearchQuery(e.target.value);
                 setCurrentPage(1);
               }}
-              placeholder="Search name or email..."
+              placeholder="Search name, email, or UID..."
               className="w-full rounded-xl border border-white/[0.08] bg-[#070912] pl-9 pr-3 py-2 text-xs text-white placeholder-slate-500 focus:border-violet-500 focus:outline-none"
             />
           </div>
@@ -971,12 +980,18 @@ export const AdminWatchAnalyticsSection: React.FC<AdminWatchAnalyticsSectionProp
                               </div>
                             )}
                           </div>
-                          <div className="min-w-0 max-w-[160px] sm:max-w-[210px]">
+                          <div className="min-w-0 max-w-[170px] sm:max-w-[230px]">
                             <span className="font-bold text-white truncate block">
                               {user.displayName}
                             </span>
                             <span className="text-[11px] text-slate-400 truncate block">
                               {user.email || 'Email not synced'}
+                            </span>
+                            <span
+                              className="text-[10px] font-mono text-slate-500 truncate block"
+                              title={user.uid}
+                            >
+                              UID: {user.uid}
                             </span>
                           </div>
                         </div>
@@ -990,6 +1005,9 @@ export const AdminWatchAnalyticsSection: React.FC<AdminWatchAnalyticsSectionProp
                             </span>
                             <span className="text-[11px] text-violet-300 truncate block">
                               Episode {lastHistory.episodeNumber}
+                              {(lastHistory.watchedSeconds || lastHistory.progressSeconds) > 0
+                                ? ` · ${formatDuration(lastHistory.watchedSeconds || lastHistory.progressSeconds || 0)}`
+                                : ''}
                               {lastHistory.episodeTitle ? ` · ${lastHistory.episodeTitle}` : ''}
                             </span>
                           </div>

@@ -37,13 +37,13 @@ export const ServerSelector: React.FC<ServerSelectorProps> = ({
                   : 'border-amber-400/40 bg-amber-500/20 text-amber-200'
               }`}
             >
-              Active: {isGlobal ? 'KuroStream Global' : 'AnimeWorld India'}
+              Active: {isGlobal ? 'KuroStream Global (Primary)' : 'AnimeWorld India (Fallback)'}
             </span>
           </div>
           <p className="mt-0.5 text-xs text-slate-400">
             {isGlobal
-              ? 'Showing KuroStream Global (Default · AniList & Global multi-server)'
-              : 'Showing AnimeWorld India (Manual Selection · Hindi Dub & Multi-Audio)'}
+              ? 'Primary Server · Recommended · AniList & Global multi-server library'
+              : 'Secondary / Fallback Server · Hindi Dub & Multi-Audio library'}
           </p>
         </div>
 
@@ -52,29 +52,30 @@ export const ServerSelector: React.FC<ServerSelectorProps> = ({
             type="button"
             onClick={() => setActiveServer('kurostream-global')}
             aria-pressed={isGlobal}
-            className={`inline-flex min-h-[40px] items-center gap-2 rounded-xl px-3.5 py-2 text-xs font-semibold transition-all ${
+            className={`inline-flex min-h-[40px] items-center gap-2 rounded-xl px-3.5 py-2 text-xs font-semibold transition-all whitespace-nowrap ${
               isGlobal ? 'kuro-segment-active' : 'kuro-segment-idle'
             }`}
           >
-            <Globe className="h-3.5 w-3.5" />
+            <Globe className="h-3.5 w-3.5 shrink-0" />
             <span>KuroStream Global</span>
-            {isGlobal && (
-              <span className="rounded-md bg-black/25 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide">
-                Default
-              </span>
-            )}
+            <span className="rounded-md bg-black/25 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-violet-200">
+              Primary · Recommended
+            </span>
           </button>
 
           <button
             type="button"
             onClick={() => setActiveServer('animeworld-india')}
             aria-pressed={isAnimeWorld}
-            className={`inline-flex min-h-[40px] items-center gap-2 rounded-xl px-3.5 py-2 text-xs font-semibold transition-all ${
+            className={`inline-flex min-h-[40px] items-center gap-2 rounded-xl px-3.5 py-2 text-xs font-semibold transition-all whitespace-nowrap ${
               isAnimeWorld ? 'kuro-segment-amber' : 'kuro-segment-idle'
             }`}
           >
-            <Server className="h-3.5 w-3.5" />
+            <Server className="h-3.5 w-3.5 shrink-0" />
             <span>AnimeWorld India</span>
+            <span className="rounded-md bg-black/20 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-200/90">
+              Fallback
+            </span>
           </button>
         </div>
       </section>
@@ -101,13 +102,13 @@ export const ServerSelector: React.FC<ServerSelectorProps> = ({
             </span>
           </div>
           <p className="mt-0.5 text-xs sm:text-sm text-slate-400">
-            KuroStream Global is active by default — switch manually to AnimeWorld India anytime
+            KuroStream Global is your Primary Server (Recommended) — AnimeWorld India is available as a fallback server anytime
           </p>
         </div>
       </div>
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-        {/* Primary Default Server: KuroStream Global */}
+        {/* Primary Server: KuroStream Global */}
         <div
           className={`relative overflow-hidden rounded-3xl p-5 transition-all duration-200 ${
             isGlobal
@@ -129,8 +130,8 @@ export const ServerSelector: React.FC<ServerSelectorProps> = ({
                   <h3 className="text-base sm:text-lg font-bold text-white">
                     KuroStream Global
                   </h3>
-                  <span className="text-xs font-semibold text-violet-300">
-                    {isGlobal ? '· Active · Default Server' : '· Default Server'}
+                  <span className="rounded-lg border border-violet-400/40 bg-violet-500/20 px-2 py-0.5 text-[11px] font-bold text-violet-200 whitespace-nowrap">
+                    Primary Server · Recommended
                   </span>
                 </div>
                 <p className="text-xs sm:text-sm text-slate-300 leading-relaxed">
@@ -140,7 +141,7 @@ export const ServerSelector: React.FC<ServerSelectorProps> = ({
             </div>
 
             {isGlobal ? (
-              <span className="inline-flex min-h-[44px] shrink-0 items-center justify-center gap-1.5 rounded-2xl border border-violet-400/40 bg-violet-500/20 px-4 py-2 text-xs sm:text-sm font-semibold text-violet-200">
+              <span className="inline-flex min-h-[44px] shrink-0 items-center justify-center gap-1.5 rounded-2xl border border-violet-400/40 bg-violet-500/20 px-4 py-2 text-xs sm:text-sm font-semibold text-violet-200 whitespace-nowrap">
                 <CheckCircle2 className="h-4 w-4" />
                 <span>Selected</span>
               </span>
@@ -148,9 +149,9 @@ export const ServerSelector: React.FC<ServerSelectorProps> = ({
               <button
                 type="button"
                 onClick={() => setActiveServer('kurostream-global')}
-                className="kuro-btn-primary inline-flex min-h-[44px] shrink-0 items-center justify-center gap-1.5 rounded-2xl px-4 py-2 text-xs sm:text-sm font-semibold"
+                className="kuro-btn-primary inline-flex min-h-[44px] shrink-0 items-center justify-center gap-1.5 rounded-2xl px-4 py-2 text-xs sm:text-sm font-semibold whitespace-nowrap"
               >
-                <span>Switch to Default</span>
+                <span>Switch to Primary</span>
                 <ChevronRight className="h-4 w-4" />
               </button>
             )}
@@ -190,7 +191,7 @@ export const ServerSelector: React.FC<ServerSelectorProps> = ({
           )}
         </div>
 
-        {/* Manual Selection Server: AnimeWorld India */}
+        {/* Secondary / Fallback Server: AnimeWorld India */}
         <div
           className={`relative overflow-hidden rounded-3xl p-5 transition-all duration-200 ${
             isAnimeWorld
@@ -212,8 +213,8 @@ export const ServerSelector: React.FC<ServerSelectorProps> = ({
                   <h3 className="text-base sm:text-lg font-bold text-white">
                     AnimeWorld India
                   </h3>
-                  <span className="text-xs font-semibold text-amber-300">
-                    {isAnimeWorld ? '· Active Server' : '· Manual Selection'}
+                  <span className="rounded-lg border border-amber-400/30 bg-amber-500/15 px-2 py-0.5 text-[11px] font-semibold text-amber-300 whitespace-nowrap">
+                    {isAnimeWorld ? 'Active · Fallback Server' : 'Secondary / Fallback Server'}
                   </span>
                 </div>
                 <p className="text-xs sm:text-sm text-slate-300 leading-relaxed">
@@ -223,7 +224,7 @@ export const ServerSelector: React.FC<ServerSelectorProps> = ({
             </div>
 
             {isAnimeWorld ? (
-              <span className="inline-flex min-h-[44px] shrink-0 items-center justify-center gap-1.5 rounded-2xl border border-amber-400/40 bg-amber-500/20 px-4 py-2 text-xs sm:text-sm font-semibold text-amber-200">
+              <span className="inline-flex min-h-[44px] shrink-0 items-center justify-center gap-1.5 rounded-2xl border border-amber-400/40 bg-amber-500/20 px-4 py-2 text-xs sm:text-sm font-semibold text-amber-200 whitespace-nowrap">
                 <CheckCircle2 className="h-4 w-4" />
                 <span>Selected</span>
               </span>
@@ -231,7 +232,7 @@ export const ServerSelector: React.FC<ServerSelectorProps> = ({
               <button
                 type="button"
                 onClick={() => setActiveServer('animeworld-india')}
-                className="kuro-btn-glass inline-flex min-h-[44px] shrink-0 items-center justify-center gap-1.5 rounded-2xl px-4 py-2 text-xs sm:text-sm font-semibold text-amber-200 hover:border-amber-400/50"
+                className="kuro-btn-glass inline-flex min-h-[44px] shrink-0 items-center justify-center gap-1.5 rounded-2xl px-4 py-2 text-xs sm:text-sm font-semibold text-amber-200 hover:border-amber-400/50 whitespace-nowrap"
               >
                 <span>Select AnimeWorld</span>
                 <ChevronRight className="h-4 w-4" />

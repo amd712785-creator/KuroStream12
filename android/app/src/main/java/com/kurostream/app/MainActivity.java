@@ -131,7 +131,12 @@ public class MainActivity extends BridgeActivity implements ModifiedMainActivity
                         boolean isSocialExternal = host.equals("facebook.com")
                                 || host.endsWith(".facebook.com")
                                 || host.equals("fb.com")
-                                || host.endsWith(".fb.com");
+                                || host.endsWith(".fb.com")
+                                || host.equals("one.one.one.one")
+                                || host.equals("1.1.1.1")
+                                || host.equals("cloudflare.com")
+                                || host.endsWith(".cloudflare.com")
+                                || host.equals("play.google.com");
                         if (isExternalApkOrRelease || isSocialExternal) {
                             try {
                                 Intent intent = new Intent(Intent.ACTION_VIEW, url);

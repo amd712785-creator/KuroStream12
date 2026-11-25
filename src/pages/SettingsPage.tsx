@@ -11,6 +11,7 @@ import {
   Download,
   HardDrive,
   Heart,
+  Info,
   Loader2,
   Package,
   Pause,
@@ -38,11 +39,13 @@ import { ExtensionManager } from '@/src/components/ExtensionManager';
 import { OfflinePlayerModal } from '@/src/components/OfflinePlayerModal';
 import { ThemeSelector } from '@/src/components/ThemeSelector';
 import {
+  ASSETS,
   getDefaultStreamingApiBase,
   getStreamingApiBase,
   setStreamingApiOverride,
 } from '@/src/config/env';
 import { useAuth } from '@/src/context/AuthContext';
+import { CURRENT_CLIENT_VERSION_CODE } from '@/src/services/updateService';
 import {
   cancelOrDeleteDownload,
   getStoredDownloads,
@@ -61,6 +64,7 @@ type SettingsSectionId =
   | 'history'
   | 'general-settings'
   | 'sources'
+  | 'about'
   | 'admin';
 
 export const SettingsPage: React.FC = () => {
@@ -331,6 +335,42 @@ export const SettingsPage: React.FC = () => {
               </div>
             </section>
           )}
+
+          {/* ABOUT KUROSTREAM */}
+          <section className="space-y-3">
+            <h2 className="text-xs font-bold uppercase tracking-wider text-violet-400 px-1">
+              About
+            </h2>
+            <button
+              type="button"
+              onClick={() => setSection('about')}
+              className="kuro-glass group flex w-full items-center justify-between gap-4 rounded-3xl p-5 text-left transition-all duration-300 hover:border-violet-500/50 hover:bg-[#121526]/90 hover:shadow-[0_0_25px_-5px_rgba(147,51,234,0.3)]"
+            >
+              <div className="flex items-center gap-4 min-w-0">
+                <div className="relative h-14 w-14 shrink-0 overflow-hidden rounded-2xl border border-violet-400/45 bg-[#120e1e] shadow-[0_0_20px_rgba(168,85,247,0.42)] transition-transform duration-300 group-hover:scale-105">
+                  <img
+                    src={ASSETS.officialLogo}
+                    alt="KuroStream Official Logo"
+                    className="h-full w-full object-cover object-center"
+                  />
+                </div>
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h3 className="text-base font-bold text-white group-hover:text-violet-300 transition-colors">
+                      About KuroStream
+                    </h3>
+                    <span className="rounded-xl border border-violet-400/35 bg-violet-500/20 px-2.5 py-0.5 text-[11px] font-semibold text-violet-200 tabular-nums">
+                      v2.0.1 · Build {CURRENT_CLIENT_VERSION_CODE}
+                    </span>
+                  </div>
+                  <p className="mt-1 text-xs text-slate-400">
+                    Official app info, streaming architecture, servers &amp; release details
+                  </p>
+                </div>
+              </div>
+              <Info className="h-5 w-5 shrink-0 text-slate-400 group-hover:text-violet-300 transition-colors" />
+            </button>
+          </section>
         </div>
       )}
 
@@ -879,6 +919,67 @@ export const SettingsPage: React.FC = () => {
         <div className="space-y-6">
           <h2 className="text-lg font-bold text-white">Streaming Sources &amp; Extensions</h2>
           <ExtensionManager />
+        </div>
+      )}
+
+      {activeSection === 'about' && (
+        <div className="space-y-6">
+          <section className="kuro-glass relative overflow-hidden rounded-3xl p-6 sm:p-8">
+            <div
+              aria-hidden="true"
+              className="pointer-events-none absolute -right-16 -top-16 h-56 w-56 rounded-full bg-violet-600/20 blur-3xl"
+            />
+            <div className="relative z-10 flex flex-col items-center text-center sm:flex-row sm:items-start sm:text-left gap-6">
+              <div className="relative h-24 w-24 sm:h-28 sm:w-28 shrink-0 overflow-hidden rounded-[26px] border border-violet-400/50 bg-[#120e1e] shadow-[0_0_32px_rgba(168,85,247,0.48),0_0_20px_rgba(236,72,153,0.28)]">
+                <img
+                  src={ASSETS.officialLogo}
+                  alt="KuroStream Official Logo"
+                  className="h-full w-full object-cover object-center"
+                />
+              </div>
+              <div className="flex-1 space-y-3">
+                <div className="flex flex-wrap items-center justify-center sm:justify-start gap-2.5">
+                  <h2 className="font-display text-2xl font-black tracking-tight text-white">
+                    <span className="text-white">Kuro</span>
+                    <span className="bg-gradient-to-r from-violet-300 via-fuchsia-300 to-pink-300 bg-clip-text text-transparent">
+                      Stream
+                    </span>
+                  </h2>
+                  <span className="rounded-xl border border-violet-400/40 bg-violet-500/20 px-3 py-1 text-xs font-bold text-violet-200 tabular-nums">
+                    v2.0.1 (Build {CURRENT_CLIENT_VERSION_CODE})
+                  </span>
+                </div>
+                <p className="max-w-2xl text-sm leading-relaxed text-slate-300">
+                  KuroStream is a dark-glass anime streaming platform engineered for smooth playback
+                  across Web and Android, featuring KuroStream Global as primary server, AnimeWorld
+                  India fallback, offline downloads, daily check-in XP rewards, and community feeds.
+                </p>
+                <div className="grid grid-cols-1 gap-2.5 pt-2 sm:grid-cols-3 text-left">
+                  <div className="rounded-2xl border border-white/[0.08] bg-white/[0.03] px-3.5 py-2.5">
+                    <p className="text-[11px] font-semibold uppercase tracking-wider text-violet-300">
+                      Primary Server
+                    </p>
+                    <p className="mt-0.5 text-xs font-bold text-white">KuroStream Global</p>
+                  </div>
+                  <div className="rounded-2xl border border-white/[0.08] bg-white/[0.03] px-3.5 py-2.5">
+                    <p className="text-[11px] font-semibold uppercase tracking-wider text-pink-300">
+                      Fallback Server
+                    </p>
+                    <p className="mt-0.5 text-xs font-bold text-white">AnimeWorld India</p>
+                  </div>
+                  <div className="rounded-2xl border border-white/[0.08] bg-white/[0.03] px-3.5 py-2.5">
+                    <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+                      Android Package
+                    </p>
+                    <p className="mt-0.5 text-xs font-mono text-white">com.kurostream.app</p>
+                  </div>
+                </div>
+                <p className="pt-1 text-xs text-slate-500">
+                  Metadata powered by AniList · Cloud sync powered by Firebase.
+                </p>
+              </div>
+            </div>
+          </section>
         </div>
       )}
 

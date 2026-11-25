@@ -11,10 +11,29 @@ import {
   User,
   X,
 } from 'lucide-react';
+import { ASSETS } from '@/src/config/env';
 import { useAuth } from '@/src/context/AuthContext';
 
-const KUROSTREAM_LOGO_SRC =
-  '/assets/aistudio/file_000000004ebc8211a223cbd3b7d37859_6ea9f159.png';
+const KUROSTREAM_LOGO_SRC = ASSETS.officialLogo;
+
+interface FlowerSparkle {
+  id: number;
+  left: string;
+  top: string;
+  size: number;
+  delay: string;
+  duration: string;
+  tone: 'pink' | 'blue' | 'purple';
+}
+
+const FLOWER_SPARKLES: FlowerSparkle[] = [
+  { id: 1, left: '19%', top: '16%', size: 6, delay: '0.4s', duration: '3.2s', tone: 'pink' },
+  { id: 2, left: '34%', top: '11%', size: 5, delay: '1.3s', duration: '3.8s', tone: 'purple' },
+  { id: 3, left: '14%', top: '31%', size: 4, delay: '2.1s', duration: '3.5s', tone: 'pink' },
+  { id: 4, left: '72%', top: '34%', size: 6, delay: '0.8s', duration: '3.4s', tone: 'blue' },
+  { id: 5, left: '84%', top: '46%', size: 5, delay: '1.9s', duration: '3.9s', tone: 'purple' },
+  { id: 6, left: '65%', top: '26%', size: 4, delay: '2.6s', duration: '3.3s', tone: 'blue' },
+];
 
 interface LoginParticle {
   id: number;
@@ -243,34 +262,89 @@ export const AuthModal: React.FC<AuthModalProps> = ({ mandatory = false }) => {
             </button>
           )}
 
-          {/* Official KuroStream Brand Header */}
+          {/* Official Animated KuroStream Brand Header */}
           <div className="flex flex-col items-center text-center">
-            <div className="kuro-auth-logo-enter relative flex h-20 w-20 items-center justify-center sm:h-[88px] sm:w-[88px]">
+            <div
+              className={`relative flex h-24 w-24 items-center justify-center sm:h-[108px] sm:w-[108px] ${
+                reducedMotion ? '' : 'kuro-auth-logo-enter'
+              }`}
+            >
+              {/* Soft purple & pink neon aura */}
               <div
                 aria-hidden="true"
-                className="pointer-events-none absolute -inset-3 rounded-full opacity-85"
+                className={`pointer-events-none absolute -inset-4 rounded-[34px] ${
+                  reducedMotion ? 'opacity-80' : 'kuro-auth-logo-aura'
+                }`}
                 style={{
                   background:
-                    'radial-gradient(circle, rgba(168, 85, 247, 0.36) 0%, rgba(225, 29, 72, 0.2) 50%, transparent 74%)',
+                    'radial-gradient(circle at 35% 35%, rgba(168, 85, 247, 0.55) 0%, rgba(236, 72, 153, 0.36) 48%, transparent 74%)',
                 }}
               />
-              <img
-                src={KUROSTREAM_LOGO_SRC}
-                alt="KuroStream"
-                draggable={false}
-                className="relative h-full w-full rounded-2xl object-contain drop-shadow-[0_10px_24px_rgba(139,92,246,0.4)]"
-              />
+
+              {/* Idle floating + breathing wrapper */}
+              <div
+                className={`relative h-full w-full ${
+                  reducedMotion ? '' : 'kuro-auth-logo-idle'
+                }`}
+              >
+                <div className="relative h-full w-full overflow-hidden rounded-[26px] border border-violet-300/45 bg-[#120e1e] shadow-[0_0_28px_rgba(168,85,247,0.48),0_0_18px_rgba(236,72,153,0.34)] ring-1 ring-pink-300/25">
+                  <img
+                    src={KUROSTREAM_LOGO_SRC}
+                    alt="KuroStream Official Logo"
+                    loading="eager"
+                    decoding="async"
+                    draggable={false}
+                    className="h-full w-full object-cover object-center"
+                  />
+                </div>
+
+                {/* Subtle sparkling particles positioned near the pink and blue flowers */}
+                {!reducedMotion &&
+                  FLOWER_SPARKLES.map((spark) => {
+                    const sparkleColor =
+                      spark.tone === 'pink'
+                        ? '#f9a8d4'
+                        : spark.tone === 'blue'
+                          ? '#93c5fd'
+                          : '#d8b4fe';
+                    return (
+                      <span
+                        key={spark.id}
+                        aria-hidden="true"
+                        className="kuro-flower-sparkle pointer-events-none absolute rotate-45 rounded-[2px]"
+                        style={{
+                          left: spark.left,
+                          top: spark.top,
+                          width: `${spark.size}px`,
+                          height: `${spark.size}px`,
+                          backgroundColor: sparkleColor,
+                          animationDelay: spark.delay,
+                          animationDuration: spark.duration,
+                        }}
+                      />
+                    );
+                  })}
+              </div>
+            </div>
+
+            {/* Glowing KuroStream Brand Title */}
+            <div
+              className={`mt-3.5 ${reducedMotion ? '' : 'kuro-auth-brand-text-enter'}`}
+            >
+              <span className="font-display text-[26px] sm:text-[30px] font-black tracking-[-0.025em] bg-gradient-to-r from-white via-violet-200 to-pink-300 bg-clip-text text-transparent drop-shadow-[0_0_16px_rgba(168,85,247,0.62)]">
+                KuroStream
+              </span>
             </div>
 
             <h2
               id="auth-modal-title"
-              className="mt-4 font-display text-2xl font-bold tracking-tight text-white"
+              className="mt-1 font-display text-lg sm:text-xl font-bold tracking-tight text-white/95"
             >
               {isPendingEmailVerification
                 ? 'Verify Your Email'
                 : authTab === 'signin'
                   ? 'Welcome Back'
-                  : 'Join KuroStream'}
+                  : 'Create Your Account'}
             </h2>
             <p className="mt-1 text-xs sm:text-sm text-slate-300/80 max-w-[300px]">
               {isPendingEmailVerification

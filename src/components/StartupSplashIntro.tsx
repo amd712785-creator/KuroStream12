@@ -1,8 +1,9 @@
 import React, { useEffect, useState } from 'react';
 import { Capacitor } from '@capacitor/core';
+import { ASSETS } from '@/src/config/env';
 
 const INTRO_SESSION_KEY = 'kurostream_startup_intro_seen_v1';
-const LOGO_SRC = '/assets/aistudio/file_00000000d64c8211a7a01231691e7256_8b4ae7b0.png';
+const LOGO_SRC = ASSETS.officialLogo;
 
 interface ParticleSpec {
   id: number;
@@ -214,7 +215,7 @@ export const StartupSplashIntro: React.FC = () => {
           )}
 
           <div
-            className={`relative h-full w-full ${
+            className={`relative h-full w-full overflow-hidden rounded-[36px] border border-violet-400/45 bg-[#120e1e] shadow-[0_0_38px_rgba(168,85,247,0.48),0_0_22px_rgba(236,72,153,0.3)] ${
               reducedMotion ? 'kuro-splash-logo-reduced' : 'kuro-splash-logo-reveal'
             }`}
           >
@@ -224,7 +225,7 @@ export const StartupSplashIntro: React.FC = () => {
               loading="eager"
               decoding="async"
               draggable={false}
-              className="h-full w-full object-contain"
+              className="h-full w-full object-cover object-center"
             />
           </div>
         </div>

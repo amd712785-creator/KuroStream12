@@ -102,6 +102,12 @@ function toMillis(val: unknown): number {
 }
 
 const ACTIVE_PING_STORAGE_KEY = 'kurostream_user_active_ping_v1';
+const VPN_NOTICE_ACK_PREFIX = 'kurostream_vpn_notice_ack_v1_';
+
+function getVpnNoticeSessionKey(u: Pick<User, 'uid' | 'metadata'>): string {
+  const signInStamp = u.metadata?.lastSignInTime || 'session';
+  return `${VPN_NOTICE_ACK_PREFIX}${u.uid}_${signInStamp}`;
+}
 
 function getTodayUtcKey(): string {
   return getTodayDateKey();
@@ -244,6 +250,8 @@ interface AuthContextValue {
   equipBadge: (badgeId: AchievementId) => Promise<EquipBadgeResult>;
   unequipBadge: (badgeId: AchievementId) => Promise<EquipBadgeResult>;
   toggleEquipBadge: (badgeId: AchievementId) => Promise<EquipBadgeResult>;
+  showLoginVpnNotice: boolean;
+  dismissLoginVpnNotice: () => void;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -318,6 +326,74 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const createdWatchLogsRef = useRef<Set<string>>(new Set());
   const completedWatchLogsRef = useRef<Set<string>>(new Set());
 
+  const [showLoginVpnNotice, setShowLoginVpnNotice] = useState(false);
+  const hadUnauthenticatedStateRef = useRef(false);
+  const pendingFreshLoginRef = useRef(false);
+  const activeVpnNoticeKeyRef = useRef<string | null>(null);
+  const dismissedVpnNoticeKeysRef = useRef<Set<string>>(new Set());
+
+  const isVpnNoticeDismissed = useCallback((key: string): boolean => {
+    if (dismissedVpnNoticeKeysRef.current.has(key)) return true;
+    try {
+      return sessionStorage.getItem(key) === '1';
+    } catch {
+      return false;
+    }
+  }, []);
+
+  const clearVpnNoticeAcks = useCallback(() => {
+    dismissedVpnNoticeKeysRef.current.clear();
+    activeVpnNoticeKeyRef.current = null;
+    try {
+      const toRemove: string[] = [];
+      for (let i = 0; i < sessionStorage.length; i += 1) {
+        const k = sessionStorage.key(i);
+        if (k && k.startsWith(VPN_NOTICE_ACK_PREFIX)) {
+          toRemove.push(k);
+        }
+      }
+      toRemove.forEach((k) => sessionStorage.removeItem(k));
+    } catch {
+      // ignore storage errors
+    }
+  }, []);
+
+  const prepareFreshLoginVpnNotice = useCallback(() => {
+    clearVpnNoticeAcks();
+    pendingFreshLoginRef.current = true;
+  }, [clearVpnNoticeAcks]);
+
+  const ensureFreshLoginVpnNotice = useCallback(
+    (firebaseUser: User | null | undefined) => {
+      if (!firebaseUser || !firebaseUser.emailVerified) return;
+      const key = getVpnNoticeSessionKey(firebaseUser);
+      activeVpnNoticeKeyRef.current = key;
+      if (!isVpnNoticeDismissed(key)) {
+        pendingFreshLoginRef.current = false;
+        hadUnauthenticatedStateRef.current = false;
+        setShowLoginVpnNotice(true);
+      }
+    },
+    [isVpnNoticeDismissed]
+  );
+
+  const dismissLoginVpnNotice = useCallback(() => {
+    const fallbackUser = auth?.currentUser || user;
+    const key =
+      activeVpnNoticeKeyRef.current ||
+      (fallbackUser ? getVpnNoticeSessionKey(fallbackUser) : null);
+    if (key) {
+      dismissedVpnNoticeKeysRef.current.add(key);
+      try {
+        sessionStorage.setItem(key, '1');
+      } catch {
+        // ignore storage errors
+      }
+    }
+    pendingFreshLoginRef.current = false;
+    setShowLoginVpnNotice(false);
+  }, [user]);
+
   useEffect(() => {
     if (!isFirebaseConfigured) return;
     const timer = window.setTimeout(() => {
@@ -356,6 +432,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         .then((result) => {
           if (result?.user) {
             setIsAuthModalOpen(false);
+            if (result.user.emailVerified) {
+              ensureFreshLoginVpnNotice(result.user);
+            }
           }
         })
         .catch((err) => {
@@ -376,6 +455,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setAuthReady(true);
 
       if (!firebaseUser) {
+        hadUnauthenticatedStateRef.current = true;
+        pendingFreshLoginRef.current = false;
+        activeVpnNoticeKeyRef.current = null;
+        setShowLoginVpnNotice(false);
         setIsAdmin(false);
         setCloudEquippedBadges([]);
         cloudEquippedBadgesRef.current = [];
@@ -405,7 +488,23 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         return;
       }
 
-      if (firebaseUser.emailVerified) {
+      if (!firebaseUser.emailVerified) {
+        hadUnauthenticatedStateRef.current = true;
+      } else {
+        const vpnNoticeKey = getVpnNoticeSessionKey(firebaseUser);
+        activeVpnNoticeKeyRef.current = vpnNoticeKey;
+        if (
+          (hadUnauthenticatedStateRef.current || pendingFreshLoginRef.current) &&
+          !isVpnNoticeDismissed(vpnNoticeKey)
+        ) {
+          pendingFreshLoginRef.current = false;
+          hadUnauthenticatedStateRef.current = false;
+          setShowLoginVpnNotice(true);
+        } else {
+          hadUnauthenticatedStateRef.current = false;
+          pendingFreshLoginRef.current = false;
+        }
+
         const storedForUser = getStoredWatchStats(firebaseUser.uid);
         cloudWatchStatsRef.current = storedForUser;
         setCloudWatchStats(storedForUser);
@@ -1064,6 +1163,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setAuthNotice(null);
     setAuthLoading(true);
     try {
+      prepareFreshLoginVpnNotice();
       if (Capacitor.isNativePlatform()) {
         await ensureNativeSocialLoginInitialized();
         const response = await SocialLogin.login({
@@ -1078,14 +1178,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           throw new Error('Google Sign-In did not return an ID token.');
         }
         const credential = GoogleAuthProvider.credential(idToken);
-        await signInWithCredential(auth, credential);
+        const cred = await signInWithCredential(auth, credential);
         setIsAuthModalOpen(false);
+        ensureFreshLoginVpnNotice(cred.user);
         return;
       }
 
-      await signInWithPopup(auth, googleProvider);
+      const cred = await signInWithPopup(auth, googleProvider);
       setIsAuthModalOpen(false);
+      ensureFreshLoginVpnNotice(cred.user);
     } catch (err) {
+      pendingFreshLoginRef.current = false;
       const code = (err as { code?: string } | null)?.code;
       if (
         !Capacitor.isNativePlatform() &&
@@ -1093,9 +1196,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           code === 'auth/operation-not-supported-in-this-environment')
       ) {
         try {
+          prepareFreshLoginVpnNotice();
           await signInWithRedirect(auth, googleProvider);
           return;
         } catch (redirectErr) {
+          pendingFreshLoginRef.current = false;
           const msg = formatFirebaseAuthError(redirectErr, 'google');
           if (msg) setAuthError(msg);
           return;
@@ -1106,7 +1211,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     } finally {
       setAuthLoading(false);
     }
-  }, []);
+  }, [ensureFreshLoginVpnNotice, prepareFreshLoginVpnNotice]);
 
   const signInWithEmail = useCallback(async (email: string, password: string) => {
     if (!auth) {
@@ -1128,6 +1233,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       authInitStatus: firebaseDiagnostics.authInitStatus,
     });
     try {
+      prepareFreshLoginVpnNotice();
       const cred = await signInWithEmailAndPassword(auth, trimmedEmail, password);
       await cred.user.reload().catch(() => {});
       console.info('[KuroStream Auth] Email/Password sign-in succeeded', {
@@ -1136,12 +1242,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       });
       if (cred.user.emailVerified) {
         setIsAuthModalOpen(false);
+        ensureFreshLoginVpnNotice(cred.user);
       } else {
+        pendingFreshLoginRef.current = false;
         setAuthNotice(
           'Signed in! Please verify your email address via the link sent to your inbox to enable Firestore cloud sync.'
         );
       }
     } catch (err) {
+      pendingFreshLoginRef.current = false;
       const code = (err as { code?: string } | null)?.code || 'unknown';
       console.warn('[KuroStream Auth] Email/Password sign-in error', {
         projectId,
@@ -1152,7 +1261,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     } finally {
       setAuthLoading(false);
     }
-  }, []);
+  }, [ensureFreshLoginVpnNotice, prepareFreshLoginVpnNotice]);
 
   const registerWithEmail = useCallback(
     async (email: string, password: string, displayName?: string) => {
@@ -1232,6 +1341,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (auth.currentUser.emailVerified) {
         setAuthNotice('Email verified! Cloud sync is now active.');
         setIsAuthModalOpen(false);
+        prepareFreshLoginVpnNotice();
+        ensureFreshLoginVpnNotice(auth.currentUser);
       } else {
         setAuthError('Email is not verified yet. Please click the link sent to your email first.');
       }
@@ -1241,7 +1352,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     } finally {
       setAuthLoading(false);
     }
-  }, []);
+  }, [ensureFreshLoginVpnNotice, prepareFreshLoginVpnNotice]);
 
   const sendPasswordReset = useCallback(async (email: string) => {
     if (!auth) {
@@ -1268,6 +1379,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, []);
 
   const signOut = useCallback(async () => {
+    clearVpnNoticeAcks();
+    setShowLoginVpnNotice(false);
+    hadUnauthenticatedStateRef.current = true;
+    pendingFreshLoginRef.current = false;
     if (auth && user) {
       await firebaseSignOut(auth);
       setIsAdmin(false);
@@ -1275,7 +1390,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (Capacitor.isNativePlatform()) {
       await SocialLogin.logout({ provider: 'google' }).catch(() => {});
     }
-  }, [user]);
+  }, [clearVpnNoticeAcks, user]);
 
   const getIdToken = useCallback(
     async (forceRefresh = false): Promise<string | null> => {
@@ -2331,6 +2446,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       equipBadge,
       unequipBadge,
       toggleEquipBadge,
+      showLoginVpnNotice,
+      dismissLoginVpnNotice,
     }),
     [
       user,
@@ -2376,6 +2493,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       equipBadge,
       unequipBadge,
       toggleEquipBadge,
+      showLoginVpnNotice,
+      dismissLoginVpnNotice,
     ]
   );
 

@@ -6,7 +6,7 @@ import {
 } from '@/src/config/env';
 import { getFreshFirebaseIdToken } from '@/src/services/authorizedFetch';
 
-export type UserMediaKind = 'avatar' | 'banner';
+export type UserMediaKind = 'avatar' | 'banner' | 'character_portrait' | 'character_banner';
 
 export interface UploadedUserMediaResult {
   imageUrl: string;
@@ -80,8 +80,10 @@ export async function optimizeImageFileForUpload(
     return file;
   }
 
-  const maxWidth = kind === 'avatar' ? 512 : 1600;
-  const maxHeight = kind === 'avatar' ? 512 : 900;
+  const maxWidth =
+    kind === 'avatar' ? 512 : kind === 'character_portrait' ? 800 : 1600;
+  const maxHeight =
+    kind === 'avatar' ? 512 : kind === 'character_portrait' ? 1100 : 900;
 
   return new Promise<File>((resolve) => {
     const objectUrl = URL.createObjectURL(file);

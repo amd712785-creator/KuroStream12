@@ -4640,13 +4640,21 @@ export function createExpressApp() {
       });
     });
 
-  // Protected User Avatar / Banner Image Upload (Firebase Auth required; supports multipart/form-data and JSON base64 fallback)
+  // Protected User Avatar / Banner / Admin Character Image Upload (Firebase Auth required; supports multipart/form-data and JSON base64 fallback)
   app.post('/api/user/media/upload', requireFirebaseAuth, async (req: Request, res: Response) => {
     const contentType = String(req.headers['content-type'] || '').toLowerCase();
     let buffer: Buffer | null = null;
     let declaredMime = '';
+    const normalizeMediaKind = (
+      raw: string
+    ): 'avatar' | 'banner' | 'character_portrait' | 'character_banner' => {
+      if (raw === 'banner') return 'banner';
+      if (raw === 'character_portrait') return 'character_portrait';
+      if (raw === 'character_banner') return 'character_banner';
+      return 'avatar';
+    };
     const queryKind = typeof req.query.kind === 'string' ? req.query.kind.trim().toLowerCase() : '';
-    let mediaKind: 'avatar' | 'banner' = queryKind === 'banner' ? 'banner' : 'avatar';
+    let mediaKind = normalizeMediaKind(queryKind);
 
     if (contentType.includes('multipart/form-data')) {
       try {
@@ -4676,7 +4684,7 @@ export function createExpressApp() {
       const bodyKind = typeof (req.body as Record<string, unknown> | undefined)?.kind === 'string'
         ? String((req.body as Record<string, unknown>).kind).trim().toLowerCase()
         : '';
-      if (bodyKind === 'banner') mediaKind = 'banner';
+      if (bodyKind) mediaKind = normalizeMediaKind(bodyKind);
       buffer = uploadedFile.buffer;
       declaredMime = String(uploadedFile.mimetype || '').trim().toLowerCase();
     } else {
@@ -4692,8 +4700,8 @@ export function createExpressApp() {
       const body = (req.body || {}) as Record<string, unknown>;
       const rawData = typeof body.dataBase64 === 'string' ? body.dataBase64.trim() : '';
       declaredMime = typeof body.mimeType === 'string' ? body.mimeType.trim().toLowerCase() : '';
-      if (typeof body.kind === 'string' && body.kind.trim().toLowerCase() === 'banner') {
-        mediaKind = 'banner';
+      if (typeof body.kind === 'string' && body.kind.trim()) {
+        mediaKind = normalizeMediaKind(body.kind.trim().toLowerCase());
       }
 
       if (!rawData) {
@@ -4706,6 +4714,18 @@ export function createExpressApp() {
         buffer = Buffer.from(cleanedBase64, 'base64');
       } catch {
         res.status(400).json({ error: 'Invalid base64 image payload.' });
+        return;
+      }
+    }
+
+    if (mediaKind === 'character_portrait' || mediaKind === 'character_banner') {
+      const authUser = (req as AuthenticatedRequest).firebaseUser;
+      const normalizedEmail = (authUser?.email || '').toLowerCase();
+      const isAllowedAdmin = Boolean(
+        authUser?.hasAdminClaim || AUTHORIZED_ADMIN_EMAILS_SERVER.includes(normalizedEmail)
+      );
+      if (!isAllowedAdmin) {
+        res.status(403).json({ error: 'Administrator privileges required to upload character artwork.' });
         return;
       }
     }
@@ -4725,7 +4745,7 @@ export function createExpressApp() {
     }
 
     if (!buffer || buffer.length === 0 || buffer.length > 5 * 1024 * 1024) {
-      res.status(400).json({ error: 'Profile image must be between 1 byte and 5 MB.' });
+      res.status(400).json({ error: 'Image must be between 1 byte and 5 MB.' });
       return;
     }
 
@@ -4735,7 +4755,13 @@ export function createExpressApp() {
       return;
     }
 
-    const safeFileName = `user_${mediaKind}_${Date.now()}_${crypto.randomBytes(6).toString('hex')}${verified.ext}`;
+    const prefix =
+      mediaKind === 'character_portrait'
+        ? 'char_portrait'
+        : mediaKind === 'character_banner'
+          ? 'char_banner'
+          : `user_${mediaKind}`;
+    const safeFileName = `${prefix}_${Date.now()}_${crypto.randomBytes(6).toString('hex')}${verified.ext}`;
     const resolvedUploadsDir = path.resolve(USER_UPLOADS_DIR);
     const destPath = path.resolve(resolvedUploadsDir, safeFileName);
     if (!destPath.startsWith(resolvedUploadsDir + path.sep)) {
@@ -4748,7 +4774,7 @@ export function createExpressApp() {
       fs.writeFileSync(destPath, buffer);
     } catch (err) {
       res.status(507).json({
-        error: err instanceof Error ? err.message : 'Unable to store uploaded profile image on server.',
+        error: err instanceof Error ? err.message : 'Unable to store uploaded image on server.',
       });
       return;
     }

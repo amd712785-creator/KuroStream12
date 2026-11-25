@@ -40,6 +40,7 @@ import { AdminAdvancedAnalyticsSection } from '@/src/components/AdminAdvancedAna
 import { AdminNotificationsSection } from '@/src/components/AdminNotificationsSection';
 import { AdminWatchAnalyticsSection } from '@/src/components/AdminWatchAnalyticsSection';
 import { useAuth } from '@/src/context/AuthContext';
+import { formatFirestoreUiError } from '@/src/lib/firebase';
 import {
   fetchAppUpdateConfig,
   saveAppUpdateConfig,
@@ -290,7 +291,7 @@ export const AdminDashboardSection: React.FC = () => {
 
   // Load Analytics
   const loadAnalytics = useCallback(async () => {
-    if (!authReady || !isAdmin || !user) return;
+    if (!authReady || !isAdmin || !user || !user.emailVerified) return;
     setStatsError(null);
     try {
       const [srvOutcome, regOutcome] = await Promise.allSettled([
@@ -312,7 +313,7 @@ export const AdminDashboardSection: React.FC = () => {
         throw regOutcome.reason;
       }
     } catch (err) {
-      setStatsError(err instanceof Error ? err.message : 'Failed to load admin analytics.');
+      setStatsError(formatFirestoreUiError(err, 'Failed to load admin analytics.'));
     } finally {
       setStatsLoading(false);
     }

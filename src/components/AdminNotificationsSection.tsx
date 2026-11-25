@@ -43,7 +43,7 @@ const EMPTY_FORM: AdminAnnouncementInput = {
 };
 
 export const AdminNotificationsSection: React.FC = () => {
-  const { user, isAdmin } = useAuth();
+  const { user, authReady, isAdmin } = useAuth();
   const { categorySettings } = useNotifications();
 
   const [announcements, setAnnouncements] = useState<GlobalNotificationRecord[]>([]);
@@ -58,16 +58,18 @@ export const AdminNotificationsSection: React.FC = () => {
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!isAdmin) return;
+    if (!authReady || !isAdmin || !user || !user.emailVerified) return;
     const unsub = subscribeAllGlobalNotificationsForAdmin(
       (items) => setAnnouncements(items),
       (msg) => setError(msg)
     );
     fetchUsersForNotificationTargeting()
       .then((list) => setUsersList(list))
-      .catch(() => {});
+      .catch((err) => {
+        setError(err instanceof Error ? err.message : 'Unable to load users for targeting.');
+      });
     return () => unsub();
-  }, [isAdmin]);
+  }, [authReady, isAdmin, user]);
 
   const filteredUsers = useMemo(() => {
     const q = userSearch.trim().toLowerCase();

@@ -11,10 +11,14 @@ const CONSUMET_OVERRIDE_STORAGE_KEY = 'kurostream_consumet_api_override_v1';
 
 const BACKEND_OVERRIDE_STORAGE_KEY = 'kurostream_backend_api_override_v1';
 
+export const OFFICIAL_KUROSTREAM_LOGO =
+  '/assets/aistudio/ac5d2e516776a102259cbb37dc1ed34f_f03be397.jpg';
+
 export const ASSETS = {
   heroFallback: heroFallbackImg,
   posterFallback: posterFallbackImg,
   defaultAvatar: defaultAvatarImg,
+  officialLogo: OFFICIAL_KUROSTREAM_LOGO,
 };
 
 export function isNativeCapacitorRuntime(): boolean {

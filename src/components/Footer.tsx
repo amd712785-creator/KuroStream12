@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Play, Settings2 } from 'lucide-react';
+import { Settings2 } from 'lucide-react';
 import {
+  ASSETS,
   getDefaultStreamingApiBase,
   getStreamingApiBase,
   setStreamingApiOverride,
@@ -36,8 +37,12 @@ export const Footer: React.FC = () => {
               className="group inline-flex items-center gap-2.5 text-xl font-black tracking-tight"
               aria-label="KuroStream Home"
             >
-              <span className="flex h-8 w-8 items-center justify-center rounded-xl border border-violet-400/30 bg-gradient-to-br from-violet-500 via-purple-600 to-fuchsia-600 text-white shadow-[0_0_18px_-2px_rgba(147,51,234,0.5)] transition-transform duration-200 group-hover:scale-105">
-                <Play className="h-4 w-4 translate-x-0.5 fill-current" />
+              <span className="flex h-9 w-9 overflow-hidden items-center justify-center rounded-2xl border border-violet-400/45 bg-[#120e1e] shadow-[0_0_18px_-2px_rgba(168,85,247,0.55)] transition-transform duration-200 group-hover:scale-105">
+                <img
+                  src={ASSETS.officialLogo}
+                  alt="KuroStream Logo"
+                  className="h-full w-full object-cover object-center"
+                />
               </span>
               <span className="font-display text-xl font-black tracking-[-0.02em] drop-shadow-[0_0_14px_rgba(168,85,247,0.4)]">
                 <span className="text-white">Kuro</span>

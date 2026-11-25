@@ -4,10 +4,12 @@ import { AppUpdateModal } from '@/src/components/AppUpdateModal';
 import { AuthModal } from '@/src/components/AuthModal';
 import { ErrorBoundary } from '@/src/components/ErrorBoundary';
 import { Footer } from '@/src/components/Footer';
+import { LoginVpnNoticeModal } from '@/src/components/LoginVpnNoticeModal';
 import { MobileBottomNav } from '@/src/components/MobileBottomNav';
 import { Navbar } from '@/src/components/Navbar';
 import { StartupSplashIntro } from '@/src/components/StartupSplashIntro';
 import { LevelUpModal } from '@/src/components/UserLevelXpSection';
+import { ASSETS } from '@/src/config/env';
 import { AuthProvider, useAuth } from '@/src/context/AuthContext';
 import { NotificationProvider } from '@/src/context/NotificationContext';
 import { ServerProvider } from '@/src/context/ServerContext';
@@ -61,9 +63,23 @@ const WatchPage = lazy(() =>
 function RouteLoadingFallback() {
   return (
     <div className="mx-auto flex min-h-[55vh] max-w-7xl items-center justify-center px-4 py-12">
-      <div className="flex flex-col items-center gap-3 text-slate-400">
-        <div className="h-8 w-8 animate-spin rounded-full border-2 border-violet-500/30 border-t-violet-400" />
-        <span className="text-xs font-medium tracking-wide text-slate-400">Loading...</span>
+      <div className="flex flex-col items-center gap-3.5 text-slate-400">
+        <div className="relative flex h-20 w-20 items-center justify-center">
+          <span
+            aria-hidden="true"
+            className="absolute inset-0 animate-spin rounded-[22px] border-2 border-violet-500/25 border-t-violet-400 border-r-fuchsia-400"
+          />
+          <div className="relative h-14 w-14 overflow-hidden rounded-2xl border border-violet-400/45 bg-[#120e1e] shadow-[0_0_24px_rgba(168,85,247,0.45),0_0_14px_rgba(236,72,153,0.28)]">
+            <img
+              src={ASSETS.officialLogo}
+              alt="KuroStream Loading"
+              className="h-full w-full object-cover object-center"
+            />
+          </div>
+        </div>
+        <span className="text-xs font-semibold tracking-wider text-violet-200/90">
+          Loading KuroStream...
+        </span>
       </div>
     </div>
   );
@@ -191,7 +207,7 @@ function AnimatedRoutes() {
 }
 
 function AppShell() {
-  const { user, authReady } = useAuth();
+  const { user, authReady, showLoginVpnNotice, dismissLoginVpnNotice } = useAuth();
   const navigate = useNavigate();
   const wasUnauthenticatedRef = useRef(false);
 
@@ -240,6 +256,7 @@ function AppShell() {
       <AuthModal />
       <AppUpdateModal />
       <LevelUpModal />
+      <LoginVpnNoticeModal open={showLoginVpnNotice} onDismiss={dismissLoginVpnNotice} />
       <Suspense fallback={null}>
         <PopupBannerModal />
       </Suspense>

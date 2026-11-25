@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   Download,
   Gauge,
+  Globe,
   Languages,
   Loader2,
   Maximize,
@@ -14,6 +15,7 @@ import {
   PictureInPicture2,
   Play,
   RefreshCw,
+  Server,
   Settings2,
   SkipForward,
   Volume2,
@@ -76,6 +78,12 @@ interface VideoPlayerProps {
   onDownload?: () => void;
   downloadStatusLabel?: string;
   isDownloading?: boolean;
+  canSwitchToAnimeWorld?: boolean;
+  onSwitchToAnimeWorld?: () => void;
+  isAnimeWorldFallback?: boolean;
+  onSwitchBackToGlobal?: () => void;
+  canTryHindiOnAnimeWorld?: boolean;
+  onTryHindiOnAnimeWorld?: () => void;
 }
 
 const PLAYBACK_RATES = [0.5, 0.75, 1, 1.25, 1.5, 2];
@@ -134,6 +142,12 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   onDownload,
   downloadStatusLabel,
   isDownloading,
+  canSwitchToAnimeWorld,
+  onSwitchToAnimeWorld,
+  isAnimeWorldFallback,
+  onSwitchBackToGlobal,
+  canTryHindiOnAnimeWorld,
+  onTryHindiOnAnimeWorld,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -1034,15 +1048,49 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               <button
                 type="button"
                 onClick={onRetry}
-                className="kuro-btn-primary inline-flex min-h-[40px] items-center gap-2 rounded-2xl px-4 py-2 text-xs sm:text-sm font-semibold"
+                className="kuro-btn-primary inline-flex min-h-[44px] items-center gap-2 rounded-2xl px-4 py-2 text-xs sm:text-sm font-semibold whitespace-nowrap"
               >
                 <RefreshCw className="h-4 w-4" />
                 <span>Retry Stream</span>
               </button>
+
+              {canSwitchToAnimeWorld && onSwitchToAnimeWorld && (
+                <button
+                  type="button"
+                  onClick={onSwitchToAnimeWorld}
+                  className="kuro-btn-glass inline-flex min-h-[44px] items-center gap-2 rounded-2xl border-amber-400/45 bg-amber-500/15 px-4 py-2 text-xs sm:text-sm font-semibold text-amber-200 hover:border-amber-400/70 hover:text-white whitespace-nowrap"
+                >
+                  <Server className="h-4 w-4 text-amber-300" />
+                  <span>Switch to AnimeWorld India</span>
+                </button>
+              )}
+
+              {isAnimeWorldFallback && onSwitchBackToGlobal && (
+                <button
+                  type="button"
+                  onClick={onSwitchBackToGlobal}
+                  className="kuro-btn-glass inline-flex min-h-[44px] items-center gap-2 rounded-2xl border-violet-400/45 bg-violet-500/15 px-4 py-2 text-xs sm:text-sm font-semibold text-violet-200 hover:border-violet-400/70 hover:text-white whitespace-nowrap"
+                >
+                  <Globe className="h-4 w-4 text-violet-300" />
+                  <span>Back to KuroStream Global</span>
+                </button>
+              )}
+
+              {canTryHindiOnAnimeWorld && onTryHindiOnAnimeWorld && (
+                <button
+                  type="button"
+                  onClick={onTryHindiOnAnimeWorld}
+                  className="kuro-btn-glass inline-flex min-h-[44px] items-center gap-2 rounded-2xl border-amber-400/40 bg-amber-500/15 px-4 py-2 text-xs sm:text-sm font-semibold text-amber-200 hover:text-white whitespace-nowrap"
+                >
+                  <Languages className="h-4 w-4 text-amber-300" />
+                  <span>Try Hindi Audio</span>
+                </button>
+              )}
+
               <button
                 type="button"
                 onClick={() => setShowCustomEndpoint((v) => !v)}
-                className="kuro-btn-glass inline-flex min-h-[40px] items-center gap-2 rounded-2xl px-4 py-2 text-xs sm:text-sm font-semibold"
+                className="kuro-btn-glass inline-flex min-h-[44px] items-center gap-2 rounded-2xl px-4 py-2 text-xs sm:text-sm font-semibold whitespace-nowrap"
               >
                 <Settings2 className="h-4 w-4" />
                 <span>{isMunchyrollSelected ? 'Consumet URL' : 'Provider URL'}</span>

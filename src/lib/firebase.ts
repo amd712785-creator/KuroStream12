@@ -288,6 +288,25 @@ export function handleFirestoreError(
   throw new Error(JSON.stringify(errInfo));
 }
 
+export function formatFirestoreUiError(
+  err: unknown,
+  fallback = 'An unexpected Firestore error occurred.'
+): string {
+  const raw = err instanceof Error ? err.message : typeof err === 'string' ? err : '';
+  if (!raw) return fallback;
+  try {
+    const parsed = JSON.parse(raw) as Partial<FirestoreErrorInfo>;
+    if (parsed && typeof parsed.error === 'string') {
+      const op = parsed.operationType ? `${parsed.operationType}` : 'operation';
+      const target = parsed.path ? ` on ${parsed.path}` : '';
+      return `${parsed.error} (${op}${target})`;
+    }
+  } catch {
+    // Plain error string
+  }
+  return raw;
+}
+
 export async function testConnection(): Promise<boolean> {
   if (!db) return false;
   try {

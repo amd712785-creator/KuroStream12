@@ -13,6 +13,7 @@ import {
 } from 'firebase/firestore';
 import { resolveApiUrl } from '@/src/config/env';
 import { db, handleFirestoreError, OperationType } from '@/src/lib/firebase';
+import { getTodayDateKey } from '@/src/services/achievementService';
 import { extractErrorMessage, parseSafeJsonResponse } from '@/src/utils/errorUtils';
 import type {
   AdminServerStats,
@@ -172,7 +173,8 @@ export async function fetchAdminRegisteredUsersStats(): Promise<RegisteredUsersS
       registeredLast7Days: 0,
     };
   }
-  const todayKey = new Date().toISOString().slice(0, 10);
+  const localTodayKey = getTodayDateKey();
+  const utcTodayKey = new Date().toISOString().slice(0, 10);
   const sevenDaysAgoMs = Date.now() - 7 * 24 * 60 * 60 * 1000;
 
   try {
@@ -187,7 +189,7 @@ export async function fetchAdminRegisteredUsersStats(): Promise<RegisteredUsersS
       if (lastActiveMs > 0) {
         totalActiveRegisteredUsers += 1;
       }
-      if (d.lastActiveDay === todayKey) {
+      if (d.lastActiveDay === localTodayKey || d.lastActiveDay === utcTodayKey) {
         registeredActiveToday += 1;
       }
       if (lastActiveMs >= sevenDaysAgoMs) {
