@@ -786,6 +786,7 @@ export const WatchPage: React.FC = () => {
             streamData={streamData}
             streamError={streamError}
             loading={loadingStream}
+            loadingArtwork={anime?.bannerImage || anime?.coverImage?.extraLarge || anime?.coverImage?.large || currentEpisode?.image || null}
             episodeKey={episodeKey}
             logicalEpisodeKey={`${animeId}:${resolvedEpNumber}:${audioMode}`}
             episodeTitle={`${displayTitle} — Episode ${epNumber}`}

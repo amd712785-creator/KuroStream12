@@ -44,6 +44,7 @@ import {
   getStreamingApiBase,
   setStreamingApiOverride,
 } from '@/src/config/env';
+import { LOADING_STYLE_DEFINITIONS } from '@/src/services/dynamicLoadingService';
 import { useAuth } from '@/src/context/AuthContext';
 import { CURRENT_CLIENT_VERSION_CODE } from '@/src/services/updateService';
 import {
@@ -865,6 +866,86 @@ export const SettingsPage: React.FC = () => {
               >
                 Auto Play Next Episode: {preferences.autoNext ? 'Enabled' : 'Disabled'}
               </button>
+            </div>
+          </section>
+
+          {/* Dynamic Loading Preferences */}
+          <section className="kuro-glass rounded-3xl p-5 sm:p-6 space-y-6">
+            <div>
+              <h3 className="text-base font-bold text-white">Dynamic Loading Themes</h3>
+              <p className="mt-0.5 text-xs text-slate-400">
+                Choose your preferred loading theme style, toggle effects, or lightweight mode.
+              </p>
+            </div>
+
+            <div className="space-y-3">
+              <label className="block text-xs font-semibold text-slate-300">Preferred Loading Theme</label>
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5">
+                <button
+                  type="button"
+                  onClick={() => updatePreferences({ loadingTheme: 'default' })}
+                  className={`rounded-xl p-3 text-left text-xs font-semibold transition-all ${
+                    !preferences.loadingTheme || preferences.loadingTheme === 'default'
+                      ? 'kuro-btn-active'
+                      : 'kuro-btn-glass text-slate-300'
+                  }`}
+                >
+                  <span className="block font-bold">Follow Global Default</span>
+                  <span className="block text-[10px] opacity-75">Admin default theme</span>
+                </button>
+                {LOADING_STYLE_DEFINITIONS.map((st) => {
+                  const active = preferences.loadingTheme === st.id;
+                  return (
+                    <button
+                      key={st.id}
+                      type="button"
+                      onClick={() => updatePreferences({ loadingTheme: st.id })}
+                      className={`rounded-xl p-3 text-left text-xs font-semibold transition-all ${
+                        active ? 'kuro-btn-active' : 'kuro-btn-glass text-slate-300'
+                      }`}
+                    >
+                      <span className="block font-bold">{st.name}</span>
+                      <span className="block text-[10px] opacity-75 truncate">{st.tagline}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="border-t border-white/[0.08] pt-5 grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <h4 className="text-sm font-bold text-white">Loading Animations</h4>
+                <button
+                  type="button"
+                  onClick={() =>
+                    updatePreferences({
+                      loadingAnimationsEnabled: !(preferences.loadingAnimationsEnabled ?? true),
+                    })
+                  }
+                  className={`w-full rounded-xl px-4 py-2.5 text-xs font-semibold ${
+                    (preferences.loadingAnimationsEnabled ?? true) ? 'kuro-btn-active' : 'kuro-btn-glass text-slate-300'
+                  }`}
+                >
+                  Animations: {(preferences.loadingAnimationsEnabled ?? true) ? 'Enabled' : 'Disabled'}
+                </button>
+              </div>
+
+              <div className="space-y-2">
+                <h4 className="text-sm font-bold text-white">Lightweight Mode</h4>
+                <button
+                  type="button"
+                  onClick={() =>
+                    updatePreferences({
+                      loadingLightweightMode: !(preferences.loadingLightweightMode ?? false),
+                    })
+                  }
+                  className={`w-full rounded-xl px-4 py-2.5 text-xs font-semibold ${
+                    (preferences.loadingLightweightMode ?? false) ? 'kuro-btn-active bg-amber-600' : 'kuro-btn-glass text-slate-300'
+                  }`}
+                >
+                  Lightweight Mode: {(preferences.loadingLightweightMode ?? false) ? 'Active (Low-End)' : 'Standard'}
+                </button>
+              </div>
             </div>
           </section>
 

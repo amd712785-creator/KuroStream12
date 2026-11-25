@@ -880,6 +880,7 @@
       "properties": {
         "ownerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "characterId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "characterKey": { "type": "string", "minLength": 1, "maxLength": 128 },
         "source": { "type": "string", "enum": ["anilist", "firebase"] },
         "anilistId": { "type": "number", "minimum": 0 },
         "name": { "type": "string", "minLength": 1, "maxLength": 140 },
@@ -887,6 +888,7 @@
         "animeId": { "type": "number", "minimum": 0 },
         "animeTitle": { "type": "string", "maxLength": 240 },
         "portraitUrl": { "type": "string", "maxLength": 500 },
+        "imageUrl": { "type": "string", "maxLength": 500 },
         "role": { "type": "string", "maxLength": 40 },
         "addedAt": { "type": "string", "format": "date-time" }
       },

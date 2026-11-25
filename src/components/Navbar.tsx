@@ -16,6 +16,7 @@ import {
   Server,
   Tv,
   User,
+  Users,
   X,
   Settings2,
   LogOut,
@@ -171,6 +172,9 @@ export const Navbar: React.FC = () => {
           </NavLink>
           <NavLink to="/schedule" className={navLinkClass}>
             Schedule
+          </NavLink>
+          <NavLink to="/characters" className={navLinkClass}>
+            Characters
           </NavLink>
           <NavLink to="/community" className={navLinkClass}>
             Community
@@ -428,6 +432,14 @@ export const Navbar: React.FC = () => {
             >
               <User className="h-4 w-4 text-violet-300" />
               <span>User Profile &amp; Library</span>
+            </Link>
+            <Link
+              to="/characters"
+              onClick={() => setMobileMenuOpen(false)}
+              className="kuro-btn-glass flex min-h-[46px] items-center gap-3 rounded-2xl px-4 py-2.5 text-sm font-medium text-slate-200"
+            >
+              <Users className="h-4 w-4 text-violet-300" />
+              <span>Character Database</span>
             </Link>
             <button
               type="button"

@@ -31,6 +31,7 @@ import {
 } from '@/src/config/env';
 import { getFreshFirebaseIdToken, isBackendApiUrl } from '@/src/services/authorizedFetch';
 import { extractErrorMessage } from '@/src/utils/errorUtils';
+import { DynamicLoadingScreen } from '@/src/components/DynamicLoadingScreen';
 import type { HeartbeatOptions } from '@/src/hooks/useWatchSessionHeartbeat';
 import type {
   ParsedStreamResult,
@@ -84,6 +85,7 @@ interface VideoPlayerProps {
   onSwitchBackToGlobal?: () => void;
   canTryHindiOnAnimeWorld?: boolean;
   onTryHindiOnAnimeWorld?: () => void;
+  loadingArtwork?: string | null;
 }
 
 const PLAYBACK_RATES = [0.5, 0.75, 1, 1.25, 1.5, 2];
@@ -148,6 +150,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   onSwitchBackToGlobal,
   canTryHindiOnAnimeWorld,
   onTryHindiOnAnimeWorld,
+  loadingArtwork,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -1008,15 +1011,12 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     >
       <div className={`relative w-full bg-black ${effectiveFullscreen ? 'flex-1 min-h-0' : 'aspect-video'}`}>
         {loading ? (
-          <div className="flex h-full w-full flex-col items-center justify-center gap-3.5 bg-gradient-to-br from-[#090b13] via-[#0e0b1a] to-[#07080d] text-slate-200 px-4 text-center">
-            <div className="flex h-14 w-14 items-center justify-center rounded-2xl border border-violet-500/30 bg-violet-600/15 shadow-lg shadow-violet-900/30">
-              <Loader2 className="h-7 w-7 animate-spin text-violet-400" />
-            </div>
-            <div className="space-y-1">
-              <p className="text-sm font-semibold text-white">Connecting to stream</p>
-              <p className="text-xs text-slate-400 line-clamp-1">{episodeTitle}</p>
-            </div>
-          </div>
+          <DynamicLoadingScreen
+            mode="embedded"
+            backgroundImage={loadingArtwork}
+            message="Connecting to streaming server..."
+            subMessage={episodeTitle}
+          />
         ) : streamError || mediaError ? (
           <div className="flex h-full w-full flex-col items-center justify-center overflow-y-auto bg-gradient-to-br from-[#0b0d16] via-[#130d1d] to-[#160b14] p-4 sm:p-6 text-center">
             <div className="flex h-11 w-11 sm:h-12 sm:w-12 shrink-0 items-center justify-center rounded-2xl border border-rose-500/30 bg-rose-500/15 text-rose-400">

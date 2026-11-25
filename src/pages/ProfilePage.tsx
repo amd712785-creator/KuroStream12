@@ -115,6 +115,7 @@ export const ProfilePage: React.FC = () => {
     preferences,
     watchlist,
     favorites,
+    favoriteCharacters,
     history,
     watchStats,
     equippedBadges,
@@ -562,8 +563,8 @@ export const ProfilePage: React.FC = () => {
               <ProfileCard
                 icon={Heart}
                 title="Favorites"
-                count={favorites.length}
-                description="Your all-time favorite anime titles"
+                count={favorites.length + favoriteCharacters.length}
+                description="Saved anime titles and favorite characters"
                 onClick={() => selectTab('favorites')}
               />
               <ProfileCard
@@ -936,35 +937,98 @@ export const ProfilePage: React.FC = () => {
       )}
 
       {activeTab === 'favorites' && (
-        <div className="space-y-4">
-          <h2 className="text-lg font-bold text-white">Favorites ({favorites.length})</h2>
-          {favorites.length === 0 ? (
-            <EmptyProfileState
-              title="No favorites yet"
-              description="Tap favorite on anime detail pages to keep them here."
-            />
-          ) : (
-            <div className="grid grid-cols-2 gap-3.5 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
-              {favorites.map((item) => (
-                <Link
-                  key={item.animeId}
-                  to={`/anime/${item.animeId}`}
-                  className="group flex flex-col"
-                >
-                  <div className="aspect-[2/3] overflow-hidden rounded-2xl border border-white/[0.08] bg-[#10121c] group-hover:border-rose-500/50 transition-colors">
-                    <AnimeImage
-                      src={item.coverImage}
-                      alt={item.title}
-                      className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
-                    />
-                  </div>
-                  <p className="mt-2 truncate text-sm font-semibold text-slate-100 group-hover:text-rose-300">
-                    {item.title}
-                  </p>
-                </Link>
-              ))}
+        <div className="space-y-8">
+          {/* Favorite Anime */}
+          <div className="space-y-4">
+            <div className="flex items-center justify-between">
+              <h2 className="text-lg font-bold text-white">Favorite Anime ({favorites.length})</h2>
+              <Link to="/anime" className="text-xs font-semibold text-purple-400 hover:text-purple-300">
+                Explore Anime &rarr;
+              </Link>
             </div>
-          )}
+            {favorites.length === 0 ? (
+              <EmptyProfileState
+                title="No favorite anime yet"
+                description="Tap favorite on anime detail pages to keep them here."
+              />
+            ) : (
+              <div className="grid grid-cols-2 gap-3.5 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
+                {favorites.map((item) => (
+                  <Link
+                    key={item.animeId}
+                    to={`/anime/${item.animeId}`}
+                    className="group flex flex-col"
+                  >
+                    <div className="aspect-[2/3] overflow-hidden rounded-2xl border border-white/[0.08] bg-[#10121c] group-hover:border-rose-500/50 transition-colors">
+                      <AnimeImage
+                        src={item.coverImage}
+                        alt={item.title}
+                        className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
+                      />
+                    </div>
+                    <p className="mt-2 truncate text-sm font-semibold text-slate-100 group-hover:text-rose-300">
+                      {item.title}
+                    </p>
+                  </Link>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Favorite Characters */}
+          <div className="space-y-4 pt-6 border-t border-white/[0.06]">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Sparkles className="h-4 w-4 text-purple-400" />
+                <h2 className="text-lg font-bold text-white">
+                  Favorite Characters ({favoriteCharacters.length})
+                </h2>
+              </div>
+              <Link to="/characters" className="text-xs font-semibold text-purple-400 hover:text-purple-300">
+                Browse Characters &rarr;
+              </Link>
+            </div>
+            {favoriteCharacters.length === 0 ? (
+              <EmptyProfileState
+                title="No favorite characters yet"
+                description="Browse the Character Database and star your favorite heroes and waifus."
+              />
+            ) : (
+              <div className="grid grid-cols-2 gap-3.5 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
+                {favoriteCharacters.map((char) => (
+                  <Link
+                    key={char.characterKey}
+                    to={`/characters/${char.characterKey}`}
+                    className="group relative flex flex-col overflow-hidden rounded-2xl border border-white/[0.08] bg-[#121422]/70 p-2.5 transition hover:border-purple-500/40 hover:bg-[#16182a]"
+                  >
+                    <div className="aspect-[3/4] w-full overflow-hidden rounded-xl bg-slate-900/60">
+                      <img
+                        src={char.imageUrl}
+                        alt={char.name}
+                        loading="lazy"
+                        className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
+                      />
+                    </div>
+                    <div className="mt-2 min-w-0">
+                      <p className="truncate text-sm font-semibold text-white group-hover:text-purple-300">
+                        {char.name}
+                      </p>
+                      {char.animeTitle && (
+                        <p className="truncate text-xs text-slate-400">
+                          {char.animeTitle}
+                        </p>
+                      )}
+                      {char.role && (
+                        <span className="mt-1 inline-block rounded-md bg-purple-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-purple-300">
+                          {char.role}
+                        </span>
+                      )}
+                    </div>
+                  </Link>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       )}
 

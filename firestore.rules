@@ -634,27 +634,29 @@ service cloud.firestore {
       }
 
       match /favoriteCharacters/{characterId} {
-        allow get: if isValidId(userId) && isValidId(characterId) && isVerifiedOwner(userId);
-        allow list: if isValidId(userId) && isVerifiedOwner(userId) && resource.data.ownerId == request.auth.uid;
+        allow get: if isAdmin() || (isValidId(userId) && isValidId(characterId) && isVerifiedOwner(userId));
+        allow list: if isAdmin() || (isValidId(userId) && isVerifiedOwner(userId) && resource.data.ownerId == request.auth.uid);
         allow create: if isValidId(userId)
           && isValidId(characterId)
           && isVerifiedOwner(userId)
           && incoming().keys().hasAll(['ownerId', 'characterId', 'source', 'name', 'portraitUrl', 'addedAt'])
           && incoming().keys().hasOnly([
-            'ownerId', 'characterId', 'source', 'anilistId', 'name', 'nativeName',
-            'animeId', 'animeTitle', 'portraitUrl', 'role', 'addedAt'
+            'ownerId', 'characterId', 'characterKey', 'source', 'anilistId', 'name', 'nativeName',
+            'animeId', 'animeTitle', 'portraitUrl', 'imageUrl', 'role', 'addedAt'
           ])
           && incoming().ownerId is string
           && incoming().ownerId == userId
           && incoming().characterId is string
           && incoming().characterId == characterId
           && incoming().source in ['anilist', 'firebase']
+          && (!('characterKey' in incoming()) || (incoming().characterKey is string && incoming().characterKey.size() <= 128))
           && (!('anilistId' in incoming()) || (incoming().anilistId is number && incoming().anilistId >= 0))
           && incoming().name is string && incoming().name.size() >= 1 && incoming().name.size() <= 140
           && (!('nativeName' in incoming()) || (incoming().nativeName is string && incoming().nativeName.size() <= 140))
           && (!('animeId' in incoming()) || (incoming().animeId is number && incoming().animeId >= 0))
           && (!('animeTitle' in incoming()) || (incoming().animeTitle is string && incoming().animeTitle.size() <= 240))
           && incoming().portraitUrl is string && incoming().portraitUrl.size() <= 500
+          && (!('imageUrl' in incoming()) || (incoming().imageUrl is string && incoming().imageUrl.size() <= 500))
           && (!('role' in incoming()) || (incoming().role is string && incoming().role.size() <= 40))
           && incoming().addedAt == request.time;
         allow update: if isValidId(userId)
@@ -663,7 +665,7 @@ service cloud.firestore {
           && incoming().ownerId == existing().ownerId
           && incoming().characterId == existing().characterId
           && incoming().addedAt == existing().addedAt
-          && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'nativeName', 'animeTitle', 'portraitUrl', 'role']);
+          && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'nativeName', 'animeTitle', 'portraitUrl', 'imageUrl', 'role']);
         allow delete: if isValidId(userId) && isValidId(characterId) && isVerifiedOwner(userId);
       }
 

@@ -69,6 +69,10 @@ import {
   XP_DAILY_GOAL_SECONDS,
   XP_REWARDS_CONFIG,
 } from '@/src/services/xpService';
+import {
+  subscribeFavoriteCharacters,
+  toggleFavoriteCharacterInFirestore,
+} from '@/src/services/characterDatabaseService';
 import type {
   AchievementId,
   AnimeSummary,
@@ -81,6 +85,9 @@ import type {
   WatchHistoryItem,
   XpHistoryItem,
   XpLevelInfo,
+  CharacterProfile,
+  FavoriteCharacterItem,
+  DynamicLoadingStyleId,
 } from '@/src/types/anime';
 import type { ProfileFrameId } from '@/src/types/frames';
 
@@ -90,6 +97,9 @@ const DEFAULT_SIGNED_OUT_PREFERENCES: UserPreferences = {
   preferredAudio: 'sub',
   autoNext: true,
   theme: getStoredTheme() || 'midnight-purple',
+  loadingTheme: 'purple-galaxy',
+  loadingAnimationsEnabled: true,
+  loadingLightweightMode: false,
 };
 
 function toMillis(val: unknown): number {
@@ -221,6 +231,7 @@ interface AuthContextValue {
   dismissLevelUp: () => void;
   watchlist: LibraryAnimeItem[];
   favorites: LibraryAnimeItem[];
+  favoriteCharacters: FavoriteCharacterItem[];
   history: WatchHistoryItem[];
   isAuthModalOpen: boolean;
   authError: string | null;
@@ -238,9 +249,11 @@ interface AuthContextValue {
   signOut: () => Promise<void>;
   isInWatchlist: (animeId: number) => boolean;
   isFavorite: (animeId: number) => boolean;
+  isFavoriteCharacter: (characterKey: string) => boolean;
   getHistoryForAnime: (animeId: number) => WatchHistoryItem | undefined;
   toggleWatchlist: (anime: AnimeSummary) => Promise<void>;
   toggleFavorite: (anime: AnimeSummary) => Promise<void>;
+  toggleFavoriteCharacter: (char: CharacterProfile) => Promise<void>;
   saveWatchProgress: (item: Omit<WatchHistoryItem, 'updatedAt'>) => Promise<void>;
   recordWatchPlayback: (input: PlaybackRecordInput) => Promise<void>;
   recordWatchCompletion: (animeId: number, episodeNumber: number) => Promise<void>;
@@ -269,6 +282,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [cloudDailyActivity, setCloudDailyActivity] = useState<Record<string, number>>({});
   const [cloudWatchlist, setCloudWatchlist] = useState<LibraryAnimeItem[]>([]);
   const [cloudFavorites, setCloudFavorites] = useState<LibraryAnimeItem[]>([]);
+  const [cloudFavoriteCharacters, setCloudFavoriteCharacters] = useState<FavoriteCharacterItem[]>([]);
   const [cloudHistory, setCloudHistory] = useState<WatchHistoryItem[]>([]);
 
   const [cloudXp, setCloudXp] = useState<number>(0);
@@ -591,6 +605,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           'lastCheckinDate',
           'totalCheckins',
           'coins',
+          'loadingTheme',
+          'loadingAnimationsEnabled',
+          'loadingLightweightMode',
         ]);
         const VALID_THEMES = new Set([
           'midnight-purple',
@@ -942,6 +959,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             autoNext: typeof d.autoNext === 'boolean' ? d.autoNext : true,
             theme: userTheme,
             equippedFrame: typeof d.equippedFrame === 'string' ? (d.equippedFrame as ProfileFrameId) : 'none',
+            loadingTheme: typeof d.loadingTheme === 'string' ? (d.loadingTheme as 'default' | DynamicLoadingStyleId) : 'purple-galaxy',
+            loadingAnimationsEnabled: typeof d.loadingAnimationsEnabled === 'boolean' ? d.loadingAnimationsEnabled : true,
+            loadingLightweightMode: typeof d.loadingLightweightMode === 'boolean' ? d.loadingLightweightMode : false,
           });
 
           const { unlockedAchievements, achievementUnlockDates } = normalizeAchievementList(
@@ -1139,6 +1159,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setXpHistory(items);
     });
 
+    const unsubCharFav = subscribeFavoriteCharacters(uid, (items) => {
+      setCloudFavoriteCharacters(items);
+    });
+
     return () => {
       unsubUser();
       unsubActivity();
@@ -1146,6 +1170,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       unsubFav();
       unsubHist();
       unsubXpHist();
+      unsubCharFav();
     };
   }, [authReady, user]);
 
@@ -1633,6 +1658,39 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     [user, favorites]
   );
 
+  const isFavoriteCharacter = useCallback(
+    (characterKey: string): boolean => {
+      return cloudFavoriteCharacters.some((c) => c.characterKey === characterKey);
+    },
+    [cloudFavoriteCharacters]
+  );
+
+  const toggleFavoriteCharacter = useCallback(
+    async (char: CharacterProfile) => {
+      if (!user || !user.emailVerified || !db) {
+        setAuthError(null);
+        setAuthNotice(
+          user && !user.emailVerified
+            ? 'Verify your email address to save favorite characters.'
+            : 'Sign in with Google or Email to save favorite characters.'
+        );
+        setIsAuthModalOpen(true);
+        return;
+      }
+      const exists = isFavoriteCharacter(char.key);
+      try {
+        await toggleFavoriteCharacterInFirestore(user.uid, char, exists);
+      } catch (err) {
+        logFirestoreError(
+          err,
+          exists ? OperationType.DELETE : OperationType.CREATE,
+          `users/${user.uid}/favoriteCharacters`
+        );
+      }
+    },
+    [user, isFavoriteCharacter]
+  );
+
   const saveWatchProgress = useCallback(
     async (item: Omit<WatchHistoryItem, 'updatedAt'>) => {
       if (!user || !user.emailVerified || !db) {
@@ -1811,6 +1869,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           if (patch.preferredAudio) updatePayload.preferredAudio = patch.preferredAudio;
           if (typeof patch.autoNext === 'boolean') updatePayload.autoNext = patch.autoNext;
           if (patch.theme) updatePayload.theme = patch.theme;
+          if (patch.loadingTheme !== undefined) updatePayload.loadingTheme = patch.loadingTheme;
+          if (typeof patch.loadingAnimationsEnabled === 'boolean') updatePayload.loadingAnimationsEnabled = patch.loadingAnimationsEnabled;
+          if (typeof patch.loadingLightweightMode === 'boolean') updatePayload.loadingLightweightMode = patch.loadingLightweightMode;
 
           const userDocRef = doc(db, path);
           try {
@@ -1827,6 +1888,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
                 ...(validatedPhoto ? { photoURL: validatedPhoto } : {}),
                 ...(validatedBanner ? { bannerURL: validatedBanner } : {}),
                 ...(patch.theme ? { theme: patch.theme } : {}),
+                ...(patch.loadingTheme !== undefined ? { loadingTheme: patch.loadingTheme } : {}),
+                ...(patch.loadingAnimationsEnabled !== undefined ? { loadingAnimationsEnabled: patch.loadingAnimationsEnabled } : {}),
+                ...(patch.loadingLightweightMode !== undefined ? { loadingLightweightMode: patch.loadingLightweightMode } : {}),
                 createdAt: serverTimestamp(),
                 updatedAt: serverTimestamp(),
               });
@@ -1872,6 +1936,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             ...(patch.preferredAudio ? { preferredAudio: patch.preferredAudio } : {}),
             ...(typeof patch.autoNext === 'boolean' ? { autoNext: patch.autoNext } : {}),
             ...(patch.theme ? { theme: patch.theme } : {}),
+            ...(patch.loadingTheme !== undefined ? { loadingTheme: patch.loadingTheme } : {}),
+            ...(patch.loadingAnimationsEnabled !== undefined ? { loadingAnimationsEnabled: patch.loadingAnimationsEnabled } : {}),
+            ...(patch.loadingLightweightMode !== undefined ? { loadingLightweightMode: patch.loadingLightweightMode } : {}),
           }));
         } catch (err) {
           logFirestoreError(err, OperationType.UPDATE, path);
@@ -2417,6 +2484,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       dismissLevelUp,
       watchlist,
       favorites,
+      favoriteCharacters: cloudFavoriteCharacters,
       history,
       isAuthModalOpen,
       authError,
@@ -2434,9 +2502,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       signOut,
       isInWatchlist,
       isFavorite,
+      isFavoriteCharacter,
       getHistoryForAnime,
       toggleWatchlist,
       toggleFavorite,
+      toggleFavoriteCharacter,
       saveWatchProgress,
       recordWatchPlayback,
       recordWatchCompletion,
@@ -2464,6 +2534,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       dismissLevelUp,
       watchlist,
       favorites,
+      cloudFavoriteCharacters,
       history,
       isAuthModalOpen,
       authError,
@@ -2481,9 +2552,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       signOut,
       isInWatchlist,
       isFavorite,
+      isFavoriteCharacter,
       getHistoryForAnime,
       toggleWatchlist,
       toggleFavorite,
+      toggleFavoriteCharacter,
       saveWatchProgress,
       recordWatchPlayback,
       recordWatchCompletion,

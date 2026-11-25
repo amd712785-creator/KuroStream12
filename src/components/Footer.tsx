@@ -130,6 +130,11 @@ export const Footer: React.FC = () => {
                 </Link>
               </li>
               <li>
+                <Link to="/characters" className="hover:text-white transition-colors">
+                  Character Database
+                </Link>
+              </li>
+              <li>
                 <Link to="/search" className="hover:text-white transition-colors">
                   Browse &amp; Filter
                 </Link>

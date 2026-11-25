@@ -440,6 +440,7 @@ export const AnimeWorldWatchPage: React.FC = () => {
             streamData={streamData}
             streamError={streamError}
             loading={loadingStream}
+            loadingArtwork={rawStreamMeta?.poster || seriesPoster || null}
             episodeKey={`aw:${decodedContentId}:${requestedLang}`}
             episodeTitle={`${titleText} — ${displayEpLabel}`}
             initialTime={initialTime}

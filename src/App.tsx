@@ -11,8 +11,11 @@ import { StartupSplashIntro } from '@/src/components/StartupSplashIntro';
 import { LevelUpModal } from '@/src/components/UserLevelXpSection';
 import { ASSETS } from '@/src/config/env';
 import { AuthProvider, useAuth } from '@/src/context/AuthContext';
+import { LoadingThemeProvider } from '@/src/context/LoadingThemeContext';
 import { NotificationProvider } from '@/src/context/NotificationContext';
 import { ServerProvider } from '@/src/context/ServerContext';
+import { DynamicLoadingScreen } from '@/src/components/DynamicLoadingScreen';
+import { resolveLoadingArtworkForPath } from '@/src/services/dynamicLoadingService';
 import { HomePage } from '@/src/pages/HomePage';
 import {
   recordSiteVisit,
@@ -59,28 +62,24 @@ const CommunityPage = lazy(() =>
 const WatchPage = lazy(() =>
   import('@/src/pages/WatchPage').then((m) => ({ default: m.WatchPage }))
 );
+const CharacterDatabasePage = lazy(() =>
+  import('@/src/pages/CharacterDatabasePage').then((m) => ({ default: m.CharacterDatabasePage }))
+);
+const CharacterDetailPage = lazy(() =>
+  import('@/src/pages/CharacterDetailPage').then((m) => ({ default: m.CharacterDetailPage }))
+);
 
 function RouteLoadingFallback() {
+  const location = useLocation();
+  const artwork = resolveLoadingArtworkForPath(location.pathname);
   return (
-    <div className="mx-auto flex min-h-[55vh] max-w-7xl items-center justify-center px-4 py-12">
-      <div className="flex flex-col items-center gap-3.5 text-slate-400">
-        <div className="relative flex h-20 w-20 items-center justify-center">
-          <span
-            aria-hidden="true"
-            className="absolute inset-0 animate-spin rounded-[22px] border-2 border-violet-500/25 border-t-violet-400 border-r-fuchsia-400"
-          />
-          <div className="relative h-14 w-14 overflow-hidden rounded-2xl border border-violet-400/45 bg-[#120e1e] shadow-[0_0_24px_rgba(168,85,247,0.45),0_0_14px_rgba(236,72,153,0.28)]">
-            <img
-              src={ASSETS.officialLogo}
-              alt="KuroStream Loading"
-              className="h-full w-full object-cover object-center"
-            />
-          </div>
-        </div>
-        <span className="text-xs font-semibold tracking-wider text-violet-200/90">
-          Loading KuroStream...
-        </span>
-      </div>
+    <div className="relative mx-auto flex min-h-[60vh] max-w-7xl items-center justify-center overflow-hidden rounded-3xl px-4 py-12">
+      <DynamicLoadingScreen
+        mode="embedded"
+        backgroundImage={artwork}
+        message="Preparing KuroStream..."
+        subMessage="Loading view & media assets"
+      />
     </div>
   );
 }
@@ -193,6 +192,8 @@ function AnimatedRoutes() {
             <Route path="/animeworld-india" element={<AnimeWorldBrowsePage />} />
             <Route path="/animeworld-india/series/:seriesId" element={<AnimeWorldSeriesPage />} />
             <Route path="/animeworld-india/watch/:kind/:contentId" element={<AnimeWorldWatchPage />} />
+            <Route path="/characters" element={<CharacterDatabasePage />} />
+            <Route path="/characters/:characterKey" element={<CharacterDetailPage />} />
             <Route path="/profile" element={<ProfilePage />} />
             <Route path="/profile/edit" element={<ProfileEditPage />} />
             <Route path="/community" element={<CommunityPage />} />
@@ -272,8 +273,10 @@ export default function App() {
         <AuthProvider>
           <NotificationProvider>
             <ServerProvider>
-              <PresenceTracker />
-              <AppShell />
+              <LoadingThemeProvider>
+                <PresenceTracker />
+                <AppShell />
+              </LoadingThemeProvider>
             </ServerProvider>
           </NotificationProvider>
         </AuthProvider>

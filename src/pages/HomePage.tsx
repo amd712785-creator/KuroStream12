@@ -18,6 +18,7 @@ import {
   AnimeWorldMediaCard,
 } from '@/src/components/AnimeWorldCatalogView';
 import { FeaturedAnimeSection } from '@/src/components/FeaturedAnimeSection';
+import { FeaturedCharactersSection } from '@/src/components/FeaturedCharactersSection';
 import { HeroBanner } from '@/src/components/HeroBanner';
 import { ServerSelector } from '@/src/components/ServerSelector';
 import { TelegramSupportButton } from '@/src/components/TelegramSupportButton';
@@ -533,6 +534,8 @@ export const HomePage: React.FC = () => {
           {/* Existing Server Selector */}
           <ServerSelector variant="cards" showQuickLinks />
 
+          <FeaturedCharactersSection />
+
           {history.length > 0 && (
             <ContinueWatchingSection history={history} />
           )}
@@ -641,6 +644,8 @@ export const HomePage: React.FC = () => {
 
           {/* Existing Server Selector */}
           <ServerSelector variant="cards" showQuickLinks />
+
+          <FeaturedCharactersSection />
 
           {history.length > 0 && (
             <ContinueWatchingSection history={history} />

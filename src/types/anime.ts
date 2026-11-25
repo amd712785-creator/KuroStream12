@@ -460,6 +460,91 @@ export interface UserPreferences {
   autoNext: boolean;
   theme?: ThemeId;
   equippedFrame?: ProfileFrameId;
+  loadingTheme?: DynamicLoadingStyleId | 'default';
+  loadingAnimationsEnabled?: boolean;
+  loadingLightweightMode?: boolean;
+}
+
+export type CharacterRole = 'Main' | 'Supporting' | 'Villain' | 'Background';
+export type CharacterRoleFilter = 'ALL' | 'MAIN' | 'SUPPORTING' | 'VILLAIN';
+
+export interface CharacterVoiceActor {
+  id: number;
+  name: string;
+  nativeName?: string | null;
+  language?: string | null;
+  imageUrl?: string | null;
+}
+
+export interface CharacterAnimeAppearance {
+  animeId: number;
+  title: string;
+  coverImage?: string | null;
+  bannerImage?: string | null;
+  role: CharacterRole;
+  format?: string | null;
+}
+
+export interface CharacterProfile {
+  key: string;
+  anilistId?: number | null;
+  customId?: string | null;
+  name: string;
+  nativeName?: string | null;
+  animeTitle?: string | null;
+  animeMediaId?: number | null;
+  description?: string | null;
+  gender?: string | null;
+  birthday?: string | null;
+  age?: string | null;
+  height?: string | null;
+  personality?: string | null;
+  role: CharacterRole;
+  abilities?: string[];
+  imageUrl: string;
+  bannerUrl?: string | null;
+  voiceActors?: CharacterVoiceActor[];
+  relatedCharacters?: CharacterAnimeAppearance[];
+  favourites?: number | null;
+  visible: boolean;
+  featured: boolean;
+  createdBy?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface FavoriteCharacterItem {
+  characterKey: string;
+  name: string;
+  imageUrl: string;
+  animeTitle?: string | null;
+  role?: CharacterRole;
+  addedAt: number;
+}
+
+export type DynamicLoadingStyleId =
+  | 'purple-galaxy'
+  | 'anime-aura'
+  | 'neon-particles'
+  | 'sakura-petals'
+  | 'cinematic-glow'
+  | 'minimal-dark';
+
+export interface DynamicLoadingStyleMeta {
+  id: DynamicLoadingStyleId;
+  name: string;
+  tagline: string;
+  description: string;
+  accentColor: string;
+}
+
+export interface DynamicLoadingConfig {
+  globalEnabled: boolean;
+  defaultStyle: DynamicLoadingStyleId;
+  durationMs: number;
+  enabledStyles: DynamicLoadingStyleId[];
+  updatedBy?: string;
+  updatedAt: number;
 }
 
 export interface AnimeCharacterAvatar {

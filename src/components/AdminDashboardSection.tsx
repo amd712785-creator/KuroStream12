@@ -39,6 +39,8 @@ import { AppUpdateModal } from '@/src/components/AppUpdateModal';
 import { AdminAdvancedAnalyticsSection } from '@/src/components/AdminAdvancedAnalyticsSection';
 import { AdminNotificationsSection } from '@/src/components/AdminNotificationsSection';
 import { AdminWatchAnalyticsSection } from '@/src/components/AdminWatchAnalyticsSection';
+import { AdminCharacterManagementSection } from '@/src/components/AdminCharacterManagementSection';
+import { AdminDynamicLoadingSection } from '@/src/components/AdminDynamicLoadingSection';
 import { useAuth } from '@/src/context/AuthContext';
 import { formatFirestoreUiError } from '@/src/lib/firebase';
 import {
@@ -136,6 +138,8 @@ export const AdminDashboardSection: React.FC = () => {
     | 'analytics'
     | 'popups'
     | 'updates'
+    | 'characters'
+    | 'loading-themes'
   >('watch-analytics');
 
   // App Update Manager State
@@ -965,6 +969,30 @@ export const AdminDashboardSection: React.FC = () => {
             <Smartphone className="h-4 w-4 text-cyan-400" />
             <span>App Update Manager</span>
           </button>
+          <button
+            type="button"
+            onClick={() => setAdminActiveTab('characters')}
+            className={`flex items-center gap-2 rounded-xl px-4 py-2 text-xs font-bold transition-all ${
+              adminActiveTab === 'characters'
+                ? 'kuro-segment-active text-white shadow-[0_0_15px_rgba(168,85,247,0.4)]'
+                : 'kuro-segment-idle text-slate-400 hover:text-white'
+            }`}
+          >
+            <Users className="h-4 w-4 text-amber-300" />
+            <span>Character Database</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setAdminActiveTab('loading-themes')}
+            className={`flex items-center gap-2 rounded-xl px-4 py-2 text-xs font-bold transition-all ${
+              adminActiveTab === 'loading-themes'
+                ? 'kuro-segment-active text-white shadow-[0_0_15px_rgba(168,85,247,0.4)]'
+                : 'kuro-segment-idle text-slate-400 hover:text-white'
+            }`}
+          >
+            <Sparkles className="h-4 w-4 text-violet-400" />
+            <span>Loading Themes</span>
+          </button>
         </div>
       </div>
 
@@ -984,6 +1012,9 @@ export const AdminDashboardSection: React.FC = () => {
           ADMIN NOTIFICATION CENTER
           ======================================================== */}
       {adminActiveTab === 'notifications' && <AdminNotificationsSection />}
+
+      {adminActiveTab === 'characters' && <AdminCharacterManagementSection />}
+      {adminActiveTab === 'loading-themes' && <AdminDynamicLoadingSection />}
 
       {/* ========================================================
           TAB 1: PROFILE BANNERS & AVATARS MANAGEMENT (REQUESTED)
