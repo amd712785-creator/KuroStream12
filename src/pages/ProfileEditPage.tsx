@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   ArrowLeft,
   Camera,
@@ -37,14 +37,17 @@ import {
   type CustomizationSettings,
   type ProfileBanner,
 } from '@/src/services/bannerService';
-import { generateClientThumbnail } from '@/src/services/imageCacheService';
+import { resolveMediaDisplayUrl } from '@/src/services/imageCacheService';
+import { uploadUserProfileMedia, validateUserImageFile } from '@/src/services/userMediaService';
 import type { AnimeCharacterAvatar } from '@/src/types/anime';
 
 export const ProfileEditPage: React.FC = () => {
   const { user, isAdmin, preferences, updatePreferences, openAuthModal } = useAuth();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
 
-  const [activeTab, setActiveTab] = useState<'avatars' | 'banners'>('banners');
+  const initialTab = searchParams.get('tab') === 'avatars' ? 'avatars' : 'banners';
+  const [activeTab, setActiveTab] = useState<'avatars' | 'banners'>(initialTab);
   const [selectedPhotoUrl, setSelectedPhotoUrl] = useState(
     preferences.photoURL || ASSETS.defaultAvatar
   );
@@ -54,11 +57,18 @@ export const ProfileEditPage: React.FC = () => {
   const [displayNameInput, setDisplayNameInput] = useState(preferences.displayName || 'KuroStream User');
   const [isEditingName, setIsEditingName] = useState(false);
 
+  // Pending device upload files & preview object URLs
+  const [pendingAvatarFile, setPendingAvatarFile] = useState<File | null>(null);
+  const [pendingBannerFile, setPendingBannerFile] = useState<File | null>(null);
+  const avatarPreviewUrlRef = useRef<string | null>(null);
+  const bannerPreviewUrlRef = useRef<string | null>(null);
+  const [uploadProgress, setUploadProgress] = useState<number | null>(null);
+  const [uploadStageLabel, setUploadStageLabel] = useState<string | null>(null);
+
   // Custom input states
   const [customAvatarInput, setCustomAvatarInput] = useState('');
   const [customBannerInput, setCustomBannerInput] = useState('');
   const [fileUploadError, setFileUploadError] = useState<string | null>(null);
-  const [isUploadingBanner, setIsUploadingBanner] = useState(false);
 
   // Real-time custom profile banners & customization settings from Firestore
   const [banners, setBanners] = useState<ProfileBanner[]>(CURATED_PROFILE_BANNERS);
@@ -92,12 +102,20 @@ export const ProfileEditPage: React.FC = () => {
   const bannerFileInputRef = useRef<HTMLInputElement>(null);
   const avatarFileInputRef = useRef<HTMLInputElement>(null);
 
-  // Sync initial preferences
+  // Clean up object URLs on unmount
   useEffect(() => {
-    if (preferences.photoURL) setSelectedPhotoUrl(preferences.photoURL);
-    if (preferences.bannerURL) setSelectedBannerUrl(preferences.bannerURL);
+    return () => {
+      if (avatarPreviewUrlRef.current) URL.revokeObjectURL(avatarPreviewUrlRef.current);
+      if (bannerPreviewUrlRef.current) URL.revokeObjectURL(bannerPreviewUrlRef.current);
+    };
+  }, []);
+
+  // Sync initial preferences only when no unsaved local file preview is active
+  useEffect(() => {
+    if (preferences.photoURL && !pendingAvatarFile) setSelectedPhotoUrl(preferences.photoURL);
+    if (preferences.bannerURL && !pendingBannerFile) setSelectedBannerUrl(preferences.bannerURL);
     if (preferences.displayName) setDisplayNameInput(preferences.displayName);
-  }, [preferences]);
+  }, [preferences, pendingAvatarFile, pendingBannerFile]);
 
   // Subscribe to real-time banners and unlock settings
   useEffect(() => {
@@ -228,6 +246,22 @@ export const ProfileEditPage: React.FC = () => {
     });
   };
 
+  const clearPendingAvatarFile = () => {
+    setPendingAvatarFile(null);
+    if (avatarPreviewUrlRef.current) {
+      URL.revokeObjectURL(avatarPreviewUrlRef.current);
+      avatarPreviewUrlRef.current = null;
+    }
+  };
+
+  const clearPendingBannerFile = () => {
+    setPendingBannerFile(null);
+    if (bannerPreviewUrlRef.current) {
+      URL.revokeObjectURL(bannerPreviewUrlRef.current);
+      bannerPreviewUrlRef.current = null;
+    }
+  };
+
   // Handle banner selection
   const handleSelectBanner = (banner: ProfileBanner) => {
     const unlocked = isBannerUnlocked(banner, customizationSettings, isAdmin);
@@ -237,6 +271,7 @@ export const ProfileEditPage: React.FC = () => {
       return;
     }
     setLockNotice(null);
+    clearPendingBannerFile();
     setSelectedBannerUrl(banner.imageUrl);
   };
 
@@ -249,88 +284,117 @@ export const ProfileEditPage: React.FC = () => {
       return;
     }
     setLockNotice(null);
+    clearPendingAvatarFile();
     setSelectedPhotoUrl(ch.imageUrl);
   };
 
-  // File upload for Banner with WebP optimization
-  const handleBannerFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  // File selection for Banner (preview first, uploaded on Save)
+  const handleBannerFile = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = '';
     if (!file) return;
 
-    if (!file.type.startsWith('image/')) {
-      setFileUploadError('Please select a valid image file (JPG, PNG, WebP).');
-      return;
-    }
-    if (file.size > 8 * 1024 * 1024) {
-      setFileUploadError('Banner file size must be less than 8 MB.');
-      return;
-    }
-    setFileUploadError(null);
-    setIsUploadingBanner(true);
-
     try {
-      // Generate optimized WebP landscape image client-side for immediate performance
-      const optimizedWebP = await generateClientThumbnail(file, 1600, 900);
-      setSelectedBannerUrl(optimizedWebP);
-    } catch {
-      const reader = new FileReader();
-      reader.onload = () => {
-        if (typeof reader.result === 'string') {
-          setSelectedBannerUrl(reader.result);
-        }
-      };
-      reader.readAsDataURL(file);
-    } finally {
-      setIsUploadingBanner(false);
+      validateUserImageFile(file);
+    } catch (err) {
+      setFileUploadError(err instanceof Error ? err.message : 'Please select a valid image file.');
+      return;
     }
+
+    setFileUploadError(null);
+    setSaveError(null);
+    const previewUrl = URL.createObjectURL(file);
+    if (bannerPreviewUrlRef.current) URL.revokeObjectURL(bannerPreviewUrlRef.current);
+    bannerPreviewUrlRef.current = previewUrl;
+    setPendingBannerFile(file);
+    setSelectedBannerUrl(previewUrl);
   };
 
-  // File upload for Avatar
+  // File selection for Avatar (preview first, uploaded on Save)
   const handleAvatarFile = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = '';
     if (!file) return;
 
-    if (!file.type.startsWith('image/')) {
-      setFileUploadError('Please select a valid image file (JPG, PNG, WebP).');
+    try {
+      validateUserImageFile(file);
+    } catch (err) {
+      setFileUploadError(err instanceof Error ? err.message : 'Please select a valid image file.');
       return;
     }
-    if (file.size > 3 * 1024 * 1024) {
-      setFileUploadError('Avatar file size must be less than 3 MB.');
-      return;
-    }
-    setFileUploadError(null);
 
-    const reader = new FileReader();
-    reader.onload = () => {
-      if (typeof reader.result === 'string') {
-        setSelectedPhotoUrl(reader.result);
-      }
-    };
-    reader.readAsDataURL(file);
+    setFileUploadError(null);
+    setSaveError(null);
+    const previewUrl = URL.createObjectURL(file);
+    if (avatarPreviewUrlRef.current) URL.revokeObjectURL(avatarPreviewUrlRef.current);
+    avatarPreviewUrlRef.current = previewUrl;
+    setPendingAvatarFile(file);
+    setSelectedPhotoUrl(previewUrl);
   };
 
-  // Save changes to Firestore
+  // Upload any pending device images & save changes to Firestore + Firebase Auth
   const handleSaveAll = async () => {
     if (!user) {
       openAuthModal();
       return;
     }
+
+    const trimmedName = displayNameInput.trim();
+    if (!trimmedName) {
+      setSaveError('Display name cannot be empty.');
+      return;
+    }
+    if (trimmedName.length < 2 || trimmedName.length > 60) {
+      setSaveError('Display name must be between 2 and 60 characters.');
+      return;
+    }
+
     setSaving(true);
     setSaveError(null);
+    setFileUploadError(null);
+    setUploadProgress(null);
+    setUploadStageLabel(null);
+
     try {
+      let finalPhotoUrl = selectedPhotoUrl;
+      if (pendingAvatarFile) {
+        setUploadStageLabel('Uploading profile picture...');
+        const uploadedAvatar = await uploadUserProfileMedia(pendingAvatarFile, 'avatar', (pct) => {
+          setUploadProgress(pct);
+        });
+        finalPhotoUrl = uploadedAvatar.imageUrl;
+        clearPendingAvatarFile();
+        setSelectedPhotoUrl(finalPhotoUrl);
+      }
+
+      let finalBannerUrl = selectedBannerUrl;
+      if (pendingBannerFile) {
+        setUploadStageLabel('Uploading profile banner...');
+        const uploadedBanner = await uploadUserProfileMedia(pendingBannerFile, 'banner', (pct) => {
+          setUploadProgress(pct);
+        });
+        finalBannerUrl = uploadedBanner.imageUrl;
+        clearPendingBannerFile();
+        setSelectedBannerUrl(finalBannerUrl);
+      }
+
+      setUploadStageLabel('Saving profile...');
       await updatePreferences({
-        photoURL: selectedPhotoUrl,
-        bannerURL: selectedBannerUrl,
-        displayName: displayNameInput.trim() || preferences.displayName || 'KuroStream User',
+        photoURL: finalPhotoUrl,
+        bannerURL: finalBannerUrl,
+        displayName: trimmedName,
       });
+
+      setUploadProgress(null);
+      setUploadStageLabel(null);
       setSaveSuccess(true);
       window.setTimeout(() => {
         setSaveSuccess(false);
         navigate('/profile');
       }, 1200);
     } catch (err) {
+      setUploadProgress(null);
+      setUploadStageLabel(null);
       setSaveError(err instanceof Error ? err.message : 'Failed to save profile changes.');
     } finally {
       setSaving(false);
@@ -419,13 +483,25 @@ export const ProfileEditPage: React.FC = () => {
                   type="text"
                   maxLength={60}
                   value={displayNameInput}
-                  onChange={(e) => setDisplayNameInput(e.target.value)}
+                  onChange={(e) => {
+                    setDisplayNameInput(e.target.value);
+                    if (saveError) setSaveError(null);
+                  }}
+                  placeholder="Enter display name (2-60 chars)"
                   className="h-11 flex-1 rounded-xl border border-violet-500/60 bg-[#10121c] px-4 text-center text-base font-bold text-white focus:outline-none focus:ring-2 focus:ring-violet-500"
                   autoFocus
                 />
                 <button
                   type="button"
-                  onClick={() => setIsEditingName(false)}
+                  onClick={() => {
+                    const trimmed = displayNameInput.trim();
+                    if (trimmed.length < 2) {
+                      setSaveError('Display name must be at least 2 characters.');
+                      return;
+                    }
+                    setDisplayNameInput(trimmed);
+                    setIsEditingName(false);
+                  }}
                   className="kuro-btn-primary h-11 rounded-xl px-4 text-xs font-semibold"
                 >
                   Done
@@ -433,7 +509,9 @@ export const ProfileEditPage: React.FC = () => {
               </div>
             ) : (
               <div className="flex items-center gap-2.5">
-                <h1 className="text-xl sm:text-2xl font-black text-white">{displayNameInput}</h1>
+                <h1 className="text-xl sm:text-2xl font-black text-white">
+                  {displayNameInput || 'Unnamed User'}
+                </h1>
                 <button
                   type="button"
                   onClick={() => setIsEditingName(true)}
@@ -455,16 +533,36 @@ export const ProfileEditPage: React.FC = () => {
 
         {/* Action Save Bar */}
         <div className="mt-6 flex flex-col sm:flex-row items-center justify-between gap-4 rounded-2xl border border-white/[0.1] bg-[#10121d]/90 p-4 backdrop-blur-xl shadow-xl">
-          <div className="text-xs text-slate-300">
+          <div className="text-xs text-slate-300 w-full sm:w-auto">
             {saveSuccess ? (
               <span className="font-semibold text-emerald-400 flex items-center gap-1.5">
                 <Check className="h-4 w-4" /> Profile updated successfully! Redirecting...
               </span>
             ) : saveError ? (
               <span className="font-semibold text-rose-400">{saveError}</span>
+            ) : saving && uploadStageLabel ? (
+              <div className="space-y-1.5">
+                <span className="font-semibold text-violet-300 flex items-center gap-1.5">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  {uploadStageLabel} {uploadProgress !== null ? `(${uploadProgress}%)` : ''}
+                </span>
+                {uploadProgress !== null && (
+                  <div className="h-1.5 w-48 overflow-hidden rounded-full bg-white/10">
+                    <div
+                      className="h-full rounded-full bg-gradient-to-r from-violet-500 to-fuchsia-500 transition-all duration-150"
+                      style={{ width: `${uploadProgress}%` }}
+                    />
+                  </div>
+                )}
+              </div>
             ) : lockNotice ? (
               <span className="font-semibold text-amber-300 flex items-center gap-1.5">
                 <Lock className="h-3.5 w-3.5" /> {lockNotice}
+              </span>
+            ) : pendingAvatarFile || pendingBannerFile ? (
+              <span className="flex items-center gap-1.5 text-fuchsia-300 font-medium">
+                <Sparkles className="h-3.5 w-3.5" />
+                Preview ready. Tap &ldquo;Save Changes&rdquo; to upload and apply permanently.
               </span>
             ) : (
               <span className="flex items-center gap-1.5 text-slate-400">
@@ -486,10 +584,16 @@ export const ProfileEditPage: React.FC = () => {
               type="button"
               onClick={handleSaveAll}
               disabled={saving}
-              className="kuro-btn-primary inline-flex min-h-[42px] items-center gap-2 rounded-xl px-6 py-2 text-xs sm:text-sm font-bold shadow-[0_0_20px_rgba(168,85,247,0.5)] transition-transform hover:scale-[1.02] active:scale-95"
+              className="kuro-btn-primary inline-flex min-h-[42px] items-center gap-2 rounded-xl px-6 py-2 text-xs sm:text-sm font-bold shadow-[0_0_20px_rgba(168,85,247,0.5)] transition-transform hover:scale-[1.02] active:scale-95 disabled:opacity-60"
             >
               {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
-              <span>Save Changes</span>
+              <span>
+                {saving
+                  ? uploadProgress !== null
+                    ? `Uploading ${uploadProgress}%`
+                    : 'Saving...'
+                  : 'Save Changes'}
+              </span>
             </button>
           </div>
         </div>
@@ -620,15 +724,11 @@ export const ProfileEditPage: React.FC = () => {
                   <button
                     type="button"
                     onClick={() => bannerFileInputRef.current?.click()}
-                    disabled={isUploadingBanner}
-                    className="kuro-btn-glass w-full sm:w-auto inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-xs font-semibold text-violet-300 hover:text-white"
+                    disabled={saving}
+                    className="kuro-btn-glass w-full sm:w-auto inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-xs font-semibold text-violet-300 hover:text-white disabled:opacity-60"
                   >
-                    {isUploadingBanner ? (
-                      <Loader2 className="h-4 w-4 animate-spin text-violet-400" />
-                    ) : (
-                      <Upload className="h-4 w-4" />
-                    )}
-                    <span>{isUploadingBanner ? 'Optimizing WebP...' : 'Upload From Device'}</span>
+                    <Upload className="h-4 w-4" />
+                    <span>{pendingBannerFile ? 'Change Selected File' : 'Upload From Device'}</span>
                   </button>
 
                   <div className="flex-1 flex w-full gap-2">
@@ -642,8 +742,15 @@ export const ProfileEditPage: React.FC = () => {
                     <button
                       type="button"
                       onClick={() => {
-                        if (customBannerInput.trim()) {
-                          setSelectedBannerUrl(customBannerInput.trim());
+                        const trimmed = customBannerInput.trim();
+                        if (trimmed) {
+                          if (!/^https?:\/\//i.test(trimmed)) {
+                            setFileUploadError('Banner link must start with https:// or http://');
+                            return;
+                          }
+                          setFileUploadError(null);
+                          clearPendingBannerFile();
+                          setSelectedBannerUrl(trimmed);
                           setCustomBannerInput('');
                         }
                       }}
@@ -798,10 +905,11 @@ export const ProfileEditPage: React.FC = () => {
                   <button
                     type="button"
                     onClick={() => avatarFileInputRef.current?.click()}
-                    className="kuro-btn-glass w-full sm:w-auto inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-xs font-semibold text-fuchsia-300 hover:text-white"
+                    disabled={saving}
+                    className="kuro-btn-glass w-full sm:w-auto inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-xs font-semibold text-fuchsia-300 hover:text-white disabled:opacity-60"
                   >
                     <Upload className="h-4 w-4" />
-                    <span>Upload Avatar</span>
+                    <span>{pendingAvatarFile ? 'Change Selected Photo' : 'Upload Avatar'}</span>
                   </button>
 
                   <div className="flex-1 flex w-full gap-2">
@@ -815,8 +923,15 @@ export const ProfileEditPage: React.FC = () => {
                     <button
                       type="button"
                       onClick={() => {
-                        if (customAvatarInput.trim()) {
-                          setSelectedPhotoUrl(customAvatarInput.trim());
+                        const trimmed = customAvatarInput.trim();
+                        if (trimmed) {
+                          if (!/^https?:\/\//i.test(trimmed)) {
+                            setFileUploadError('Avatar link must start with https:// or http://');
+                            return;
+                          }
+                          setFileUploadError(null);
+                          clearPendingAvatarFile();
+                          setSelectedPhotoUrl(trimmed);
                           setCustomAvatarInput('');
                         }
                       }}
@@ -857,7 +972,7 @@ export const ProfileEditPage: React.FC = () => {
                           }`}
                         >
                           <img
-                            src={ch.imageUrl}
+                            src={resolveMediaDisplayUrl(ch.imageUrl)}
                             alt={ch.name}
                             loading="lazy"
                             className="h-full w-full object-cover object-top transition-transform duration-200 group-hover:scale-105"

@@ -5,6 +5,7 @@ import {
   Loader2,
   RotateCcw,
   Search,
+  Upload,
   User,
   X,
 } from 'lucide-react';
@@ -14,6 +15,8 @@ import {
   fetchCharacterGalleryPage,
   type CharacterCategoryFilter,
 } from '@/src/services/charactersApi';
+import { resolveMediaDisplayUrl } from '@/src/services/imageCacheService';
+import { uploadUserProfileMedia, validateUserImageFile } from '@/src/services/userMediaService';
 import type { AnimeCharacterAvatar } from '@/src/types/anime';
 
 interface AvatarGalleryModalProps {
@@ -60,23 +63,45 @@ export const AvatarGalleryModal: React.FC<AvatarGalleryModalProps> = ({
     series: displayName,
   });
   const [saving, setSaving] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<number | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [pendingUploadFile, setPendingUploadFile] = useState<File | null>(null);
+  const [pendingPreviewUrl, setPendingPreviewUrl] = useState<string | null>(null);
 
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const loadMoreSentinelRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const clearPendingUpload = useCallback(() => {
+    setPendingUploadFile(null);
+    setPendingPreviewUrl((prev) => {
+      if (prev) URL.revokeObjectURL(prev);
+      return null;
+    });
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (pendingPreviewUrl) {
+        URL.revokeObjectURL(pendingPreviewUrl);
+      }
+    };
+  }, [pendingPreviewUrl]);
 
   // Sync preview selection whenever modal opens
   useEffect(() => {
     if (isOpen) {
       const startUrl = currentAvatarUrl || ASSETS.defaultAvatar;
+      clearPendingUpload();
       setSelectedAvatar({
         url: startUrl,
         name: startUrl === ASSETS.defaultAvatar ? 'Default Avatar' : 'Current Profile Picture',
         series: displayName,
       });
+      setUploadProgress(null);
       setSaveError(null);
     }
-  }, [isOpen, currentAvatarUrl, displayName]);
+  }, [isOpen, currentAvatarUrl, displayName, clearPendingUpload]);
 
   // Debounce search input
   useEffect(() => {
@@ -168,6 +193,7 @@ export const AvatarGalleryModal: React.FC<AvatarGalleryModalProps> = ({
   }, [isOpen, hasNextPage, loading, loadingMore, page, loadCharacters]);
 
   const handleUseDefault = () => {
+    clearPendingUpload();
     setSelectedAvatar({
       url: ASSETS.defaultAvatar,
       name: 'Default KuroStream Avatar',
@@ -176,14 +202,51 @@ export const AvatarGalleryModal: React.FC<AvatarGalleryModalProps> = ({
     setSaveError(null);
   };
 
+  const handleLocalFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+
+    try {
+      validateUserImageFile(file);
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : 'Invalid image file selected.');
+      return;
+    }
+
+    const previewObjectUrl = URL.createObjectURL(file);
+    setPendingPreviewUrl((prev) => {
+      if (prev) URL.revokeObjectURL(prev);
+      return previewObjectUrl;
+    });
+    setPendingUploadFile(file);
+    setSelectedAvatar({
+      url: previewObjectUrl,
+      name: file.name || 'Custom Gallery Photo',
+      series: 'Device Photo (Tap Save to upload)',
+    });
+    setSaveError(null);
+  };
+
   const handleSave = async () => {
     if (!selectedAvatar.url || saving) return;
     setSaving(true);
     setSaveError(null);
+    setUploadProgress(pendingUploadFile ? 5 : null);
     try {
-      await onSave(selectedAvatar.url);
+      let finalUrl = selectedAvatar.url;
+      if (pendingUploadFile) {
+        const uploaded = await uploadUserProfileMedia(pendingUploadFile, 'avatar', (pct) => {
+          setUploadProgress(pct);
+        });
+        finalUrl = uploaded.imageUrl;
+      }
+      await onSave(finalUrl);
+      clearPendingUpload();
+      setUploadProgress(null);
       onClose();
     } catch (err) {
+      setUploadProgress(null);
       setSaveError(
         err instanceof Error ? err.message : 'Failed to save profile picture. Please try again.'
       );
@@ -363,8 +426,33 @@ export const AvatarGalleryModal: React.FC<AvatarGalleryModalProps> = ({
                   </div>
 
                   <div className="flex flex-wrap items-center gap-2 lg:flex-col lg:items-stretch">
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept="image/jpeg,image/png,image/webp,image/gif,image/*"
+                      onChange={handleLocalFileChange}
+                      className="hidden"
+                    />
+
                     {saveError && (
-                      <p className="w-full text-xs text-rose-300">{saveError}</p>
+                      <p className="w-full rounded-xl border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-200">
+                        {saveError}
+                      </p>
+                    )}
+
+                    {uploadProgress !== null && (
+                      <div className="w-full space-y-1">
+                        <div className="flex items-center justify-between text-[11px] font-semibold text-violet-300">
+                          <span>Uploading photo...</span>
+                          <span className="tabular-nums">{uploadProgress}%</span>
+                        </div>
+                        <div className="h-1.5 w-full overflow-hidden rounded-full bg-white/10">
+                          <div
+                            className="h-full rounded-full bg-gradient-to-r from-violet-500 to-fuchsia-500 transition-all duration-150"
+                            style={{ width: `${uploadProgress}%` }}
+                          />
+                        </div>
+                      </div>
                     )}
 
                     <button
@@ -376,7 +464,9 @@ export const AvatarGalleryModal: React.FC<AvatarGalleryModalProps> = ({
                       {saving ? (
                         <>
                           <Loader2 className="h-4 w-4 animate-spin" />
-                          <span>Saving...</span>
+                          <span>
+                            {uploadProgress !== null ? `Uploading (${uploadProgress}%)` : 'Saving...'}
+                          </span>
                         </>
                       ) : (
                         <>
@@ -384,6 +474,16 @@ export const AvatarGalleryModal: React.FC<AvatarGalleryModalProps> = ({
                           <span>Save Profile Picture</span>
                         </>
                       )}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => fileInputRef.current?.click()}
+                      disabled={saving}
+                      className="kuro-btn-glass inline-flex min-h-[42px] items-center justify-center gap-1.5 rounded-2xl border-violet-400/30 px-3.5 py-2 text-xs font-semibold text-violet-200 whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
+                    >
+                      <Upload className="h-3.5 w-3.5" />
+                      <span>Upload from Phone</span>
                     </button>
 
                     <button
@@ -468,6 +568,7 @@ export const AvatarGalleryModal: React.FC<AvatarGalleryModalProps> = ({
                               key={ch.id}
                               type="button"
                               onClick={() => {
+                                clearPendingUpload();
                                 setSelectedAvatar({
                                   url: ch.imageUrl,
                                   name: ch.name,
@@ -549,13 +650,14 @@ const CharacterPortraitImg: React.FC<{
   alt: string;
   className?: string;
 }> = ({ src, alt, className = '' }) => {
+  const resolvedSrc = resolveMediaDisplayUrl(src);
   const [failed, setFailed] = useState(false);
 
   useEffect(() => {
     setFailed(false);
-  }, [src]);
+  }, [resolvedSrc]);
 
-  if (failed || !src) {
+  if (failed || !resolvedSrc) {
     return (
       <div
         className={`flex h-full w-full items-center justify-center bg-gradient-to-br from-[#19162b] to-[#11131d] p-2 text-center ${className}`}
@@ -569,7 +671,7 @@ const CharacterPortraitImg: React.FC<{
 
   return (
     <img
-      src={src}
+      src={resolvedSrc}
       alt={alt}
       referrerPolicy="no-referrer"
       loading="lazy"

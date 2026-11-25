@@ -71,32 +71,36 @@ export const AppUpdateModal: React.FC<AppUpdateModalProps> = ({
   };
 
   const handleUpdateNow = () => {
-    if (!config?.apkUrl) return;
-    setDownloading(true);
-    setDownloadProgress(0);
+    if (!config?.apkUrl) {
+      setDownloadError('Update download URL is missing.');
+      return;
+    }
     setDownloadError(null);
+    setDownloading(true);
+    setDownloadComplete(false);
 
-    // Simulate smooth APK download progress
-    let current = 0;
-    const interval = window.setInterval(() => {
-      current += Math.floor(Math.random() * 18) + 12;
-      if (current >= 100) {
-        current = 100;
-        window.clearInterval(interval);
-        setDownloadProgress(100);
-        setDownloadComplete(true);
-
-        // Open APK download URL / trigger package installer intent
-        try {
-          const newWindow = window.open(config.apkUrl, '_blank', 'noopener,noreferrer');
-          if (newWindow) newWindow.opener = null;
-        } catch {
-          window.location.href = config.apkUrl;
-        }
-      } else {
-        setDownloadProgress(current);
+    try {
+      const targetUrl = config.apkUrl.trim();
+      if (!/^https?:\/\//i.test(targetUrl)) {
+        throw new Error('Invalid APK download URL.');
       }
-    }, 280);
+
+      // MainActivity intercepts .apk and github.com URLs and opens them in Android system browser/installer
+      const link = document.createElement('a');
+      link.href = targetUrl;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+
+      setDownloadProgress(100);
+      setDownloadComplete(true);
+    } catch (err) {
+      setDownloading(false);
+      setDownloadComplete(false);
+      setDownloadError(err instanceof Error ? err.message : 'Unable to launch APK download.');
+    }
   };
 
   return (
@@ -216,18 +220,17 @@ export const AppUpdateModal: React.FC<AppUpdateModalProps> = ({
 
           {/* Action Buttons */}
           <div className="mt-6 flex flex-col sm:flex-row items-center gap-3 w-full">
-            <button
-              type="button"
-              disabled={downloading && !downloadComplete}
-              onClick={handleUpdateNow}
+            <a
+              href={config.apkUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={(e) => {
+                e.preventDefault();
+                handleUpdateNow();
+              }}
               className="kuro-btn-primary inline-flex min-h-[48px] w-full flex-1 items-center justify-center gap-2 rounded-2xl px-6 py-3 text-sm font-bold text-white shadow-lg shadow-violet-950/60 transition-transform hover:scale-[1.02] active:scale-[0.98]"
             >
-              {downloading && !downloadComplete ? (
-                <>
-                  <Loader2 className="h-5 w-5 animate-spin" />
-                  <span>Downloading ({downloadProgress}%)</span>
-                </>
-              ) : downloadComplete ? (
+              {downloadComplete ? (
                 <>
                   <ExternalLink className="h-5 w-5" />
                   <span>Open APK / Re-download</span>
@@ -238,7 +241,7 @@ export const AppUpdateModal: React.FC<AppUpdateModalProps> = ({
                   <span>{config.buttonText || 'Update Now'}</span>
                 </>
               )}
-            </button>
+            </a>
 
             {(!config.mandatory || isPreview) && (
               <button
@@ -252,7 +255,7 @@ export const AppUpdateModal: React.FC<AppUpdateModalProps> = ({
           </div>
 
           <p className="mt-4 text-[11px] text-slate-500">
-            Secure KuroStream APK updater · Preserves logins, watch history &amp; preferences.
+            Secure KuroStream APK updater · Installs over previous version while preserving logins, watch history &amp; preferences.
           </p>
         </div>
       </div>

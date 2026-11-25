@@ -21,6 +21,10 @@ export function resolveBannerDisplayUrl(rawUrl: string): string {
   return url;
 }
 
+export function resolveMediaDisplayUrl(rawUrl: string): string {
+  return resolveBannerDisplayUrl(rawUrl);
+}
+
 /**
  * Checks if an image URL is already loaded and decoded in memory
  */

@@ -66,6 +66,7 @@ function resolveWritableDataDir(): string {
   for (const dir of candidates) {
     try {
       fs.mkdirSync(path.join(dir, 'uploads', 'banners'), { recursive: true });
+      fs.mkdirSync(path.join(dir, 'uploads', 'users'), { recursive: true });
       return dir;
     } catch {
       // Try next writable directory (Vercel /var/task is read-only)
@@ -76,6 +77,7 @@ function resolveWritableDataDir(): string {
 
 const DATA_DIR = resolveWritableDataDir();
 const BANNER_UPLOADS_DIR = path.join(DATA_DIR, 'uploads', 'banners');
+const USER_UPLOADS_DIR = path.join(DATA_DIR, 'uploads', 'users');
 const ANALYTICS_FILE_PATH = path.join(DATA_DIR, 'analytics.json');
 const XP_LEDGER_FILE_PATH = path.join(DATA_DIR, 'xp-ledger.json');
 
@@ -3501,6 +3503,7 @@ export function createExpressApp() {
   app.use('/api', (req: Request, res: Response, next: NextFunction) => {
     const isAuthenticatedRoute =
       req.path.startsWith('/admin') ||
+      req.path.startsWith('/user') ||
       req.path.startsWith('/anime') ||
       req.path.startsWith('/munchyroll') ||
       req.path.startsWith('/anilist') ||
@@ -4597,6 +4600,182 @@ export function createExpressApp() {
     }
     if (!fs.existsSync(targetPath)) {
       res.status(404).json({ error: 'Banner image not found.' });
+      return;
+    }
+
+    const ext = path.extname(filename).toLowerCase();
+    const mimeMap: Record<string, string> = {
+      '.jpg': 'image/jpeg',
+      '.jpeg': 'image/jpeg',
+      '.png': 'image/png',
+      '.webp': 'image/webp',
+      '.gif': 'image/gif',
+    };
+
+    res.setHeader('Content-Type', mimeMap[ext] || 'application/octet-stream');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+    fs.createReadStream(targetPath).pipe(res);
+  });
+
+  const userMediaMultipartUpload = multer({
+    storage: multer.memoryStorage(),
+    limits: {
+      fileSize: 5 * 1024 * 1024,
+      files: 1,
+    },
+  }).fields([
+    { name: 'image', maxCount: 1 },
+    { name: 'file', maxCount: 1 },
+  ]);
+
+  const runUserMediaMultipartMiddleware = (req: Request, res: Response): Promise<void> =>
+    new Promise((resolve, reject) => {
+      userMediaMultipartUpload(req, res, (err: unknown) => {
+        if (err) {
+          reject(err);
+          return;
+        }
+        resolve();
+      });
+    });
+
+  // Protected User Avatar / Banner Image Upload (Firebase Auth required; supports multipart/form-data and JSON base64 fallback)
+  app.post('/api/user/media/upload', requireFirebaseAuth, async (req: Request, res: Response) => {
+    const contentType = String(req.headers['content-type'] || '').toLowerCase();
+    let buffer: Buffer | null = null;
+    let declaredMime = '';
+    const queryKind = typeof req.query.kind === 'string' ? req.query.kind.trim().toLowerCase() : '';
+    let mediaKind: 'avatar' | 'banner' = queryKind === 'banner' ? 'banner' : 'avatar';
+
+    if (contentType.includes('multipart/form-data')) {
+      try {
+        await runUserMediaMultipartMiddleware(req, res);
+      } catch (err) {
+        if (err instanceof multer.MulterError) {
+          const status = err.code === 'LIMIT_FILE_SIZE' ? 413 : 400;
+          const message =
+            err.code === 'LIMIT_FILE_SIZE'
+              ? 'Uploaded image must not exceed 5 MB.'
+              : `Invalid upload payload (${err.message}).`;
+          res.status(status).json({ error: message, code: err.code });
+          return;
+        }
+        res.status(400).json({
+          error: err instanceof Error ? err.message : 'Failed to parse multipart image upload.',
+        });
+        return;
+      }
+
+      const uploadedFiles = req.files as Record<string, Express.Multer.File[]> | undefined;
+      const uploadedFile = uploadedFiles?.image?.[0] || uploadedFiles?.file?.[0];
+      if (!uploadedFile || !uploadedFile.buffer) {
+        res.status(400).json({ error: 'Missing image file in multipart upload.' });
+        return;
+      }
+      const bodyKind = typeof (req.body as Record<string, unknown> | undefined)?.kind === 'string'
+        ? String((req.body as Record<string, unknown>).kind).trim().toLowerCase()
+        : '';
+      if (bodyKind === 'banner') mediaKind = 'banner';
+      buffer = uploadedFile.buffer;
+      declaredMime = String(uploadedFile.mimetype || '').trim().toLowerCase();
+    } else {
+      try {
+        await runJsonParserMiddleware(req, res);
+      } catch (err) {
+        res.status(400).json({
+          error: err instanceof Error ? err.message : 'Invalid JSON upload payload.',
+        });
+        return;
+      }
+
+      const body = (req.body || {}) as Record<string, unknown>;
+      const rawData = typeof body.dataBase64 === 'string' ? body.dataBase64.trim() : '';
+      declaredMime = typeof body.mimeType === 'string' ? body.mimeType.trim().toLowerCase() : '';
+      if (typeof body.kind === 'string' && body.kind.trim().toLowerCase() === 'banner') {
+        mediaKind = 'banner';
+      }
+
+      if (!rawData) {
+        res.status(400).json({ error: 'Missing image data.' });
+        return;
+      }
+
+      const cleanedBase64 = rawData.replace(/^data:image\/[a-z0-9.+-]+;base64,/i, '');
+      try {
+        buffer = Buffer.from(cleanedBase64, 'base64');
+      } catch {
+        res.status(400).json({ error: 'Invalid base64 image payload.' });
+        return;
+      }
+    }
+
+    const allowedMimes = new Set([
+      'image/jpeg',
+      'image/jpg',
+      'image/pjpeg',
+      'image/png',
+      'image/webp',
+      'image/gif',
+      'application/octet-stream',
+    ]);
+    if (declaredMime && !allowedMimes.has(declaredMime)) {
+      res.status(400).json({ error: 'Unsupported image format. Allowed: JPG, PNG, WebP, GIF.' });
+      return;
+    }
+
+    if (!buffer || buffer.length === 0 || buffer.length > 5 * 1024 * 1024) {
+      res.status(400).json({ error: 'Profile image must be between 1 byte and 5 MB.' });
+      return;
+    }
+
+    const verified = detectVerifiedImageFormat(buffer);
+    if (!verified) {
+      res.status(400).json({ error: 'Invalid or corrupted image file. Allowed: JPG, PNG, WebP, GIF.' });
+      return;
+    }
+
+    const safeFileName = `user_${mediaKind}_${Date.now()}_${crypto.randomBytes(6).toString('hex')}${verified.ext}`;
+    const resolvedUploadsDir = path.resolve(USER_UPLOADS_DIR);
+    const destPath = path.resolve(resolvedUploadsDir, safeFileName);
+    if (!destPath.startsWith(resolvedUploadsDir + path.sep)) {
+      res.status(400).json({ error: 'Invalid upload destination path.' });
+      return;
+    }
+
+    try {
+      fs.mkdirSync(resolvedUploadsDir, { recursive: true });
+      fs.writeFileSync(destPath, buffer);
+    } catch (err) {
+      res.status(507).json({
+        error: err instanceof Error ? err.message : 'Unable to store uploaded profile image on server.',
+      });
+      return;
+    }
+
+    res.json({
+      imageUrl: `/api/media/user/${safeFileName}`,
+      mimeType: verified.mime,
+      size: buffer.length,
+    });
+  });
+
+  // Publicly serve validated user profile/banner uploads safely
+  app.get('/api/media/user/:filename', (req: Request, res: Response) => {
+    const filename = String(req.params.filename || '');
+    if (!/^[a-zA-Z0-9_\-]+\.(jpg|jpeg|png|webp|gif)$/i.test(filename)) {
+      res.status(400).json({ error: 'Invalid image filename.' });
+      return;
+    }
+
+    const resolvedUploadsDir = path.resolve(USER_UPLOADS_DIR);
+    const targetPath = path.resolve(resolvedUploadsDir, filename);
+    if (!targetPath.startsWith(resolvedUploadsDir + path.sep)) {
+      res.status(400).json({ error: 'Invalid image path.' });
+      return;
+    }
+    if (!fs.existsSync(targetPath)) {
+      res.status(404).json({ error: 'Profile image not found.' });
       return;
     }
 

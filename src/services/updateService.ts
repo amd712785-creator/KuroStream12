@@ -29,7 +29,7 @@ export const DEFAULT_APP_UPDATE_CONFIG: AppUpdateConfig = {
   mandatory: false,
 };
 
-export const CURRENT_CLIENT_VERSION_CODE = 200; // Client app version code for comparison
+export const CURRENT_CLIENT_VERSION_CODE = 201; // Synced with android/app/build.gradle versionCode
 
 export async function fetchAppUpdateConfig(): Promise<AppUpdateConfig> {
   if (!db) return DEFAULT_APP_UPDATE_CONFIG;

@@ -5,6 +5,7 @@ import { AvatarWithFrame } from '@/src/components/AvatarWithFrame';
 import { useAuth } from '@/src/context/AuthContext';
 import { doc, updateDoc, serverTimestamp } from 'firebase/firestore';
 import { db, logFirestoreError, OperationType } from '@/src/lib/firebase';
+import { syncAuthorCommunityProfiles } from '@/src/services/communityService';
 
 interface ProfileFramesSectionProps {
   currentFrame: ProfileFrameId;
@@ -25,7 +26,7 @@ export const ProfileFramesSection: React.FC<ProfileFramesSectionProps> = ({
   watchedAnimeCount,
   onFrameChanged,
 }) => {
-  const { user, isAdmin } = useAuth();
+  const { user, isAdmin, preferences } = useAuth();
   const [equippingId, setEquippingId] = useState<ProfileFrameId | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -59,6 +60,7 @@ export const ProfileFramesSection: React.FC<ProfileFramesSectionProps> = ({
         updatedAt: serverTimestamp(),
       });
       onFrameChanged(frameId);
+      void syncAuthorCommunityProfiles(user.uid, { authorFrame: frameId });
       setNotice('Profile frame updated successfully!');
     } catch (err) {
       logFirestoreError(err, OperationType.UPDATE, `users/${user.uid}`);
@@ -111,7 +113,7 @@ export const ProfileFramesSection: React.FC<ProfileFramesSectionProps> = ({
             >
               <div className="mb-4 pt-2">
                 <AvatarWithFrame
-                  src={user?.photoURL || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150'}
+                  src={preferences.photoURL || user?.photoURL || ''}
                   alt={frame.name}
                   frameId={frame.id}
                   size="lg"

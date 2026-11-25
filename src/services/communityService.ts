@@ -5,6 +5,7 @@ import {
   doc,
   getDoc,
   getDocs,
+  limit,
   onSnapshot,
   orderBy,
   query,
@@ -55,10 +56,15 @@ export async function createCommunityPost(
 ): Promise<string | null> {
   if (!db) return null;
   try {
+    const safeAvatar = (avatar || '').trim();
+    const cleanAvatar =
+      safeAvatar && !safeAvatar.startsWith('data:') && !safeAvatar.startsWith('blob:')
+        ? safeAvatar.slice(0, 500)
+        : '';
     const postRef = await addDoc(collection(db, 'community_posts'), {
       authorUid: uid,
       authorName: name.slice(0, 80),
-      authorAvatar: (avatar || '').slice(0, 500),
+      authorAvatar: cleanAvatar,
       authorFrame: frame || 'none',
       content: content.slice(0, 2000),
       imageUrl: imageUrl ? imageUrl.slice(0, 500) : '',
@@ -172,6 +178,46 @@ export async function addCommunityComment(
   } catch (err) {
     logFirestoreError(err, OperationType.CREATE, `community_posts/${postId}/comments`);
     return null;
+  }
+}
+
+export async function syncAuthorCommunityProfiles(
+  uid: string,
+  patch: { authorName?: string; authorAvatar?: string; authorFrame?: ProfileFrameId }
+): Promise<void> {
+  if (!db || !uid) return;
+  const updatePayload: Record<string, unknown> = {};
+  if (typeof patch.authorName === 'string' && patch.authorName.trim()) {
+    updatePayload.authorName = patch.authorName.trim().slice(0, 80);
+  }
+  if (typeof patch.authorAvatar === 'string') {
+    const trimmed = patch.authorAvatar.trim();
+    if (!trimmed.startsWith('data:') && !trimmed.startsWith('blob:') && trimmed.length <= 500) {
+      updatePayload.authorAvatar = trimmed;
+    }
+  }
+  if (typeof patch.authorFrame === 'string' && patch.authorFrame.trim()) {
+    updatePayload.authorFrame = patch.authorFrame.trim();
+  }
+  if (Object.keys(updatePayload).length === 0) return;
+
+  try {
+    const q = query(
+      collection(db, 'community_posts'),
+      where('authorUid', '==', uid),
+      limit(25)
+    );
+    const snap = await getDocs(q);
+    await Promise.allSettled(
+      snap.docs.map((docSnap) =>
+        updateDoc(docSnap.ref, {
+          ...updatePayload,
+          updatedAt: serverTimestamp(),
+        })
+      )
+    );
+  } catch (err) {
+    logFirestoreError(err, OperationType.UPDATE, `community_posts?authorUid=${uid}`);
   }
 }
 

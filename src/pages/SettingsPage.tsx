@@ -86,6 +86,8 @@ export const SettingsPage: React.FC = () => {
   const [showAvatarGallery, setShowAvatarGallery] = useState(false);
   const [avatarSavedToast, setAvatarSavedToast] = useState(false);
   const [nameInput, setNameInput] = useState(preferences.displayName);
+  const [nameSaving, setNameSaving] = useState(false);
+  const [nameError, setNameError] = useState<string | null>(null);
   const [savedToast, setSavedToast] = useState(false);
   const [endpointInput, setEndpointInput] = useState(() => getStreamingApiBase());
   const [endpointSaved, setEndpointSaved] = useState(false);
@@ -123,16 +125,36 @@ export const SettingsPage: React.FC = () => {
       openAuthModal();
       return;
     }
-    if (!nameInput.trim()) return;
-    await updatePreferences({ displayName: nameInput.trim() });
-    setSavedToast(true);
-    window.setTimeout(() => setSavedToast(false), 2000);
+    const trimmed = nameInput.trim();
+    if (!trimmed) {
+      setNameError('Display name cannot be empty.');
+      return;
+    }
+    if (trimmed.length < 2 || trimmed.length > 60) {
+      setNameError('Display name must be between 2 and 60 characters.');
+      return;
+    }
+
+    setNameSaving(true);
+    setNameError(null);
+    setSavedToast(false);
+    try {
+      await updatePreferences({ displayName: trimmed });
+      setSavedToast(true);
+      window.setTimeout(() => setSavedToast(false), 2500);
+    } catch (err) {
+      setNameError(
+        err instanceof Error ? err.message : 'Unable to update display name. Please try again.'
+      );
+    } finally {
+      setNameSaving(false);
+    }
   };
 
   const handleSaveAvatar = async (photoURL: string) => {
     if (!user) {
       openAuthModal();
-      return;
+      throw new Error('Please sign in to save your profile picture.');
     }
     await updatePreferences({ photoURL });
     setAvatarSavedToast(true);
@@ -714,7 +736,7 @@ export const SettingsPage: React.FC = () => {
               )}
             </div>
 
-            <form onSubmit={handleSaveProfile} className="border-t border-white/[0.08] pt-4 space-y-3">
+            <form onSubmit={handleSaveProfile} className="border-t border-white/[0.08] pt-4 space-y-2.5">
               <label htmlFor="settings-display-name" className="block text-xs font-semibold text-slate-300">
                 Display Name
               </label>
@@ -724,16 +746,33 @@ export const SettingsPage: React.FC = () => {
                   type="text"
                   maxLength={60}
                   value={nameInput}
-                  onChange={(e) => setNameInput(e.target.value)}
+                  onChange={(e) => {
+                    setNameInput(e.target.value);
+                    if (nameError) setNameError(null);
+                  }}
+                  placeholder="Enter display name (2-60 chars)"
                   className="h-10 flex-1 rounded-xl border border-white/[0.1] bg-[#07080d]/85 px-3 text-sm text-white focus:border-violet-500 focus:outline-none"
                 />
                 <button
                   type="submit"
-                  className="kuro-btn-glass rounded-xl px-4 text-xs font-semibold"
+                  disabled={nameSaving}
+                  className="kuro-btn-glass inline-flex items-center gap-1.5 rounded-xl px-4 text-xs font-semibold disabled:opacity-60"
                 >
-                  {savedToast ? <Check className="h-4 w-4 text-emerald-400" /> : 'Save'}
+                  {nameSaving ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin text-violet-300" />
+                  ) : savedToast ? (
+                    <Check className="h-4 w-4 text-emerald-400" />
+                  ) : (
+                    'Save'
+                  )}
                 </button>
               </div>
+              {nameError && (
+                <p className="text-xs font-medium text-rose-300">{nameError}</p>
+              )}
+              {savedToast && (
+                <p className="text-xs font-medium text-emerald-400">Display name saved.</p>
+              )}
             </form>
           </section>
 

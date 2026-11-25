@@ -12,6 +12,7 @@ import {
   Loader2,
   Play,
   Search,
+  Server,
   X,
 } from 'lucide-react';
 import { AnimeCard } from '@/src/components/AnimeCard';
@@ -317,6 +318,10 @@ export const AnimeDetailPage: React.FC = () => {
           {/* Info */}
           <div className="space-y-5 pt-1 md:pt-12">
             <div>
+              <div className="mb-2.5 inline-flex items-center gap-1.5 rounded-xl border border-violet-400/35 bg-violet-500/15 px-3 py-1 text-xs font-semibold text-violet-200">
+                <Server className="h-3.5 w-3.5 text-violet-300" />
+                <span>Server: KuroStream Global</span>
+              </div>
               <h1 className="text-2xl font-extrabold tracking-tight text-white sm:text-4xl text-balance">
                 {displayTitle}
               </h1>

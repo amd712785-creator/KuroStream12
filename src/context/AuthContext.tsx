@@ -32,7 +32,7 @@ import {
   where,
   writeBatch,
 } from 'firebase/firestore';
-import { ASSETS, resolveApiUrl } from '@/src/config/env';
+import { ASSETS, getBackendApiOrigin, resolveApiUrl } from '@/src/config/env';
 import {
   auth,
   db,
@@ -60,6 +60,7 @@ import {
   saveStoredWatchStats,
   type PlaybackRecordInput,
 } from '@/src/services/achievementService';
+import { syncAuthorCommunityProfiles } from '@/src/services/communityService';
 import { applyTheme, getStoredTheme } from '@/src/services/themeService';
 import {
   claimAndPersistVerifiedXp,
@@ -609,20 +610,24 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
               }
 
               if ('photoURL' in existingData) {
-                if (typeof existingData.photoURL !== 'string') {
+                if (
+                  typeof existingData.photoURL !== 'string' ||
+                  existingData.photoURL.startsWith('data:') ||
+                  existingData.photoURL.startsWith('blob:') ||
+                  existingData.photoURL.length > 500
+                ) {
                   repairPayload.photoURL = deleteField();
-                  needsRepair = true;
-                } else if (existingData.photoURL.length > 500) {
-                  repairPayload.photoURL = existingData.photoURL.slice(0, 500);
                   needsRepair = true;
                 }
               }
               if ('bannerURL' in existingData) {
-                if (typeof existingData.bannerURL !== 'string') {
+                if (
+                  typeof existingData.bannerURL !== 'string' ||
+                  existingData.bannerURL.startsWith('data:') ||
+                  existingData.bannerURL.startsWith('blob:') ||
+                  existingData.bannerURL.length > 500
+                ) {
                   repairPayload.bannerURL = deleteField();
-                  needsRepair = true;
-                } else if (existingData.bannerURL.length > 500) {
-                  repairPayload.bannerURL = existingData.bannerURL.slice(0, 500);
                   needsRepair = true;
                 }
               }
@@ -1629,36 +1634,151 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         applyTheme(patch.theme);
       }
 
+      const hasDisplayNamePatch = patch.displayName !== undefined;
+      const hasPhotoPatch = patch.photoURL !== undefined;
+      const hasBannerPatch = patch.bannerURL !== undefined;
+
+      let validatedName: string | undefined;
+      if (hasDisplayNamePatch) {
+        const trimmedName = (patch.displayName || '').trim();
+        if (!trimmedName) {
+          throw new Error('Display name cannot be empty.');
+        }
+        if (trimmedName.length < 2 || trimmedName.length > 60) {
+          throw new Error('Display name must be between 2 and 60 characters.');
+        }
+        validatedName = trimmedName;
+      }
+
+      const validateStoredImageUrl = (rawUrl: string, label: string): string => {
+        const trimmed = rawUrl.trim();
+        if (!trimmed) {
+          throw new Error(`${label} URL cannot be empty.`);
+        }
+        if (/^(data:|blob:|file:|content:)/i.test(trimmed)) {
+          throw new Error(
+            `${label} must be uploaded before saving so it persists across devices and restarts.`
+          );
+        }
+        if (trimmed.length > 500) {
+          throw new Error(`${label} URL is too long (maximum 500 characters).`);
+        }
+        return trimmed;
+      };
+
+      const validatedPhoto = hasPhotoPatch
+        ? validateStoredImageUrl(patch.photoURL || '', 'Profile picture')
+        : undefined;
+      const validatedBanner = hasBannerPatch
+        ? validateStoredImageUrl(patch.bannerURL || '', 'Profile banner')
+        : undefined;
+
+      if (user && !user.emailVerified) {
+        if (hasDisplayNamePatch || hasPhotoPatch || hasBannerPatch) {
+          setAuthError(null);
+          setAuthNotice('Please verify your email address before saving profile changes.');
+          setIsAuthModalOpen(true);
+          throw new Error('Please verify your email address to update your profile.');
+        }
+      }
+
       if (user && user.emailVerified && db) {
         const path = `users/${user.uid}`;
         try {
+          await profileReadyPromiseRef.current.catch(() => {});
+
           const updatePayload: Record<string, unknown> = {
             updatedAt: serverTimestamp(),
           };
-          if (typeof patch.displayName === 'string' && patch.displayName.trim()) {
-            updatePayload.displayName = patch.displayName.trim().slice(0, 80);
-          }
-          if (typeof patch.photoURL === 'string' && patch.photoURL.trim()) {
-            updatePayload.photoURL = patch.photoURL.trim().slice(0, 500);
-          }
-          if (typeof patch.bannerURL === 'string' && patch.bannerURL.trim()) {
-            updatePayload.bannerURL = patch.bannerURL.trim().slice(0, 500);
-          }
+          if (validatedName !== undefined) updatePayload.displayName = validatedName;
+          if (validatedPhoto !== undefined) updatePayload.photoURL = validatedPhoto;
+          if (validatedBanner !== undefined) updatePayload.bannerURL = validatedBanner;
           if (patch.preferredAudio) updatePayload.preferredAudio = patch.preferredAudio;
           if (typeof patch.autoNext === 'boolean') updatePayload.autoNext = patch.autoNext;
           if (patch.theme) updatePayload.theme = patch.theme;
-          await updateDoc(doc(db, path), updatePayload);
+
+          const userDocRef = doc(db, path);
+          try {
+            await updateDoc(userDocRef, updatePayload);
+          } catch (updateErr) {
+            const errCode = (updateErr as { code?: string } | null)?.code || '';
+            if (errCode === 'not-found') {
+              await setDoc(userDocRef, {
+                uid: user.uid,
+                displayName: validatedName || user.displayName?.trim() || 'Anime Fan',
+                preferredAudio: patch.preferredAudio || 'sub',
+                autoNext: typeof patch.autoNext === 'boolean' ? patch.autoNext : true,
+                ...(user.email ? { email: user.email.trim().slice(0, 160) } : {}),
+                ...(validatedPhoto ? { photoURL: validatedPhoto } : {}),
+                ...(validatedBanner ? { bannerURL: validatedBanner } : {}),
+                ...(patch.theme ? { theme: patch.theme } : {}),
+                createdAt: serverTimestamp(),
+                updatedAt: serverTimestamp(),
+              });
+            } else {
+              throw updateErr;
+            }
+          }
+
+          if (validatedName !== undefined || validatedPhoto !== undefined) {
+            const authUpdate: { displayName?: string; photoURL?: string } = {};
+            if (validatedName !== undefined) {
+              authUpdate.displayName = validatedName;
+            }
+            if (validatedPhoto !== undefined) {
+              const authPhotoUrl = validatedPhoto.startsWith('/api/')
+                ? `${getBackendApiOrigin()}${validatedPhoto}`
+                : /^https?:\/\//i.test(validatedPhoto)
+                  ? validatedPhoto
+                  : undefined;
+              if (authPhotoUrl && authPhotoUrl.length <= 500) {
+                authUpdate.photoURL = authPhotoUrl;
+              }
+            }
+            if (auth?.currentUser && Object.keys(authUpdate).length > 0) {
+              try {
+                await updateProfile(auth.currentUser, authUpdate);
+              } catch (authProfileErr) {
+                console.warn('[AuthContext] Firebase Auth updateProfile warning:', authProfileErr);
+              }
+            }
+
+            void syncAuthorCommunityProfiles(user.uid, {
+              authorName: validatedName,
+              authorAvatar: validatedPhoto,
+            });
+          }
+
+          setCloudPrefs((prev) => ({
+            ...prev,
+            ...(validatedName !== undefined ? { displayName: validatedName } : {}),
+            ...(validatedPhoto !== undefined ? { photoURL: validatedPhoto } : {}),
+            ...(validatedBanner !== undefined ? { bannerURL: validatedBanner } : {}),
+            ...(patch.preferredAudio ? { preferredAudio: patch.preferredAudio } : {}),
+            ...(typeof patch.autoNext === 'boolean' ? { autoNext: patch.autoNext } : {}),
+            ...(patch.theme ? { theme: patch.theme } : {}),
+          }));
         } catch (err) {
-          handleFirestoreError(err, OperationType.UPDATE, path);
+          logFirestoreError(err, OperationType.UPDATE, path);
+          const code = (err as { code?: string } | null)?.code || '';
+          if (code === 'permission-denied') {
+            throw new Error(
+              'Permission denied while updating profile. Please verify your email or sign in again.'
+            );
+          }
+          if (code === 'unavailable') {
+            throw new Error('Network unavailable. Please check your connection and try again.');
+          }
+          throw err instanceof Error ? err : new Error('Failed to save profile changes.');
         }
         return;
       }
 
-      if (patch.displayName !== undefined || patch.photoURL !== undefined || patch.bannerURL !== undefined) {
+      if (hasDisplayNamePatch || hasPhotoPatch || hasBannerPatch) {
         setAuthError(null);
         setAuthNotice('Sign in to customize and save your profile.');
         setIsAuthModalOpen(true);
-        return;
+        throw new Error('Please sign in to save your profile changes.');
       }
 
       setSessionPrefs((prev) => ({

@@ -123,9 +123,19 @@ public class MainActivity extends BridgeActivity implements ModifiedMainActivity
                     String scheme = url.getScheme() != null ? url.getScheme().toLowerCase() : "";
                     if (request.isForMainFrame()) {
                         String host = url.getHost() != null ? url.getHost().toLowerCase() : "";
-                        if (host.equals("facebook.com") || host.endsWith(".facebook.com") || host.equals("fb.com") || host.endsWith(".fb.com")) {
+                        String path = url.getPath() != null ? url.getPath().toLowerCase() : "";
+                        boolean isExternalApkOrRelease = path.endsWith(".apk")
+                                || host.equals("github.com")
+                                || host.endsWith(".github.com")
+                                || host.endsWith(".githubusercontent.com");
+                        boolean isSocialExternal = host.equals("facebook.com")
+                                || host.endsWith(".facebook.com")
+                                || host.equals("fb.com")
+                                || host.endsWith(".fb.com");
+                        if (isExternalApkOrRelease || isSocialExternal) {
                             try {
                                 Intent intent = new Intent(Intent.ACTION_VIEW, url);
+                                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
                                 startActivity(intent);
                                 return true;
                             } catch (Exception ignored) {
@@ -269,8 +279,30 @@ public class MainActivity extends BridgeActivity implements ModifiedMainActivity
     }
 
     @Override
+    public void onPause() {
+        try {
+            CookieManager.getInstance().flush();
+        } catch (Exception ignored) {
+        }
+        super.onPause();
+    }
+
+    @Override
+    public void onStop() {
+        try {
+            CookieManager.getInstance().flush();
+        } catch (Exception ignored) {
+        }
+        super.onStop();
+    }
+
+    @Override
     public void onDestroy() {
         hideFullscreenCustomView();
+        try {
+            CookieManager.getInstance().flush();
+        } catch (Exception ignored) {
+        }
         super.onDestroy();
     }
 

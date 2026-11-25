@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { ASSETS } from '@/src/config/env';
+import { resolveMediaDisplayUrl } from '@/src/services/imageCacheService';
 
 interface AnimeImageProps {
   src?: string | null;
@@ -25,19 +26,21 @@ export const AnimeImage: React.FC<AnimeImageProps> = ({
         ? ASSETS.defaultAvatar
         : ASSETS.posterFallback;
 
-  const cleanFallbackSrc =
-    fallbackSrc && fallbackSrc.trim() && fallbackSrc.trim() !== (src || '').trim()
-      ? fallbackSrc.trim()
-      : null;
+  const resolvedSrc = src && src.trim() ? resolveMediaDisplayUrl(src.trim()) : '';
+  const resolvedFallbackProp =
+    fallbackSrc && fallbackSrc.trim() ? resolveMediaDisplayUrl(fallbackSrc.trim()) : '';
 
-  const resolvedInitial = src && src.trim() ? src.trim() : cleanFallbackSrc || assetFallback;
+  const cleanFallbackSrc =
+    resolvedFallbackProp && resolvedFallbackProp !== resolvedSrc ? resolvedFallbackProp : null;
+
+  const resolvedInitial = resolvedSrc || cleanFallbackSrc || assetFallback;
   const [imgSrc, setImgSrc] = useState<string>(resolvedInitial);
   const [loaded, setLoaded] = useState(false);
   const [failedAll, setFailedAll] = useState(false);
   const imgRef = useRef<HTMLImageElement>(null);
 
   useEffect(() => {
-    const nextSrc = src && src.trim() ? src.trim() : cleanFallbackSrc || assetFallback;
+    const nextSrc = resolvedSrc || cleanFallbackSrc || assetFallback;
     setImgSrc(nextSrc);
     setFailedAll(false);
     const el = imgRef.current;
@@ -46,7 +49,7 @@ export const AnimeImage: React.FC<AnimeImageProps> = ({
     } else {
       setLoaded(false);
     }
-  }, [src, cleanFallbackSrc, assetFallback]);
+  }, [resolvedSrc, cleanFallbackSrc, assetFallback]);
 
   if (failedAll) {
     return (

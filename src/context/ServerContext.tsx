@@ -2,7 +2,8 @@ import React, { createContext, useCallback, useContext, useMemo, useState } from
 
 export type StreamingServerId = 'animeworld-india' | 'kurostream-global';
 
-const SERVER_SESSION_STORAGE_KEY = 'kurostream_active_server_v1';
+const SERVER_STORAGE_KEY = 'kurostream_active_server_v2';
+const LEGACY_SERVER_SESSION_KEY = 'kurostream_active_server_v1';
 
 interface ServerContextValue {
   activeServer: StreamingServerId;
@@ -15,14 +16,14 @@ const ServerContext = createContext<ServerContextValue | undefined>(undefined);
 
 function readInitialServer(): StreamingServerId {
   try {
-    const stored = sessionStorage.getItem(SERVER_SESSION_STORAGE_KEY);
+    const stored = localStorage.getItem(SERVER_STORAGE_KEY);
     if (stored === 'kurostream-global' || stored === 'animeworld-india') {
       return stored;
     }
   } catch {
     // ignore storage access issues
   }
-  return 'animeworld-india';
+  return 'kurostream-global';
 }
 
 export const ServerProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
@@ -31,7 +32,8 @@ export const ServerProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   const setActiveServer = useCallback((server: StreamingServerId) => {
     setActiveServerState(server);
     try {
-      sessionStorage.setItem(SERVER_SESSION_STORAGE_KEY, server);
+      localStorage.setItem(SERVER_STORAGE_KEY, server);
+      sessionStorage.removeItem(LEGACY_SERVER_SESSION_KEY);
     } catch {
       // ignore storage access issues
     }

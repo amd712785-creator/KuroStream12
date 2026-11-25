@@ -91,6 +91,11 @@ function buildAndroidConfigFromGoogleServices(
       (c) => c.client_type === 3 && Boolean(c.client_id)
     )?.client_id;
 
+  const firestoreDatabaseId =
+    projectId === webFirebaseConfig.projectId && webFirebaseConfig.firestoreDatabaseId
+      ? webFirebaseConfig.firestoreDatabaseId
+      : undefined;
+
   return {
     projectId,
     appId,
@@ -99,8 +104,7 @@ function buildAndroidConfigFromGoogleServices(
     databaseURL: gs.project_info.firebase_url || undefined,
     storageBucket: gs.project_info.storage_bucket || undefined,
     messagingSenderId: gs.project_info.project_number || undefined,
-    firestoreDatabaseId:
-      webFirebaseConfig.firestoreDatabaseId || 'ai-studio-406f5425-8cb6-4bfc-aadf-2a0ce7c524b3',
+    firestoreDatabaseId,
     oAuthClientId: directWebClient || appInviteWebClient || '',
     source: 'google-services.json',
   };

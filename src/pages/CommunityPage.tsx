@@ -9,6 +9,7 @@ import {
 import { db } from '@/src/lib/firebase';
 import { useAuth } from '@/src/context/AuthContext';
 import { AvatarWithFrame } from '@/src/components/AvatarWithFrame';
+import { resolveMediaDisplayUrl } from '@/src/services/imageCacheService';
 import type { ProfileFrameId } from '@/src/types/frames';
 import {
   createCommunityPost,
@@ -31,6 +32,7 @@ export const CommunityPage: React.FC = () => {
   const [newImageUrl, setNewImageUrl] = useState('');
   const [showImageInput, setShowImageInput] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [communityError, setCommunityError] = useState<string | null>(null);
 
   const [expandedPostId, setExpandedPostId] = useState<string | null>(null);
   const [commentsMap, setCommentsMap] = useState<Record<string, CommunityComment[]>>({});
@@ -102,14 +104,20 @@ export const CommunityPage: React.FC = () => {
     e.preventDefault();
     if (!user || !newContent.trim()) return;
     setSubmitting(true);
-    await createCommunityPost(
+    setCommunityError(null);
+    const createdId = await createCommunityPost(
       user.uid,
       preferences.displayName || user.displayName || 'Anime Fan',
       preferences.photoURL || user.photoURL || '',
-      (preferences as unknown as { equippedFrame?: ProfileFrameId }).equippedFrame,
+      preferences.equippedFrame,
       newContent.trim(),
       newImageUrl.trim() || undefined
     );
+    if (!createdId) {
+      setCommunityError('Unable to publish post right now. Please try again.');
+      setSubmitting(false);
+      return;
+    }
     setNewContent('');
     setNewImageUrl('');
     setShowImageInput(false);
@@ -118,14 +126,19 @@ export const CommunityPage: React.FC = () => {
 
   const handleAddComment = async (postId: string) => {
     if (!user || !commentInput.trim()) return;
-    await addCommunityComment(
+    setCommunityError(null);
+    const commentId = await addCommunityComment(
       postId,
       user.uid,
       preferences.displayName || user.displayName || 'Viewer',
       preferences.photoURL || user.photoURL || '',
-      (preferences as unknown as { equippedFrame?: ProfileFrameId }).equippedFrame,
+      preferences.equippedFrame,
       commentInput.trim()
     );
+    if (!commentId) {
+      setCommunityError('Unable to add comment right now. Please try again.');
+      return;
+    }
     setCommentInput('');
   };
 
@@ -184,7 +197,7 @@ export const CommunityPage: React.FC = () => {
             <AvatarWithFrame
               src={preferences.photoURL || user.photoURL || ''}
               alt="Avatar"
-              frameId={(preferences as unknown as { equippedFrame?: ProfileFrameId }).equippedFrame}
+              frameId={preferences.equippedFrame}
               size="md"
             />
             <div className="flex-1 space-y-3">
@@ -204,6 +217,10 @@ export const CommunityPage: React.FC = () => {
                   placeholder="Paste Image URL (optional)"
                   className="w-full bg-slate-950 border border-slate-800 focus:border-purple-500 rounded-xl p-3 text-white text-xs placeholder-slate-500 outline-none transition-all"
                 />
+              )}
+
+              {communityError && (
+                <p className="text-xs font-medium text-rose-300">{communityError}</p>
               )}
 
               <div className="flex items-center justify-between pt-1">
@@ -246,6 +263,9 @@ export const CommunityPage: React.FC = () => {
         ) : (
           filteredPosts.map((post) => {
             const isOwner = user?.uid === post.authorUid;
+            const liveAuthorAvatar = isOwner ? preferences.photoURL || post.authorAvatar : post.authorAvatar;
+            const liveAuthorName = isOwner ? preferences.displayName || post.authorName : post.authorName;
+            const liveAuthorFrame = isOwner ? preferences.equippedFrame || post.authorFrame : post.authorFrame;
             const hasLiked = user ? post.likedBy.includes(user.uid) : false;
             const isExpanded = expandedPostId === post.id;
             const postComments = commentsMap[post.id] || [];
@@ -258,14 +278,14 @@ export const CommunityPage: React.FC = () => {
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-3">
                     <AvatarWithFrame
-                      src={post.authorAvatar}
-                      alt={post.authorName}
-                      frameId={post.authorFrame}
+                      src={liveAuthorAvatar}
+                      alt={liveAuthorName}
+                      frameId={liveAuthorFrame}
                       size="sm"
                     />
                     <div>
                       <h4 className="font-bold text-white text-sm flex items-center gap-2">
-                        {post.authorName}
+                        {liveAuthorName}
                         {post.authorUid === 'qylW0QA3XvZr3rBVZM8f6uHCELe2' && (
                           <span className="px-2 py-0.5 bg-amber-500/20 border border-amber-500/40 text-amber-300 text-[10px] font-bold rounded-full flex items-center gap-1">
                             <Shield className="w-3 h-3" /> Admin
@@ -304,7 +324,12 @@ export const CommunityPage: React.FC = () => {
 
                 {post.imageUrl && (
                   <div className="rounded-2xl overflow-hidden border border-slate-800 max-h-96 bg-slate-950">
-                    <img src={post.imageUrl} alt="Post attachment" className="w-full h-full object-cover" />
+                    <img
+                      src={resolveMediaDisplayUrl(post.imageUrl)}
+                      alt="Post attachment"
+                      referrerPolicy="no-referrer"
+                      className="w-full h-full object-cover"
+                    />
                   </div>
                 )}
 
@@ -344,17 +369,26 @@ export const CommunityPage: React.FC = () => {
                       ) : (
                         postComments.map((comment) => {
                           const isCommentOwner = user?.uid === comment.authorUid;
+                          const commentAvatar = isCommentOwner
+                            ? preferences.photoURL || comment.authorAvatar
+                            : comment.authorAvatar;
+                          const commentName = isCommentOwner
+                            ? preferences.displayName || comment.authorName
+                            : comment.authorName;
+                          const commentFrame = isCommentOwner
+                            ? preferences.equippedFrame || comment.authorFrame
+                            : comment.authorFrame;
                           return (
                             <div key={comment.id} className="bg-slate-950/70 border border-slate-800/80 rounded-2xl p-3 flex items-start gap-3">
                               <AvatarWithFrame
-                                src={comment.authorAvatar}
-                                alt={comment.authorName}
-                                frameId={comment.authorFrame}
+                                src={commentAvatar}
+                                alt={commentName}
+                                frameId={commentFrame}
                                 size="sm"
                               />
                               <div className="flex-1">
                                 <div className="flex items-center justify-between">
-                                  <span className="font-bold text-white text-xs">{comment.authorName}</span>
+                                  <span className="font-bold text-white text-xs">{commentName}</span>
                                   <span className="text-[10px] text-slate-500">{new Date(comment.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
                                 </div>
                                 <p className="text-slate-300 text-xs mt-1">{comment.content}</p>

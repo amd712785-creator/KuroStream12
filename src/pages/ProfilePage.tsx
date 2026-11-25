@@ -136,6 +136,8 @@ export const ProfilePage: React.FC = () => {
   const [showAvatarGallery, setShowAvatarGallery] = useState(false);
   const [avatarSavedToast, setAvatarSavedToast] = useState(false);
   const [nameInput, setNameInput] = useState(preferences.displayName);
+  const [nameSaving, setNameSaving] = useState(false);
+  const [nameError, setNameError] = useState<string | null>(null);
   const [savedToast, setSavedToast] = useState(false);
   const [showDownloadManager, setShowDownloadManager] = useState(false);
   const [offlinePlayerItem, setOfflinePlayerItem] = useState<DownloadItem | null>(null);
@@ -171,16 +173,36 @@ export const ProfilePage: React.FC = () => {
       openAuthModal();
       return;
     }
-    if (!nameInput.trim()) return;
-    await updatePreferences({ displayName: nameInput.trim() });
-    setSavedToast(true);
-    window.setTimeout(() => setSavedToast(false), 2000);
+    const trimmed = nameInput.trim();
+    if (!trimmed) {
+      setNameError('Display name cannot be empty.');
+      return;
+    }
+    if (trimmed.length < 2 || trimmed.length > 60) {
+      setNameError('Display name must be between 2 and 60 characters.');
+      return;
+    }
+
+    setNameSaving(true);
+    setNameError(null);
+    setSavedToast(false);
+    try {
+      await updatePreferences({ displayName: trimmed });
+      setSavedToast(true);
+      window.setTimeout(() => setSavedToast(false), 2500);
+    } catch (err) {
+      setNameError(
+        err instanceof Error ? err.message : 'Unable to update display name. Please try again.'
+      );
+    } finally {
+      setNameSaving(false);
+    }
   };
 
   const handleSaveAvatar = async (photoURL: string) => {
     if (!user) {
       openAuthModal();
-      return;
+      throw new Error('Please sign in to save your profile picture.');
     }
     await updatePreferences({ photoURL });
     setAvatarSavedToast(true);
@@ -235,8 +257,8 @@ export const ProfilePage: React.FC = () => {
           <div className="flex items-center gap-5">
             <button
               type="button"
-              onClick={() => (user ? navigate('/profile/edit') : openAuthModal())}
-              aria-label="Edit profile picture"
+              onClick={() => (user ? setShowAvatarGallery(true) : openAuthModal())}
+              aria-label="Change profile picture"
               className="group relative h-20 w-20 sm:h-24 sm:w-24 shrink-0 overflow-hidden rounded-3xl border-2 border-violet-400 bg-[#141726] shadow-[0_0_25px_rgba(168,85,247,0.5)] transition-transform duration-300 hover:scale-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400"
             >
               <AnimeImage
@@ -306,27 +328,49 @@ export const ProfilePage: React.FC = () => {
         {user && (
           <form
             onSubmit={handleSaveProfile}
-            className="mt-6 flex flex-col sm:flex-row items-center gap-3 border-t border-white/[0.08] pt-5"
+            className="mt-6 space-y-2 border-t border-white/[0.08] pt-5"
           >
-            <div className="w-full sm:max-w-md flex-1">
-              <label htmlFor="profile-name-input" className="block text-xs font-medium text-slate-400 mb-1">
-                Display Name
-              </label>
-              <input
-                id="profile-name-input"
-                type="text"
-                maxLength={60}
-                value={nameInput}
-                onChange={(e) => setNameInput(e.target.value)}
-                className="h-10 w-full rounded-xl border border-white/[0.1] bg-[#07080d]/90 px-3.5 text-sm text-white focus:border-violet-500 focus:outline-none"
-              />
+            <div className="flex flex-col sm:flex-row sm:items-end gap-3">
+              <div className="w-full sm:max-w-md flex-1">
+                <label htmlFor="profile-name-input" className="block text-xs font-medium text-slate-400 mb-1">
+                  Display Name
+                </label>
+                <input
+                  id="profile-name-input"
+                  type="text"
+                  maxLength={60}
+                  value={nameInput}
+                  onChange={(e) => {
+                    setNameInput(e.target.value);
+                    if (nameError) setNameError(null);
+                  }}
+                  placeholder="Enter display name (2-60 chars)"
+                  className="h-10 w-full rounded-xl border border-white/[0.1] bg-[#07080d]/90 px-3.5 text-sm text-white focus:border-violet-500 focus:outline-none"
+                />
+              </div>
+              <button
+                type="submit"
+                disabled={nameSaving}
+                className="kuro-btn-glass inline-flex min-h-[40px] w-full sm:w-auto items-center justify-center gap-2 rounded-xl px-5 text-xs font-semibold disabled:opacity-60"
+              >
+                {nameSaving ? (
+                  <>
+                    <Loader2 className="h-3.5 w-3.5 animate-spin text-violet-300" />
+                    <span>Saving...</span>
+                  </>
+                ) : savedToast ? (
+                  <>
+                    <Check className="h-4 w-4 text-emerald-400" />
+                    <span className="text-emerald-300">Name Saved</span>
+                  </>
+                ) : (
+                  <span>Update Name</span>
+                )}
+              </button>
             </div>
-            <button
-              type="submit"
-              className="kuro-btn-glass mt-5 sm:mt-0 min-h-[40px] w-full sm:w-auto rounded-xl px-5 text-xs font-semibold"
-            >
-              {savedToast ? <Check className="h-4 w-4 text-emerald-400 inline" /> : 'Update Name'}
-            </button>
+            {nameError && (
+              <p className="text-xs font-medium text-rose-300">{nameError}</p>
+            )}
           </form>
         )}
       </section>

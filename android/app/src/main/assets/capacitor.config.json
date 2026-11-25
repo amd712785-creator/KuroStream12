@@ -12,7 +12,16 @@
 			"accounts.google.com",
 			"graphql.anilist.co",
 			"api.ani.zip",
-			"api.aniskip.com"
+			"api.aniskip.com",
+			"animesky.app",
+			"*.animesky.app",
+			"animesalt.cx",
+			"*.animesalt.cx",
+			"ravok.buzz",
+			"*.ravok.buzz",
+			"abyssplayer.com",
+			"*.abyssplayer.com",
+			"image.tmdb.org"
 		]
 	},
 	"plugins": {
