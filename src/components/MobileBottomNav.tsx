@@ -1,7 +1,8 @@
-import React, { useEffect, useState } from 'react';
+import React from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { motion, MotionConfig } from 'motion/react';
 import { Bookmark, Film, Home, Search, User } from 'lucide-react';
+import { useAppFullscreen } from '@/src/services/fullscreenBridge';
 
 interface NavTabItem {
   id: 'home' | 'anime' | 'search' | 'watchlist' | 'profile';
@@ -20,24 +21,7 @@ const MOBILE_TABS: NavTabItem[] = [
 
 export const MobileBottomNav: React.FC = () => {
   const location = useLocation();
-  const [isFullscreen, setIsFullscreen] = useState(false);
-
-  useEffect(() => {
-    const syncFullscreen = () => {
-      const doc = document as Document & {
-        webkitFullscreenElement?: Element | null;
-      };
-      setIsFullscreen(Boolean(document.fullscreenElement || doc.webkitFullscreenElement));
-    };
-
-    syncFullscreen();
-    document.addEventListener('fullscreenchange', syncFullscreen);
-    document.addEventListener('webkitfullscreenchange', syncFullscreen);
-    return () => {
-      document.removeEventListener('fullscreenchange', syncFullscreen);
-      document.removeEventListener('webkitfullscreenchange', syncFullscreen);
-    };
-  }, []);
+  const isFullscreen = useAppFullscreen();
 
   // Hide automatically when video player enters fullscreen mode
   if (isFullscreen) return null;

@@ -30,6 +30,12 @@ import {
   setStreamingApiOverride,
 } from '@/src/config/env';
 import { getFreshFirebaseIdToken, isBackendApiUrl } from '@/src/services/authorizedFetch';
+import {
+  enterNativeAndroidImmersive,
+  exitNativeAndroidImmersive,
+  notifyAppFullscreen,
+  subscribeNativeExitFullscreen,
+} from '@/src/services/fullscreenBridge';
 import { extractErrorMessage } from '@/src/utils/errorUtils';
 import { DynamicLoadingScreen } from '@/src/components/DynamicLoadingScreen';
 import type { HeartbeatOptions } from '@/src/hooks/useWatchSessionHeartbeat';
@@ -199,6 +205,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const [duration, setDuration] = useState(0);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [cssFullscreen, setCssFullscreen] = useState(false);
+  const [fullscreenControlsVisible, setFullscreenControlsVisible] = useState(false);
+  const hideControlsTimerRef = useRef<number | null>(null);
+  const reportedFullscreenRef = useRef(false);
   const [mediaError, setMediaError] = useState<string | null>(null);
   const [showCustomEndpoint, setShowCustomEndpoint] = useState(false);
   const isMunchyrollSelected = (selectedServer || '').toLowerCase() === 'munchyroll';
@@ -794,27 +803,60 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     }
   }, []);
 
-  const toggleFullscreen = useCallback(async () => {
-    const el = containerRef.current as
-      | (HTMLDivElement & { webkitRequestFullscreen?: () => Promise<void> | void })
-      | null;
-    const video = videoRef.current as
-      | (HTMLVideoElement & { webkitEnterFullscreen?: () => void; webkitExitFullscreen?: () => void })
-      | null;
-    if (!el) return;
+  const clearHideControlsTimer = useCallback(() => {
+    if (hideControlsTimerRef.current !== null) {
+      window.clearTimeout(hideControlsTimerRef.current);
+      hideControlsTimerRef.current = null;
+    }
+  }, []);
+
+  const revealFullscreenControls = useCallback(() => {
+    setFullscreenControlsVisible(true);
+    clearHideControlsTimer();
+    hideControlsTimerRef.current = window.setTimeout(() => {
+      setFullscreenControlsVisible(false);
+      hideControlsTimerRef.current = null;
+    }, 3000);
+  }, [clearHideControlsTimer]);
+
+  const exitFullscreenMode = useCallback(async () => {
+    clearHideControlsTimer();
+    setFullscreenControlsVisible(false);
+    setCssFullscreen(false);
+
     const doc = document as Document & {
       webkitFullscreenElement?: Element | null;
       webkitExitFullscreen?: () => Promise<void> | void;
     };
-    const orientationApi = screen.orientation as
-      | (ScreenOrientation & { lock?: (orientation: string) => Promise<void>; unlock?: () => void })
-      | undefined;
+    try {
+      if (document.fullscreenElement && document.exitFullscreen) {
+        await document.exitFullscreen();
+      } else if (doc.webkitFullscreenElement && doc.webkitExitFullscreen) {
+        await doc.webkitExitFullscreen();
+      }
+    } catch {
+      // ignore exit errors
+    }
+    await exitNativeAndroidImmersive();
+  }, [clearHideControlsTimer]);
+
+  const toggleFullscreen = useCallback(async () => {
+    const el = containerRef.current as
+      | (HTMLDivElement & { webkitRequestFullscreen?: () => Promise<void> | void })
+      | null;
+    if (!el) return;
+    const doc = document as Document & {
+      webkitFullscreenElement?: Element | null;
+    };
 
     const currentlyFullscreen = Boolean(
       document.fullscreenElement || doc.webkitFullscreenElement || cssFullscreen
     );
 
     if (!currentlyFullscreen) {
+      clearHideControlsTimer();
+      setFullscreenControlsVisible(false);
+
       let nativeEntered = false;
       try {
         if (el.requestFullscreen) {
@@ -828,41 +870,43 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         nativeEntered = false;
       }
 
-      if (!nativeEntered && video?.webkitEnterFullscreen && activeSourceType !== 'embed') {
-        try {
-          video.webkitEnterFullscreen();
-          nativeEntered = true;
-        } catch {
-          nativeEntered = false;
-        }
-      }
-
       if (!nativeEntered) {
         setCssFullscreen(true);
       }
-      try {
-        await orientationApi?.lock?.('landscape');
-      } catch {
-        // ignore orientation lock restrictions outside native fullscreen
-      }
+      await enterNativeAndroidImmersive();
     } else {
-      setCssFullscreen(false);
-      try {
-        if (document.fullscreenElement && document.exitFullscreen) {
-          await document.exitFullscreen();
-        } else if (doc.webkitFullscreenElement && doc.webkitExitFullscreen) {
-          await doc.webkitExitFullscreen();
-        }
-      } catch {
-        // ignore exit errors
-      }
-      try {
-        orientationApi?.unlock?.();
-      } catch {
-        // ignore orientation unlock errors
-      }
+      await exitFullscreenMode();
     }
-  }, [cssFullscreen, activeSourceType]);
+  }, [cssFullscreen, clearHideControlsTimer, exitFullscreenMode]);
+
+  useEffect(() => {
+    if (effectiveFullscreen && !reportedFullscreenRef.current) {
+      reportedFullscreenRef.current = true;
+      notifyAppFullscreen(true);
+    } else if (!effectiveFullscreen && reportedFullscreenRef.current) {
+      reportedFullscreenRef.current = false;
+      notifyAppFullscreen(false);
+    }
+  }, [effectiveFullscreen]);
+
+  useEffect(() => {
+    return () => {
+      clearHideControlsTimer();
+      if (reportedFullscreenRef.current) {
+        reportedFullscreenRef.current = false;
+        notifyAppFullscreen(false);
+        void exitNativeAndroidImmersive();
+      }
+    };
+  }, [clearHideControlsTimer]);
+
+  useEffect(() => {
+    return subscribeNativeExitFullscreen(() => {
+      if (effectiveFullscreen) {
+        void exitFullscreenMode();
+      }
+    });
+  }, [effectiveFullscreen, exitFullscreenMode]);
 
   useEffect(() => {
     const doc = document as Document & { webkitFullscreenElement?: Element | null };
@@ -870,11 +914,10 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       const active = Boolean(document.fullscreenElement || doc.webkitFullscreenElement);
       setIsFullscreen(active);
       if (!active) {
-        try {
-          (screen.orientation as ScreenOrientation & { unlock?: () => void })?.unlock?.();
-        } catch {
-          // ignore orientation unlock errors
-        }
+        clearHideControlsTimer();
+        setFullscreenControlsVisible(false);
+        setCssFullscreen(false);
+        void exitNativeAndroidImmersive();
       }
     };
     document.addEventListener('fullscreenchange', onFsChange);
@@ -883,7 +926,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       document.removeEventListener('fullscreenchange', onFsChange);
       document.removeEventListener('webkitfullscreenchange', onFsChange);
     };
-  }, []);
+  }, [clearHideControlsTimer]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -892,16 +935,23 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
       const video = videoRef.current;
       switch (e.key.toLowerCase()) {
+        case 'escape':
+          if (effectiveFullscreen) {
+            e.preventDefault();
+            void exitFullscreenMode();
+          }
+          break;
         case ' ':
         case 'k':
           if (video) {
             e.preventDefault();
             togglePlay();
+            if (effectiveFullscreen) revealFullscreenControls();
           }
           break;
         case 'f':
           e.preventDefault();
-          toggleFullscreen();
+          void toggleFullscreen();
           break;
         case 'm':
           if (video) {
@@ -914,12 +964,14 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           if (video) {
             e.preventDefault();
             video.currentTime = Math.min(video.duration || 0, video.currentTime + 10);
+            if (effectiveFullscreen) revealFullscreenControls();
           }
           break;
         case 'arrowleft':
           if (video) {
             e.preventDefault();
             video.currentTime = Math.max(0, video.currentTime - 10);
+            if (effectiveFullscreen) revealFullscreenControls();
           }
           break;
         case 'n':
@@ -939,7 +991,16 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [togglePlay, toggleFullscreen, hasNextEpisode, onNextEpisode, onPreviousEpisode]);
+  }, [
+    togglePlay,
+    toggleFullscreen,
+    exitFullscreenMode,
+    revealFullscreenControls,
+    effectiveFullscreen,
+    hasNextEpisode,
+    onNextEpisode,
+    onPreviousEpisode,
+  ]);
 
   const flushProgress = useCallback((time: number, dur: number) => {
     if (!onProgressRef.current) return;
@@ -1003,13 +1064,19 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       ref={containerRef}
       className={`overflow-hidden bg-[#05060a] shadow-2xl shadow-violet-950/25 ${
         cssFullscreen
-          ? 'fixed inset-0 z-[9999] flex h-screen w-screen flex-col justify-center rounded-none border-0'
+          ? 'fixed inset-0 z-[9999] flex h-[100dvh] w-[100vw] flex-col justify-center rounded-none border-0 bg-black'
           : isFullscreen
-            ? 'relative flex h-full w-full flex-col justify-center rounded-none border-0'
-            : 'relative rounded-3xl border border-white/[0.1]'
+            ? 'relative flex h-full w-full flex-col justify-center rounded-none border-0 bg-black'
+            : 'relative rounded-2xl sm:rounded-3xl border border-white/[0.1]'
       }`}
     >
-      <div className={`relative w-full bg-black ${effectiveFullscreen ? 'flex-1 min-h-0' : 'aspect-video'}`}>
+      <div
+        className={`relative w-full bg-black ${
+          effectiveFullscreen
+            ? 'h-full w-full flex-1 min-h-0'
+            : 'aspect-video [@media(max-height:540px)]:max-h-[calc(100dvh-10.5rem)]'
+        }`}
+      >
         {loading ? (
           <DynamicLoadingScreen
             mode="embedded"
@@ -1210,6 +1277,30 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                 )}
               </div>
             )}
+            {effectiveFullscreen && (
+              <>
+                <div
+                  onClick={revealFullscreenControls}
+                  className="absolute inset-x-0 top-0 z-20 h-14 bg-transparent"
+                  aria-hidden="true"
+                />
+                {fullscreenControlsVisible && (
+                  <div className="pointer-events-none absolute inset-x-0 top-0 z-30 flex justify-end px-[max(1rem,env(safe-area-inset-right))] pt-[max(0.75rem,env(safe-area-inset-top))]">
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        void exitFullscreenMode();
+                      }}
+                      aria-label="Exit fullscreen"
+                      className="pointer-events-auto flex h-11 w-11 items-center justify-center rounded-full border border-white/20 bg-black/70 text-white backdrop-blur-md transition hover:bg-black/90"
+                    >
+                      <Minimize className="h-5 w-5" />
+                    </button>
+                  </div>
+                )}
+              </>
+            )}
           </div>
         ) : (
           <>
@@ -1218,7 +1309,13 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               crossOrigin={useDirectFallback ? undefined : 'anonymous'}
               playsInline
               preload="auto"
-              onClick={togglePlay}
+              onClick={() => {
+                if (effectiveFullscreen) {
+                  revealFullscreenControls();
+                } else {
+                  togglePlay();
+                }
+              }}
               onPlay={() => {
                 isBufferingRef.current = false;
                 setIsPlaying(true);
@@ -1377,7 +1474,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               </div>
             )}
 
-            {activeIntro &&
+            {!effectiveFullscreen &&
+              activeIntro &&
               currentTime >= activeIntro.start &&
               currentTime < activeIntro.end && (
                 <button
@@ -1387,14 +1485,15 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                       videoRef.current.currentTime = activeIntro.end;
                     }
                   }}
-                  className="kuro-btn-glass absolute bottom-5 right-5 inline-flex min-h-[38px] items-center gap-1.5 rounded-xl px-4 py-2 text-xs font-semibold text-white"
+                  className="kuro-btn-glass absolute bottom-4 right-4 inline-flex min-h-[38px] items-center gap-1.5 rounded-xl px-4 py-2 text-xs font-semibold text-white"
                 >
                   <SkipForward className="h-3.5 w-3.5" />
                   <span>Skip Intro</span>
                 </button>
               )}
 
-            {activeOutro &&
+            {!effectiveFullscreen &&
+              activeOutro &&
               currentTime >= activeOutro.start &&
               currentTime < activeOutro.end && (
                 <button
@@ -1404,14 +1503,15 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                       videoRef.current.currentTime = activeOutro.end;
                     }
                   }}
-                  className="kuro-btn-glass absolute bottom-5 right-5 inline-flex min-h-[38px] items-center gap-1.5 rounded-xl px-4 py-2 text-xs font-semibold text-white"
+                  className="kuro-btn-glass absolute bottom-4 right-4 inline-flex min-h-[38px] items-center gap-1.5 rounded-xl px-4 py-2 text-xs font-semibold text-white"
                 >
                   <SkipForward className="h-3.5 w-3.5" />
                   <span>Skip Outro</span>
                 </button>
               )}
 
-            {activeRecap &&
+            {!effectiveFullscreen &&
+              activeRecap &&
               currentTime >= activeRecap.start &&
               currentTime < activeRecap.end && (
                 <button
@@ -1421,15 +1521,71 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                       videoRef.current.currentTime = activeRecap.end;
                     }
                   }}
-                  className="kuro-btn-glass absolute bottom-16 right-5 inline-flex min-h-[38px] items-center gap-1.5 rounded-xl px-4 py-2 text-xs font-semibold text-white"
+                  className="kuro-btn-glass absolute bottom-16 right-4 inline-flex min-h-[38px] items-center gap-1.5 rounded-xl px-4 py-2 text-xs font-semibold text-white"
                 >
                   <SkipForward className="h-3.5 w-3.5" />
                   <span>Skip Recap</span>
                 </button>
               )}
 
+            {effectiveFullscreen && (
+              <>
+                <div
+                  onClick={revealFullscreenControls}
+                  className="absolute inset-0 z-10 bg-transparent"
+                  aria-hidden="true"
+                />
+                {fullscreenControlsVisible && (
+                  <div
+                    onClick={(e) => e.stopPropagation()}
+                    className="absolute inset-x-0 bottom-0 z-20 bg-gradient-to-t from-black/85 via-black/45 to-transparent pt-10 pb-[max(1rem,env(safe-area-inset-bottom))] pl-[max(1.25rem,env(safe-area-inset-left))] pr-[max(1.25rem,env(safe-area-inset-right))]"
+                  >
+                    <div className="mx-auto flex max-w-5xl items-center gap-3.5">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          togglePlay();
+                          revealFullscreenControls();
+                        }}
+                        aria-label={isPlaying ? 'Pause' : 'Play'}
+                        className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-white/15 text-white backdrop-blur-md transition hover:bg-white/25"
+                      >
+                        {isPlaying ? <Pause className="h-5 w-5" /> : <Play className="h-5 w-5" />}
+                      </button>
+
+                      <input
+                        type="range"
+                        min={0}
+                        max={duration || 100}
+                        value={currentTime}
+                        onPointerDown={revealFullscreenControls}
+                        onTouchStart={revealFullscreenControls}
+                        onChange={(e) => {
+                          const nextTime = Number(e.target.value);
+                          if (videoRef.current) videoRef.current.currentTime = nextTime;
+                          setCurrentTime(nextTime);
+                          revealFullscreenControls();
+                        }}
+                        aria-label="Seek video progress"
+                        className="h-2 min-w-0 flex-1 cursor-pointer accent-violet-500"
+                      />
+
+                      <button
+                        type="button"
+                        onClick={() => void exitFullscreenMode()}
+                        aria-label="Exit fullscreen"
+                        className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-white/15 text-white backdrop-blur-md transition hover:bg-white/25"
+                      >
+                        <Minimize className="h-5 w-5" />
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
+
             {autoNextCountdown !== null && (
-              <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/75 backdrop-blur-md">
+              <div className="absolute inset-0 z-30 flex flex-col items-center justify-center bg-black/75 backdrop-blur-md">
                 <p className="text-sm font-medium text-slate-300">
                   Up Next in <span className="font-mono text-white">{autoNextCountdown}s</span>
                 </p>
@@ -1459,9 +1615,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         )}
       </div>
 
-      {/* Frosted Glass Controls Bar (HLS/MP4 native player) */}
-      {activeSource && activeSource.type !== 'embed' && !streamError && !mediaError && (
-        <div className="border-t border-white/[0.08] bg-[#090b13]/95 backdrop-blur-xl px-3.5 sm:px-4 py-3">
+      {/* Frosted Glass Controls Bar (HLS/MP4 native player — hidden in fullscreen) */}
+      {!effectiveFullscreen && activeSource && activeSource.type !== 'embed' && !streamError && !mediaError && (
+        <div className="border-t border-white/[0.08] bg-[#090b13]/95 backdrop-blur-xl px-2.5 sm:px-4 py-2 sm:py-2.5">
           <input
             type="range"
             min={0}
@@ -1473,7 +1629,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               setCurrentTime(nextTime);
             }}
             aria-label="Seek video progress"
-            className="mb-2.5 h-1.5 w-full cursor-pointer accent-violet-500"
+            className="mb-2 h-1.5 w-full cursor-pointer accent-violet-500"
           />
 
           <div className="flex flex-wrap items-center justify-between gap-2.5 sm:gap-3">
@@ -1672,10 +1828,10 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         </div>
       )}
 
-      {/* Embed Player Controls Bar (for AnimeWorld India & iframe sources) */}
-      {activeSource && activeSource.type === 'embed' && !streamError && !mediaError && (
-        <div className="border-t border-white/[0.08] bg-[#090b13]/95 backdrop-blur-xl px-3.5 sm:px-4 py-3">
-          <div className="flex flex-wrap items-center justify-between gap-2.5 sm:gap-3">
+      {/* Embed Player Controls Bar (for AnimeWorld India & iframe sources — hidden in fullscreen) */}
+      {!effectiveFullscreen && activeSource && activeSource.type === 'embed' && !streamError && !mediaError && (
+        <div className="border-t border-white/[0.08] bg-[#090b13]/95 backdrop-blur-xl px-2.5 sm:px-4 py-2 sm:py-2.5">
+          <div className="flex flex-wrap items-center justify-between gap-2 sm:gap-3">
             <div className="flex flex-wrap items-center gap-2 text-xs">
               {streamData?.hasHindiAudio ? (
                 <span className="inline-flex items-center gap-1.5 rounded-xl border border-emerald-500/40 bg-emerald-500/15 px-2.5 py-1 font-semibold text-emerald-300">

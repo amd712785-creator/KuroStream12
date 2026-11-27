@@ -4,6 +4,7 @@ import android.content.Intent;
 import android.content.pm.ActivityInfo;
 import android.graphics.Color;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Message;
 import android.view.View;
@@ -11,6 +12,7 @@ import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowManager;
 import android.webkit.CookieManager;
+import android.webkit.JavascriptInterface;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
@@ -38,7 +40,32 @@ public class MainActivity extends BridgeActivity implements ModifiedMainActivity
     private View customFullscreenView;
     private WebChromeClient.CustomViewCallback customViewCallback;
     private FrameLayout fullscreenContainer;
+    private volatile boolean isWebFullscreen = false;
+    private boolean immersiveActive = false;
     private int originalOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED;
+    private int originalCutoutMode = -1;
+
+    private final class FullscreenJsBridge {
+        @JavascriptInterface
+        public void enterImmersiveFullscreen() {
+            runOnUiThread(() -> {
+                isWebFullscreen = true;
+                applyImmersiveWindowState(true);
+            });
+        }
+
+        @JavascriptInterface
+        public void exitImmersiveFullscreen() {
+            runOnUiThread(() -> {
+                isWebFullscreen = false;
+                if (customFullscreenView != null) {
+                    hideFullscreenCustomView();
+                } else {
+                    applyImmersiveWindowState(false);
+                }
+            });
+        }
+    }
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -59,6 +86,10 @@ public class MainActivity extends BridgeActivity implements ModifiedMainActivity
         if (contentView != null) {
             contentView.setBackgroundColor(Color.parseColor("#08090d"));
             ViewCompat.setOnApplyWindowInsetsListener(contentView, (view, windowInsets) -> {
+                if (isWebFullscreen || customFullscreenView != null) {
+                    view.setPadding(0, 0, 0, 0);
+                    return WindowInsetsCompat.CONSUMED;
+                }
                 Insets barsAndCutout = windowInsets.getInsets(
                         WindowInsetsCompat.Type.systemBars()
                                 | WindowInsetsCompat.Type.displayCutout()
@@ -78,6 +109,7 @@ public class MainActivity extends BridgeActivity implements ModifiedMainActivity
         if (getBridge() != null && getBridge().getWebView() != null) {
             WebView webView = getBridge().getWebView();
             webView.setBackgroundColor(Color.parseColor("#08090d"));
+            webView.addJavascriptInterface(new FullscreenJsBridge(), "KuroAndroidFullscreen");
 
             CookieManager cookieManager = CookieManager.getInstance();
             cookieManager.setAcceptCookie(true);
@@ -171,11 +203,22 @@ public class MainActivity extends BridgeActivity implements ModifiedMainActivity
         getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
             @Override
             public void handleOnBackPressed() {
-                if (customFullscreenView != null) {
-                    hideFullscreenCustomView();
+                WebView webView = getBridge() != null ? getBridge().getWebView() : null;
+                if (customFullscreenView != null || isWebFullscreen) {
+                    isWebFullscreen = false;
+                    if (customFullscreenView != null) {
+                        hideFullscreenCustomView();
+                    } else {
+                        applyImmersiveWindowState(false);
+                    }
+                    if (webView != null) {
+                        webView.evaluateJavascript(
+                                "window.dispatchEvent(new CustomEvent('kurostream:exit-fullscreen'));",
+                                null
+                        );
+                    }
                     return;
                 }
-                WebView webView = getBridge() != null ? getBridge().getWebView() : null;
                 if (webView != null && webView.canGoBack()) {
                     webView.goBack();
                 } else {
@@ -185,6 +228,87 @@ public class MainActivity extends BridgeActivity implements ModifiedMainActivity
                 }
             }
         });
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus && (isWebFullscreen || customFullscreenView != null)) {
+            Window window = getWindow();
+            View decorView = window != null ? window.getDecorView() : null;
+            if (window != null && decorView != null) {
+                WindowInsetsControllerCompat controller =
+                        WindowCompat.getInsetsController(window, decorView);
+                if (controller != null) {
+                    controller.setSystemBarsBehavior(
+                            WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                    );
+                    controller.hide(WindowInsetsCompat.Type.systemBars());
+                }
+            }
+        }
+    }
+
+    private void applyImmersiveWindowState(boolean immersive) {
+        Window window = getWindow();
+        View decorView = window != null ? window.getDecorView() : null;
+        View contentView = findViewById(android.R.id.content);
+
+        if (immersive) {
+            if (!immersiveActive) {
+                immersiveActive = true;
+                originalOrientation = getRequestedOrientation();
+                if (window != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    WindowManager.LayoutParams lp = window.getAttributes();
+                    originalCutoutMode = lp.layoutInDisplayCutoutMode;
+                    lp.layoutInDisplayCutoutMode =
+                            WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+                    window.setAttributes(lp);
+                }
+            }
+            if (contentView != null) {
+                contentView.setPadding(0, 0, 0, 0);
+                contentView.setBackgroundColor(Color.BLACK);
+            }
+            if (window != null) {
+                window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                if (decorView != null) {
+                    WindowInsetsControllerCompat controller =
+                            WindowCompat.getInsetsController(window, decorView);
+                    if (controller != null) {
+                        controller.setSystemBarsBehavior(
+                                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                        );
+                        controller.hide(WindowInsetsCompat.Type.systemBars());
+                    }
+                }
+            }
+            setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
+        } else {
+            immersiveActive = false;
+            if (window != null) {
+                window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && originalCutoutMode != -1) {
+                    WindowManager.LayoutParams lp = window.getAttributes();
+                    lp.layoutInDisplayCutoutMode = originalCutoutMode;
+                    window.setAttributes(lp);
+                    originalCutoutMode = -1;
+                }
+                if (decorView != null) {
+                    WindowInsetsControllerCompat controller =
+                            WindowCompat.getInsetsController(window, decorView);
+                    if (controller != null) {
+                        controller.setSystemBarsBehavior(WindowInsetsControllerCompat.BEHAVIOR_DEFAULT);
+                        controller.show(WindowInsetsCompat.Type.systemBars());
+                    }
+                }
+            }
+            if (contentView != null) {
+                contentView.setBackgroundColor(Color.parseColor("#08090d"));
+                ViewCompat.requestApplyInsets(contentView);
+            }
+            setRequestedOrientation(originalOrientation);
+        }
     }
 
     private void showFullscreenCustomView(View view, WebChromeClient.CustomViewCallback callback) {
@@ -211,7 +335,6 @@ public class MainActivity extends BridgeActivity implements ModifiedMainActivity
             return;
         }
 
-        originalOrientation = getRequestedOrientation();
         customFullscreenView = view;
         customViewCallback = callback;
 
@@ -235,15 +358,7 @@ public class MainActivity extends BridgeActivity implements ModifiedMainActivity
                 )
         );
 
-        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-        WindowInsetsControllerCompat controller = WindowCompat.getInsetsController(window, decorView);
-        if (controller != null) {
-            controller.setSystemBarsBehavior(
-                    WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-            );
-            controller.hide(WindowInsetsCompat.Type.systemBars());
-        }
-        setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
+        applyImmersiveWindowState(true);
     }
 
     private void hideFullscreenCustomView() {
@@ -269,18 +384,9 @@ public class MainActivity extends BridgeActivity implements ModifiedMainActivity
             }
         }
 
-        if (window != null) {
-            window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-            if (decorView != null) {
-                WindowInsetsControllerCompat controller =
-                        WindowCompat.getInsetsController(window, decorView);
-                if (controller != null) {
-                    controller.setSystemBarsBehavior(WindowInsetsControllerCompat.BEHAVIOR_DEFAULT);
-                    controller.show(WindowInsetsCompat.Type.systemBars());
-                }
-            }
+        if (!isWebFullscreen) {
+            applyImmersiveWindowState(false);
         }
-        setRequestedOrientation(originalOrientation);
     }
 
     @Override

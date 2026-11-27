@@ -1067,3 +1067,10 @@
   text-shadow: 0 0 18px rgba(168, 85, 247, 0.3);
 }
 
+html.kuro-immersive-fullscreen,
+body.kuro-immersive-fullscreen {
+  overflow: hidden !important;
+  background-color: #000000 !important;
+  overscroll-behavior: none !important;
+}
+

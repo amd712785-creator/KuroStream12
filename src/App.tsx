@@ -16,6 +16,7 @@ import { NotificationProvider } from '@/src/context/NotificationContext';
 import { ServerProvider } from '@/src/context/ServerContext';
 import { DynamicLoadingScreen } from '@/src/components/DynamicLoadingScreen';
 import { resolveLoadingArtworkForPath } from '@/src/services/dynamicLoadingService';
+import { useAppFullscreen } from '@/src/services/fullscreenBridge';
 import { HomePage } from '@/src/pages/HomePage';
 import {
   recordSiteVisit,
@@ -209,6 +210,7 @@ function AnimatedRoutes() {
 
 function AppShell() {
   const { user, authReady, showLoginVpnNotice, dismissLoginVpnNotice } = useAuth();
+  const appFullscreen = useAppFullscreen();
   const navigate = useNavigate();
   const wasUnauthenticatedRef = useRef(false);
 
@@ -242,18 +244,30 @@ function AppShell() {
   }
 
   return (
-    <div className="relative flex min-h-screen flex-col overflow-x-clip bg-[var(--theme-bg,#07080d)] text-slate-100">
+    <div
+      className={`relative flex min-h-screen flex-col overflow-x-clip text-slate-100 ${
+        appFullscreen ? 'bg-black' : 'bg-[var(--theme-bg,#07080d)]'
+      }`}
+    >
       {/* Subtle ambient violet aura behind viewport */}
-      <div
-        aria-hidden="true"
-        className="pointer-events-none fixed inset-x-0 -top-40 h-96 bg-[radial-gradient(ellipse_at_top,rgba(124,58,237,0.16),transparent_65%)]"
-      />
-      <Navbar />
-      <main className="relative z-10 flex-1 pb-[calc(6rem+env(safe-area-inset-bottom))]">
+      {!appFullscreen && (
+        <div
+          aria-hidden="true"
+          className="pointer-events-none fixed inset-x-0 -top-40 h-96 bg-[radial-gradient(ellipse_at_top,rgba(124,58,237,0.16),transparent_65%)]"
+        />
+      )}
+      {!appFullscreen && <Navbar />}
+      <main
+        className={`flex-1 ${
+          appFullscreen
+            ? 'p-0'
+            : 'relative pb-[calc(5.25rem+env(safe-area-inset-bottom))] md:pb-8'
+        }`}
+      >
         <AnimatedRoutes />
       </main>
-      <Footer />
-      <MobileBottomNav />
+      {!appFullscreen && <Footer />}
+      {!appFullscreen && <MobileBottomNav />}
       <AuthModal />
       <AppUpdateModal />
       <LevelUpModal />

@@ -26,6 +26,12 @@ import {
 import { isNativeCapacitorRuntime } from '@/src/config/env';
 import { getOfflinePlaybackHandle, type DownloadItem } from '@/src/services/downloadService';
 import {
+  enterNativeAndroidImmersive,
+  exitNativeAndroidImmersive,
+  notifyAppFullscreen,
+  subscribeNativeExitFullscreen,
+} from '@/src/services/fullscreenBridge';
+import {
   getOfflinePlaybackPosition,
   readBinaryChunk,
   saveOfflinePlaybackPosition,
@@ -214,6 +220,9 @@ export const OfflinePlayerModal: React.FC<OfflinePlayerModalProps> = ({ item, on
   const [duration, setDuration] = useState(0);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [cssFullscreen, setCssFullscreen] = useState(false);
+  const [fullscreenControlsVisible, setFullscreenControlsVisible] = useState(false);
+  const hideControlsTimerRef = useRef<number | null>(null);
+  const reportedFullscreenRef = useRef(false);
 
   const effectiveFullscreen = isFullscreen || cssFullscreen;
 
@@ -225,18 +234,51 @@ export const OfflinePlayerModal: React.FC<OfflinePlayerModalProps> = ({ item, on
     [item]
   );
 
+  const clearHideControlsTimer = useCallback(() => {
+    if (hideControlsTimerRef.current !== null) {
+      window.clearTimeout(hideControlsTimerRef.current);
+      hideControlsTimerRef.current = null;
+    }
+  }, []);
+
+  const revealFullscreenControls = useCallback(() => {
+    setFullscreenControlsVisible(true);
+    clearHideControlsTimer();
+    hideControlsTimerRef.current = window.setTimeout(() => {
+      setFullscreenControlsVisible(false);
+      hideControlsTimerRef.current = null;
+    }, 3000);
+  }, [clearHideControlsTimer]);
+
+  const exitFullscreenMode = useCallback(async () => {
+    clearHideControlsTimer();
+    setFullscreenControlsVisible(false);
+    setCssFullscreen(false);
+
+    const doc = document as Document & {
+      webkitFullscreenElement?: Element | null;
+      webkitExitFullscreen?: () => Promise<void> | void;
+    };
+    try {
+      if (document.fullscreenElement && document.exitFullscreen) {
+        await document.exitFullscreen();
+      } else if (doc.webkitFullscreenElement && doc.webkitExitFullscreen) {
+        await doc.webkitExitFullscreen();
+      }
+    } catch {
+      // ignore exit errors
+    }
+    await exitNativeAndroidImmersive();
+  }, [clearHideControlsTimer]);
+
   const handleClose = useCallback(() => {
     const video = videoRef.current;
     if (video && item) {
       persistPosition(video.currentTime || 0, video.duration || 0);
     }
-    try {
-      (screen.orientation as ScreenOrientation & { unlock?: () => void })?.unlock?.();
-    } catch {
-      // ignore
-    }
+    void exitFullscreenMode();
     onClose();
-  }, [item, onClose, persistPosition]);
+  }, [item, onClose, persistPosition, exitFullscreenMode]);
 
   useEffect(() => {
     if (!item) return;
@@ -364,23 +406,19 @@ export const OfflinePlayerModal: React.FC<OfflinePlayerModalProps> = ({ item, on
     const el = containerRef.current as
       | (HTMLDivElement & { webkitRequestFullscreen?: () => Promise<void> | void })
       | null;
-    const video = videoRef.current as
-      | (HTMLVideoElement & { webkitEnterFullscreen?: () => void })
-      | null;
     if (!el) return;
     const doc = document as Document & {
       webkitFullscreenElement?: Element | null;
-      webkitExitFullscreen?: () => Promise<void> | void;
     };
-    const orientationApi = screen.orientation as
-      | (ScreenOrientation & { lock?: (orientation: string) => Promise<void>; unlock?: () => void })
-      | undefined;
 
     const currentlyFs = Boolean(
       document.fullscreenElement || doc.webkitFullscreenElement || cssFullscreen
     );
 
     if (!currentlyFs) {
+      clearHideControlsTimer();
+      setFullscreenControlsVisible(false);
+
       let entered = false;
       try {
         if (el.requestFullscreen) {
@@ -393,44 +431,53 @@ export const OfflinePlayerModal: React.FC<OfflinePlayerModalProps> = ({ item, on
       } catch {
         entered = false;
       }
-      if (!entered && video?.webkitEnterFullscreen) {
-        try {
-          video.webkitEnterFullscreen();
-          entered = true;
-        } catch {
-          entered = false;
-        }
-      }
       if (!entered) setCssFullscreen(true);
-      try {
-        await orientationApi?.lock?.('landscape');
-      } catch {
-        // ignore orientation lock restrictions
-      }
+      await enterNativeAndroidImmersive();
     } else {
-      setCssFullscreen(false);
-      try {
-        if (document.fullscreenElement && document.exitFullscreen) {
-          await document.exitFullscreen();
-        } else if (doc.webkitFullscreenElement && doc.webkitExitFullscreen) {
-          await doc.webkitExitFullscreen();
-        }
-      } catch {
-        // ignore
-      }
-      try {
-        orientationApi?.unlock?.();
-      } catch {
-        // ignore
-      }
+      await exitFullscreenMode();
     }
-  }, [cssFullscreen]);
+  }, [cssFullscreen, clearHideControlsTimer, exitFullscreenMode]);
+
+  useEffect(() => {
+    if (effectiveFullscreen && !reportedFullscreenRef.current) {
+      reportedFullscreenRef.current = true;
+      notifyAppFullscreen(true);
+    } else if (!effectiveFullscreen && reportedFullscreenRef.current) {
+      reportedFullscreenRef.current = false;
+      notifyAppFullscreen(false);
+    }
+  }, [effectiveFullscreen]);
+
+  useEffect(() => {
+    return () => {
+      clearHideControlsTimer();
+      if (reportedFullscreenRef.current) {
+        reportedFullscreenRef.current = false;
+        notifyAppFullscreen(false);
+        void exitNativeAndroidImmersive();
+      }
+    };
+  }, [clearHideControlsTimer]);
+
+  useEffect(() => {
+    return subscribeNativeExitFullscreen(() => {
+      if (effectiveFullscreen) {
+        void exitFullscreenMode();
+      }
+    });
+  }, [effectiveFullscreen, exitFullscreenMode]);
 
   useEffect(() => {
     const doc = document as Document & { webkitFullscreenElement?: Element | null };
     const onFsChange = () => {
       const active = Boolean(document.fullscreenElement || doc.webkitFullscreenElement);
       setIsFullscreen(active);
+      if (!active) {
+        clearHideControlsTimer();
+        setFullscreenControlsVisible(false);
+        setCssFullscreen(false);
+        void exitNativeAndroidImmersive();
+      }
     };
     document.addEventListener('fullscreenchange', onFsChange);
     document.addEventListener('webkitfullscreenchange', onFsChange);
@@ -438,7 +485,7 @@ export const OfflinePlayerModal: React.FC<OfflinePlayerModalProps> = ({ item, on
       document.removeEventListener('fullscreenchange', onFsChange);
       document.removeEventListener('webkitfullscreenchange', onFsChange);
     };
-  }, []);
+  }, [clearHideControlsTimer]);
 
   useEffect(() => {
     if (!item) return;
@@ -447,20 +494,28 @@ export const OfflinePlayerModal: React.FC<OfflinePlayerModalProps> = ({ item, on
       if (target && ['INPUT', 'SELECT', 'TEXTAREA'].includes(target.tagName)) return;
       switch (e.key.toLowerCase()) {
         case 'escape':
-          if (!effectiveFullscreen) handleClose();
+          e.preventDefault();
+          if (effectiveFullscreen) {
+            void exitFullscreenMode();
+          } else {
+            handleClose();
+          }
           break;
         case ' ':
         case 'k':
           e.preventDefault();
           togglePlay();
+          if (effectiveFullscreen) revealFullscreenControls();
           break;
         case 'arrowleft':
           e.preventDefault();
           seekBy(-10);
+          if (effectiveFullscreen) revealFullscreenControls();
           break;
         case 'arrowright':
           e.preventDefault();
           seekBy(10);
+          if (effectiveFullscreen) revealFullscreenControls();
           break;
         case 'f':
           e.preventDefault();
@@ -477,7 +532,16 @@ export const OfflinePlayerModal: React.FC<OfflinePlayerModalProps> = ({ item, on
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [item, effectiveFullscreen, handleClose, togglePlay, seekBy, toggleFullscreen]);
+  }, [
+    item,
+    effectiveFullscreen,
+    handleClose,
+    exitFullscreenMode,
+    revealFullscreenControls,
+    togglePlay,
+    seekBy,
+    toggleFullscreen,
+  ]);
 
   if (!item) return null;
 
@@ -486,53 +550,69 @@ export const OfflinePlayerModal: React.FC<OfflinePlayerModalProps> = ({ item, on
       role="dialog"
       aria-modal="true"
       aria-label={`Offline Player — ${item.animeTitle}`}
-      className="fixed inset-0 z-[70] flex items-center justify-center bg-black/90 p-2 sm:p-4 backdrop-blur-xl"
+      className={`fixed inset-0 z-[70] flex items-center justify-center ${
+        effectiveFullscreen ? 'bg-black p-0' : 'bg-black/90 p-2 sm:p-4 backdrop-blur-xl'
+      }`}
     >
       <div
         ref={containerRef}
         className={`flex w-full flex-col overflow-hidden bg-[#06070d] shadow-2xl ${
           cssFullscreen
-            ? 'fixed inset-0 z-[9999] h-screen w-screen rounded-none border-0'
+            ? 'fixed inset-0 z-[9999] h-[100dvh] w-[100vw] rounded-none border-0 bg-black'
             : isFullscreen
-              ? 'h-full w-full rounded-none border-0'
-              : 'max-w-5xl rounded-3xl border border-white/[0.12]'
+              ? 'h-full w-full rounded-none border-0 bg-black'
+              : 'max-w-5xl rounded-2xl sm:rounded-3xl border border-white/[0.12]'
         }`}
       >
-        {/* Top Bar */}
-        <div className="flex items-center justify-between gap-3 border-b border-white/[0.08] bg-[#0a0c15]/95 px-4 py-3">
-          <div className="flex min-w-0 items-center gap-3">
-            <span className="inline-flex shrink-0 items-center gap-1.5 rounded-xl border border-emerald-400/35 bg-emerald-500/15 px-2.5 py-1 text-[11px] font-bold text-emerald-300">
-              <WifiOff className="h-3.5 w-3.5" />
-              <span>Offline Mode</span>
-            </span>
-            <div className="min-w-0">
-              <h2 className="truncate text-sm font-bold text-white">
-                {item.animeTitle} — EP {item.episodeNumber}
-              </h2>
-              <p className="truncate text-xs text-slate-400">
-                {item.episodeTitle} · {item.format.toUpperCase()} · {item.audioMode.toUpperCase()}
-                {item.serverName ? ` · ${item.serverName}` : ''}
-              </p>
+        {/* Top Bar (hidden in fullscreen) */}
+        {!effectiveFullscreen && (
+          <div className="flex items-center justify-between gap-3 border-b border-white/[0.08] bg-[#0a0c15]/95 px-3.5 sm:px-4 py-2.5 sm:py-3">
+            <div className="flex min-w-0 items-center gap-3">
+              <span className="inline-flex shrink-0 items-center gap-1.5 rounded-xl border border-emerald-400/35 bg-emerald-500/15 px-2.5 py-1 text-[11px] font-bold text-emerald-300">
+                <WifiOff className="h-3.5 w-3.5" />
+                <span>Offline Mode</span>
+              </span>
+              <div className="min-w-0">
+                <h2 className="truncate text-sm font-bold text-white">
+                  {item.animeTitle} — EP {item.episodeNumber}
+                </h2>
+                <p className="truncate text-xs text-slate-400">
+                  {item.episodeTitle} · {item.format.toUpperCase()} · {item.audioMode.toUpperCase()}
+                  {item.serverName ? ` · ${item.serverName}` : ''}
+                </p>
+              </div>
             </div>
-          </div>
 
-          <button
-            type="button"
-            onClick={handleClose}
-            aria-label="Close offline player"
-            className="kuro-btn-glass flex h-11 w-11 shrink-0 items-center justify-center rounded-xl"
-          >
-            <X className="h-5 w-5" />
-          </button>
-        </div>
+            <button
+              type="button"
+              onClick={handleClose}
+              aria-label="Close offline player"
+              className="kuro-btn-glass flex h-10 w-10 shrink-0 items-center justify-center rounded-xl"
+            >
+              <X className="h-5 w-5" />
+            </button>
+          </div>
+        )}
 
         {/* Video Surface */}
-        <div className={`relative w-full bg-black ${effectiveFullscreen ? 'flex-1 min-h-0' : 'aspect-video'}`}>
+        <div
+          className={`relative w-full bg-black ${
+            effectiveFullscreen
+              ? 'h-full w-full flex-1 min-h-0'
+              : 'aspect-video [@media(max-height:540px)]:max-h-[calc(100dvh-10.5rem)]'
+          }`}
+        >
           <video
             ref={videoRef}
             playsInline
             preload="auto"
-            onClick={togglePlay}
+            onClick={() => {
+              if (effectiveFullscreen) {
+                revealFullscreenControls();
+              } else {
+                togglePlay();
+              }
+            }}
             onPlay={() => setIsPlaying(true)}
             onPlaying={() => {
               setIsPlaying(true);
@@ -582,8 +662,64 @@ export const OfflinePlayerModal: React.FC<OfflinePlayerModalProps> = ({ item, on
             </div>
           )}
 
+          {effectiveFullscreen && !error && (
+            <>
+              <div
+                onClick={revealFullscreenControls}
+                className="absolute inset-0 z-10 bg-transparent"
+                aria-hidden="true"
+              />
+              {fullscreenControlsVisible && (
+                <div
+                  onClick={(e) => e.stopPropagation()}
+                  className="absolute inset-x-0 bottom-0 z-20 bg-gradient-to-t from-black/85 via-black/45 to-transparent pt-10 pb-[max(1rem,env(safe-area-inset-bottom))] pl-[max(1.25rem,env(safe-area-inset-left))] pr-[max(1.25rem,env(safe-area-inset-right))]"
+                >
+                  <div className="mx-auto flex max-w-5xl items-center gap-3.5">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        togglePlay();
+                        revealFullscreenControls();
+                      }}
+                      aria-label={isPlaying ? 'Pause' : 'Play'}
+                      className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-white/15 text-white backdrop-blur-md transition hover:bg-white/25"
+                    >
+                      {isPlaying ? <Pause className="h-5 w-5" /> : <Play className="h-5 w-5" />}
+                    </button>
+
+                    <input
+                      type="range"
+                      min={0}
+                      max={duration || 100}
+                      value={currentTime}
+                      onPointerDown={revealFullscreenControls}
+                      onTouchStart={revealFullscreenControls}
+                      onChange={(e) => {
+                        const next = Number(e.target.value);
+                        if (videoRef.current) videoRef.current.currentTime = next;
+                        setCurrentTime(next);
+                        revealFullscreenControls();
+                      }}
+                      aria-label="Seek offline video"
+                      className="h-2 min-w-0 flex-1 cursor-pointer accent-violet-500"
+                    />
+
+                    <button
+                      type="button"
+                      onClick={() => void exitFullscreenMode()}
+                      aria-label="Exit fullscreen"
+                      className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-white/15 text-white backdrop-blur-md transition hover:bg-white/25"
+                    >
+                      <Minimize className="h-5 w-5" />
+                    </button>
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+
           {error && (
-            <div className="absolute inset-0 flex flex-col items-center justify-center bg-[#090b13]/95 p-6 text-center">
+            <div className="absolute inset-0 z-30 flex flex-col items-center justify-center bg-[#090b13]/95 p-6 text-center">
               <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-rose-500/35 bg-rose-500/15 text-rose-400">
                 <AlertTriangle className="h-6 w-6" />
               </div>
@@ -600,9 +736,9 @@ export const OfflinePlayerModal: React.FC<OfflinePlayerModalProps> = ({ item, on
           )}
         </div>
 
-        {/* Bottom Controls */}
-        {!error && (
-          <div className="border-t border-white/[0.08] bg-[#0a0c15]/95 px-3.5 sm:px-5 py-3">
+        {/* Bottom Controls (hidden in fullscreen) */}
+        {!effectiveFullscreen && !error && (
+          <div className="border-t border-white/[0.08] bg-[#0a0c15]/95 px-3 sm:px-5 py-2.5 sm:py-3">
             <input
               type="range"
               min={0}

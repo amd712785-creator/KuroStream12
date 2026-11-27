@@ -30,12 +30,14 @@ import { useNotifications } from '@/src/context/NotificationContext';
 import { useServer } from '@/src/context/ServerContext';
 import { getDisplayTitle, searchAnime } from '@/src/services/anilistApi';
 import { searchAnimeWorld } from '@/src/services/animeWorldApi';
+import { useAppFullscreen } from '@/src/services/fullscreenBridge';
 import type { AnimeSummary, AnimeWorldItem } from '@/src/types/anime';
 
 export const Navbar: React.FC = () => {
   const { user, preferences, openAuthModal, signOut } = useAuth();
   const { unreadCount } = useNotifications();
   const { isAnimeWorld } = useServer();
+  const appFullscreen = useAppFullscreen();
   const navigate = useNavigate();
 
   const [query, setQuery] = useState('');
@@ -128,6 +130,8 @@ export const Navbar: React.FC = () => {
 
   const hasCustomAvatar =
     Boolean(preferences.photoURL) && preferences.photoURL !== ASSETS.defaultAvatar;
+
+  if (appFullscreen) return null;
 
   return (
     <header

@@ -19,6 +19,7 @@ import { DownloadManagerModal } from '@/src/components/DownloadManagerModal';
 import { OfflinePlayerModal } from '@/src/components/OfflinePlayerModal';
 import { VideoPlayer } from '@/src/components/VideoPlayer';
 import { useWatchSessionHeartbeat } from '@/src/hooks/useWatchSessionHeartbeat';
+import { useAppFullscreen } from '@/src/services/fullscreenBridge';
 import { isNativeCapacitorRuntime, resolveApiUrl } from '@/src/config/env';
 import { useAuth } from '@/src/context/AuthContext';
 import {
@@ -405,37 +406,50 @@ export const AnimeWorldWatchPage: React.FC = () => {
   const backTarget = seriesIdParam
     ? `/animeworld-india/series/${encodeURIComponent(seriesIdParam)}`
     : '/animeworld-india';
+  const appFullscreen = useAppFullscreen();
 
   return (
-    <div className="mx-auto max-w-7xl px-4 py-5 sm:px-6 sm:py-6">
-      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-        <Link
-          to={backTarget}
-          className="kuro-btn-glass inline-flex min-h-[40px] items-center gap-2 rounded-xl px-3.5 py-1.5 text-sm font-semibold"
-        >
-          <ArrowLeft className="h-4 w-4" />
-          <span className="truncate max-w-[220px] sm:max-w-md">
-            {seriesTitle || 'AnimeWorld India'}
-          </span>
-        </Link>
+    <div
+      className={
+        appFullscreen
+          ? 'w-full p-0'
+          : 'mx-auto max-w-7xl px-2.5 pt-2 pb-4 sm:px-6 sm:pt-3 sm:pb-6'
+      }
+    >
+      {!appFullscreen && (
+        <div className="mb-2 sm:mb-3 flex flex-wrap items-center justify-between gap-2">
+          <Link
+            to={backTarget}
+            className="kuro-btn-glass inline-flex min-h-[34px] sm:min-h-[38px] items-center gap-1.5 rounded-xl px-2.5 sm:px-3.5 py-1 text-xs sm:text-sm font-semibold"
+          >
+            <ArrowLeft className="h-3.5 w-3.5 sm:h-4 sm:w-4" />
+            <span className="truncate max-w-[200px] sm:max-w-md">
+              {seriesTitle || 'AnimeWorld India'}
+            </span>
+          </Link>
 
-        <div className="flex items-center gap-2">
-          <span className="inline-flex items-center gap-1.5 rounded-xl border border-amber-400/30 bg-amber-500/10 px-3 py-1.5 text-xs font-semibold text-amber-200">
-            <Server className="h-3.5 w-3.5" />
-            <span>AnimeWorld India</span>
-          </span>
+          <div className="flex items-center gap-2">
+            <span className="inline-flex items-center gap-1.5 rounded-xl border border-amber-400/30 bg-amber-500/10 px-2.5 py-1 text-xs font-semibold text-amber-200">
+              <Server className="h-3.5 w-3.5" />
+              <span>AnimeWorld India</span>
+            </span>
+          </div>
         </div>
-      </div>
+      )}
 
       <div
-        className={`grid grid-cols-1 gap-6 ${
-          !isMovie && (episodes.length > 0 || seasons.length > 0)
-            ? 'lg:grid-cols-[1fr_340px]'
-            : ''
-        }`}
+        className={
+          appFullscreen
+            ? 'w-full'
+            : `grid grid-cols-1 gap-3.5 sm:gap-5 ${
+                !isMovie && (episodes.length > 0 || seasons.length > 0)
+                  ? 'lg:grid-cols-[1fr_340px]'
+                  : ''
+              }`
+        }
       >
         {/* Main Player Column */}
-        <div className="space-y-4 sm:space-y-5 min-w-0">
+        <div className={appFullscreen ? 'w-full' : 'space-y-3 sm:space-y-4 min-w-0'}>
           <VideoPlayer
             streamData={streamData}
             streamError={streamError}
